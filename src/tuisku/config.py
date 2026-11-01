@@ -6,6 +6,7 @@ The database URL is a secret: it is held as ``SecretStr`` so it never appears in
 
 from __future__ import annotations
 
+import re
 from typing import Self
 from urllib.parse import urlsplit
 
@@ -13,6 +14,8 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ALLOWED_SCHEMES = frozenset({"postgresql", "postgres"})
+# A plain, unquoted Postgres role name: it is interpolated into GRANT statements.
+_ROLE_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
 
 class ConfigError(RuntimeError):
@@ -40,6 +43,23 @@ class Settings(BaseSettings):
     # Postgres lock_timeout for migration DDL, so a blocked ALTER fails fast
     # instead of queueing every other query on the table behind it.
     migration_ddl_lock_timeout_seconds: float = Field(default=30.0, gt=0)
+    # Role the API and worker connect as (ADR 0004). When set, `tuisku migrate` grants it
+    # SELECT, INSERT on evidence tables and full DML on working tables. Unset: no grants
+    # (single-role development setups).
+    app_role: str | None = None
+
+    # Ingest limits (ADR 0005), enforced at the HTTP boundary.
+    ingest_max_body_bytes: int = Field(default=5 * 1024 * 1024, ge=1)
+    ingest_max_lines: int = Field(default=5000, ge=1)
+    ingest_max_line_bytes: int = Field(default=256 * 1024, ge=1)
+    ingest_max_collector_bytes: int = Field(default=4096, ge=2)
+    # Per-source token bucket, in records per second. In-process: each API replica keeps
+    # its own buckets, so the effective limit is replicas x rate.
+    ingest_rate_per_second: float = Field(default=1000.0, gt=0)
+    ingest_rate_burst: float = Field(default=10000.0, ge=1)
+    # An event_time further than this in the future of received_at is flagged clock_skew
+    # and evaluated at received_at (ADR 0004 section 6).
+    clock_skew_tolerance_seconds: float = Field(default=300.0, ge=0)
 
     @field_validator("database_url")
     @classmethod
@@ -51,6 +71,15 @@ class Settings(BaseSettings):
         if scheme not in _ALLOWED_SCHEMES:
             # Never echo the value: it may carry a password.
             raise ValueError("must be a postgresql:// URL")
+        return value
+
+    @field_validator("app_role")
+    @classmethod
+    def _check_app_role(cls, value: str | None) -> str | None:
+        if value is None or value == "":
+            return None
+        if not _ROLE_NAME.fullmatch(value):
+            raise ValueError("must be a lowercase Postgres role name ([a-z_][a-z0-9_]*)")
         return value
 
     @model_validator(mode="after")

@@ -22,3 +22,56 @@ TUISKU_TEST_DATABASE_URL=$TUISKU_DATABASE_URL uv run pytest -q -ra
 
 See [AGENTS.md](AGENTS.md) for repository rules and `docs/adr/` for architecture
 decisions.
+
+## Sources, tokens and ingest
+
+```sh
+uv run tuisku source add edge-suricata --adapter suricata   # prints a tsk_src_ token once
+uv run tuisku source token add edge-suricata --label rotation-2027
+uv run tuisku source token list edge-suricata              # uids and dates, never secrets
+uv run tuisku source token revoke edge-suricata <token-uid>
+uv run tuisku source disable edge-suricata
+uv run tuisku operator-token add --name oncall --role read  # prints a tsk_op_ token once
+uv run tuisku operator-token add --name lead --role approve --person "A. Person"
+```
+
+Only the SHA-256 of a token is stored; copy it when it is printed. Adapter options are
+`--option key=value` (string) or `--option-json key=<json>`.
+
+Shippers post NDJSON envelopes (`{"raw": "<line>", "collector": {...}}`) to
+`POST /v1/sources/{source}/records`, or OTLP/HTTP JSON metrics (uncompressed; set the
+collector's `compression: none`) to `POST /v1/sources/{source}/otlp/v1/metrics`, with
+`Authorization: Bearer tsk_src_...`. Limits (ADR 0005) are settings: `TUISKU_INGEST_MAX_BODY_BYTES`
+(5 MiB), `TUISKU_INGEST_MAX_LINES` (5000), `TUISKU_INGEST_MAX_LINE_BYTES` (256 KiB),
+`TUISKU_INGEST_MAX_COLLECTOR_BYTES` (4 KiB). Every breach is also recorded as a
+`tuisku.meta.*` detection.
+
+The per-source rate limit (`TUISKU_INGEST_RATE_PER_SECOND`, `TUISKU_INGEST_RATE_BURST`) is a
+token bucket held **in each API replica's memory**: with N replicas a source can send up to
+N times the configured rate. An exhausted bucket answers 429 with `Retry-After`.
+
+Operator tokens with the `read` role (or `triage`/`admin`) can read evidence:
+`GET /v1/observations`, `GET /v1/detections` (filters `kind`, `source`, `entity_key`, `since`,
+`until`; newest first, `limit` up to 500, next page with `before=<next_before>`) and
+`GET /v1/raw/{uid}` (metadata and the body as base64).
+
+## Database roles
+
+Evidence tables are append-only (ADR 0004). Run `tuisku migrate` as the owning role and the
+API as a separate, non-owning app role, named by `TUISKU_APP_ROLE` when migrating:
+
+```sh
+# as a superuser, once:  CREATE ROLE tuisku_app LOGIN PASSWORD '...';
+TUISKU_APP_ROLE=tuisku_app TUISKU_DATABASE_URL=<owner url> uv run tuisku migrate
+TUISKU_DATABASE_URL=<tuisku_app url> uv run tuisku api
+```
+
+With `TUISKU_APP_ROLE` set, migrations grant it `SELECT, INSERT` on evidence tables
+(`raw_records`, `raw_duplicates`, `parse_attempts`, `observations`, `detections`,
+`detection_observations`, `detection_evidence`), `SELECT, INSERT, UPDATE, DELETE` on working
+tables (`sources`, `source_tokens`, `operator_tokens`, `evaluation_queue`,
+`evaluation_dead_letter`) and `USAGE` on sequences. Grants are made by the revision that
+creates each table, so set the variable before the first `tuisku migrate`; for an existing
+database, run the same `GRANT` statements by hand. Left unset, no grants are made: a single
+role does everything, which suits local development only. Independently of roles, triggers
+reject `UPDATE`, `DELETE` and `TRUNCATE` on evidence tables for every role, owner included.

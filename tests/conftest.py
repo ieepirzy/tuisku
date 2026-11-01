@@ -12,6 +12,7 @@ import os
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -114,3 +115,39 @@ def empty_database_url(admin_database_url: str) -> Iterator[str]:
     """A fresh, unmigrated database for one test."""
     with _temporary_database(admin_database_url) as url:
         yield url
+
+
+@dataclass(frozen=True)
+class AppDatabase:
+    """A database migrated by the owner role with TUISKU_APP_ROLE set (ADR 0004 roles)."""
+
+    owner_url: str  # the migrating role: owns the tables
+    app_url: str  # connects as the app role: SELECT/INSERT on evidence tables only
+    app_role: str
+
+
+def _with_user(url: str, user: str, password: str) -> str:
+    parts = urlsplit(url)
+    host = parts.hostname or "localhost"
+    netloc = f"{user}:{password}@{host}" + (f":{parts.port}" if parts.port else "")
+    return urlunsplit(parts._replace(netloc=netloc))
+
+
+@pytest.fixture(scope="session")
+def app_db(admin_database_url: str) -> Iterator[AppDatabase]:
+    """A test-only login role (cluster-wide, so uniquely named and dropped afterwards)."""
+    role = f"tuisku_app_test_{uuid.uuid4().hex[:8]}"
+    password = uuid.uuid4().hex  # throwaway, for this test session only
+    with psycopg.connect(admin_database_url, autocommit=True) as admin:
+        admin.execute(
+            sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                sql.Identifier(role), sql.Literal(password)
+            )
+        )
+    try:
+        with _temporary_database(admin_database_url) as url:
+            run_migrations(make_settings(url, app_role=role))
+            yield AppDatabase(owner_url=url, app_url=_with_user(url, role, password), app_role=role)
+    finally:
+        with psycopg.connect(admin_database_url, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))

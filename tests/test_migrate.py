@@ -63,7 +63,14 @@ def downgrade() -> None:
 def probe_alembic_ini(tmp_path: Path) -> str:
     """alembic.ini + migrations/ copied to tmp, with one revision that checks the lock."""
     shutil.copy(ALEMBIC_INI, tmp_path / "alembic.ini")
-    shutil.copytree(REPO_ROOT / "migrations", tmp_path / "migrations")
+    # Only the probe revision: the repository's own revisions would form a second head.
+    shutil.copytree(
+        REPO_ROOT / "migrations",
+        tmp_path / "migrations",
+        ignore=lambda d, names: [
+            n for n in names if Path(d).name == "versions" and n.endswith(".py")
+        ],
+    )
     (tmp_path / "migrations" / "versions" / "20260101_0001_probe.py").write_text(PROBE_REVISION)
     return str(tmp_path / "alembic.ini")
 
