@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          # Throwaway credentials for the CI service container only.
+          POSTGRES_USER: tuisku
+          POSTGRES_PASSWORD: tuisku-ci
+          POSTGRES_DB: tuisku
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tuisku -d tuisku"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CI: "true"
+      TUISKU_TEST_DATABASE_URL: postgresql://tuisku:tuisku-ci@localhost:5432/tuisku
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - name: Install dependencies
+        run: uv sync --locked --dev
+      - name: Ruff lint
+        run: uv run ruff check .
+      - name: Ruff format
+        run: uv run ruff format --check .
+      - name: Pyright
+        run: uv run pyright
+      - name: Pytest
+        run: uv run pytest -q -ra
