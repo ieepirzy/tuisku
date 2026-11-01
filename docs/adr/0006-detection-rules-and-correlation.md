@@ -159,9 +159,13 @@ content produced it.
   - Correlation queries count only adapter-derived rows from current attempts, which are
     defined in [0002](0002-epistemic-layers.md), so reprocessing never double-counts.
   - Rows without a parse attempt are always current: Tuisku rule output and meta-detections.
-  - A firing is suppressed when a detection already exists for the same rule, group and
-    overlapping window, *while that detection's finding is still attachable*. Re-evaluation
-    therefore does not page twice.
+  - **Firing after reprocessing.** A firing is suppressed when a detection already exists for
+    the same rule, group and overlapping window, if either of these holds:
+    - that detection's finding is still attachable;
+    - the rows behind the new firing come only from raw records that already contributed to
+      that detection.
+
+    Re-evaluation after reprocessing therefore never pages twice for the same evidence.
 - **Windows.** A row's evaluation time is its `event_time`. It is its `received_at` instead
   when the row is flagged `clock_skew` (future-dated) or has no event time. The correlation
   window is `(t - timespan, t]`.

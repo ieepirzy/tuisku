@@ -59,16 +59,30 @@ login or rate limits for their products, including agents built on the Claude Ag
      the session if it includes anything beyond Tuisku's tools and that allowlist.
    - The declaration is stored in the session's L4 record (`investigator_sessions`). The
      timeline only notes, by id, that a session started.
-   - A session can only be started with a person-bound operator token. The four-eyes rule
-     compares *persons*, not tokens: a person never approves proposals from a session they
-     started.
-   - The tool surface connects to Postgres as a separate `tuisku_investigator` role. That role
-     can `SELECT` what its tier allows and `INSERT` only into L4 tables, so even a bug in the
-     tool surface cannot write L0–L3. The matching timeline events (`hypothesis_added`,
-     `evidence_requested`, `action_proposed`, `session_*`) are written by an `AFTER INSERT`
-     trigger on each L4 table. The trigger is owned by `tuisku_owner` and runs as
-     `SECURITY DEFINER`. It inserts only the L4 row id, the session id and an actor derived from
-     the session row, so the investigator never writes L3 directly.
+   - **Who can start a session.** Only the API, connecting as `tuisku_app`, can create the
+     session row and its `tsk_inv_` token, and it does so only inside `start()`. A session can
+     only be started with a person-bound operator token. That person is recorded as
+     `started_by`, together with the session's tier and incident. Tuisku never starts sessions
+     automatically; automatic starts are a later decision.
+   - **Four-eyes.** The four-eyes rule compares *persons*, not tokens: a person never approves
+     proposals from a session they started.
+   - **The tool surface is a separate process** (`tuisku investigate`). It connects to Postgres
+     as a separate `tuisku_investigator` role, which has no `tuisku_app` credentials.
+     - **Reads:** the role can `SELECT` only what its tier allows.
+     - **Writes:** it can `INSERT` into `hypotheses`, `tool_calls`, `proposed_actions` and
+       `evidence_requests`, and nothing else. It cannot write `investigator_sessions`, and it
+       cannot write L0–L3.
+   - **Timeline events from L4 rows.** The matching timeline events (`hypothesis_added`,
+     `evidence_requested`, `action_proposed`) are written by an `AFTER INSERT` trigger on each L4
+     table. The trigger is owned by `tuisku_owner` and runs as `SECURITY DEFINER`.
+     - It first checks that the referenced session exists, has not ended, and belongs to the
+       same incident.
+     - It also checks that the kind of row is allowed for that session's tier. For example, an
+       `observe` session cannot insert `proposed_actions`.
+     - It then writes only the L4 row id, the session id and an actor taken from the
+       Tuisku-written session row.
+   - **Session binding.** The surface sets the session id from the verified `tsk_inv_` token on
+     each request.
 
    A declaration is only a claim, so the deployment must also enforce it: run the investigator
    runtime with no tools other than Tuisku's MCP server, and deny network egress except to the
@@ -78,8 +92,8 @@ login or rate limits for their products, including agents built on the Claude Ag
    - `continue(session, new_evidence)`
    - `cancel(session)`
 
-   An operator action, or a deployment policy run by the worker, triggers the call. The harness
-   never holds operator tokens. It gets only its session's `tsk_inv_` token.
+   A person-bound operator action triggers the call. The harness never holds operator tokens;
+   it gets only its session's `tsk_inv_` token.
 
    The caller does not pick the session's **tier**. It comes from deployment policy, optionally
    raised for one incident by an `approve`-role operator, and is recorded at session start.

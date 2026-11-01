@@ -89,9 +89,10 @@ Grouping keys are built from attacker-controlled values, so the grouping itself 
   - If the incident is `contained` or `resolved`, it returns to `investigating` with a
     `reopened` event and an **escalation** notification.
   - If the incident is `closed`, a new incident opens and links to the closed one.
-  - **Closing or resolving an incident** sets each of its open findings to `resolved`, with a
-    `finding_events` row. Later activity therefore opens a new finding instead of being absorbed
-    silently. Closing an incident cannot mute detection.
+  - **Closing or resolving an incident** sets every finding of that incident still in an
+    attachable state (`open`, `acknowledged` or `suppressed`) to `resolved`, and records a
+    `finding_events` row for each. Later activity therefore opens a new finding instead of
+    being absorbed silently. Closing an incident cannot mute detection.
 - **Escalation**, defined exactly, is either of two events:
   - the incident's severity increases
   - the incident is reopened

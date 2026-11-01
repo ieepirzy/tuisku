@@ -94,11 +94,14 @@ sensor sees.
   - `admin`: sources, tokens, packs
 - **Approval is separate from triage.** The `approve` role confirms hypotheses and approves
   proposed actions and evidence requests ([0009](0009-agent-runtime-and-authority.md)).
-  - **Issued out of band.** Approve tokens cannot be created through the API, not even by an
-    admin. They are created only by `tuisku approver add --person …`, a command that connects
-    as `tuisku_owner`, the database owner, which the API and worker never use. An admin
-    therefore cannot mint approval authority. Binding persons to an external identity provider
-    (OIDC) is a later step; until then, the person is whoever the database owner records.
+  - **Issued out of band.** Approve tokens and **person-bound operator tokens** cannot be
+    created through the API, not even by an admin. They are created only by
+    `tuisku approver add --person …` and `tuisku operator-token add --person …`. Both commands
+    connect as `tuisku_owner`, the database owner, which the API and worker never use.
+    - API admins can create only tokens without a person.
+    - An admin therefore cannot invent a person to start a session or to approve one.
+    - Binding persons to an external identity provider (OIDC) is a later step. Until then, the
+      person is whoever the database owner records.
   - **Four-eyes.** An approval is refused when the approving person is the person who started
     the investigator session that made the proposal.
   - **Network.** Deployments must keep operator and approve tokens off the network that the

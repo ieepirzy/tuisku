@@ -18,7 +18,8 @@ in the estate's own configuration repository (principle 6 in [0001](0001-service
 
 | Role | Command | Scaling | Notes |
 |---|---|---|---|
-| API | `tuisku api` | 1–N stateless | ingest, read API, later the MCP tool surface |
+| API | `tuisku api` | 1–N stateless | ingest, read API |
+| Investigation surface | `tuisku investigate` (later) | 0–N | the MCP tool surface; its own database role ([0009](0009-agent-runtime-and-authority.md)) |
 | Worker | `tuisku worker` | 1–N | rule evaluation, findings, incidents ([0006](0006-detection-rules-and-correlation.md)) |
 | Migrate | `tuisku migrate` | one-shot Job before rollout | never on API boot |
 
