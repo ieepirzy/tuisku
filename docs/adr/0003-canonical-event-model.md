@@ -33,15 +33,17 @@ Adapters need one target shape. Options considered:
    stored alongside for export.
 4. **Nothing is dropped silently.** Source fields with no OCSF home go to `unmapped`, exactly as
    received. The full original is always in L0.
-5. **Community ID v1** is computed by Tuisku from the 5-tuple (using the reference `communityid`
+5. **Detections** carry the same envelope plus `evaluator`, `authorship`, `identity` and
+   `rule_ref` ([0002](0002-epistemic-layers.md)).
+6. **Community ID v1** is computed by Tuisku from the 5-tuple (using the reference `communityid`
    package, BSD-3) for every flow-bearing observation. If the sensor also reported one and they
    differ, the observation records both and flags the mismatch (usually a seed or config
    difference between sensors). This is the cross-sensor join key between Suricata, Zeek and
    anything else that sees the same flow.
-6. **Sensor-scoped identifiers are scoped.** Suricata `flow_id` and Zeek `uid` are unique only
+7. **Sensor-scoped identifiers are scoped.** Suricata `flow_id` and Zeek `uid` are unique only
    within one sensor process; they are stored as correlation keys qualified by `source_id`,
    never treated as global ids.
-7. **Export formats are mappings, not storage**: OCSF Detection/Incident Finding for SIEM
+8. **Export formats are mappings, not storage**: OCSF Detection/Incident Finding for SIEM
    interop, STIX 2.1 bundles (Observed Data, Indicator, Sighting) for intelligence sharing. They
    are produced on demand from stored rows.
 

@@ -4,49 +4,71 @@ Status: Accepted (2026-11-01)
 
 ## Context
 
-The owner chose Python, FastAPI and Postgres with plain SQL (no ORM) and Alembic migrations. The
-expected deployment gives Tuisku a dedicated Postgres database. Evidence must be immutable;
-incidents are mutable working objects with a history.
+The owner chose Python, FastAPI and Postgres with plain SQL (no ORM) and Alembic migrations.
+The expected deployment gives Tuisku a dedicated Postgres database. Evidence must be immutable,
+and that has to hold even against a compromised application process. Incidents, by contrast,
+are mutable working objects that keep a history.
 
 ## Decision
 
 1. **Postgres 16, accessed with psycopg 3** (async pool) and hand-written SQL. No ORM. Alembic
-   manages migrations with raw `op.execute()` SQL; SQLAlchemy is present only as Alembic's
+   manages migrations with raw `op.execute()` SQL, and SQLAlchemy is present only as Alembic's
    connection layer.
-2. **Every migration declares `expand_only = True|False`.** Expand-only migrations add tables,
-   nullable columns or indexes and nothing else, so an older image can still run against the
-   newer schema. Migrations never run on API start; a separate `tuisku migrate` step does, under
-   an advisory lock.
-3. **Evidence tables are append-only**: `raw_records`, `observations`, `detections`, and the link
-   tables that connect them. A database trigger rejects `UPDATE` and `DELETE` on them, except
-   for the retention job, which runs under a dedicated role. Findings and incidents are mutable,
-   and every change to an incident writes an append-only `incident_events` row (the timeline).
-4. **Idempotent ingestion.** `raw_records` has `UNIQUE (source_id, sha256)`, where `sha256` is
-   the digest of the exact bytes received. Re-delivery (at-least-once shippers, replays after a
-   crash, file rotation) inserts nothing and is reported as a duplicate. Deliberately repeated
-   identical lines from one source are therefore collapsed; sources whose lines can legitimately
-   repeat must include a distinguishing field (a timestamp, offset or sequence), which every
-   sensor we target does.
-5. **Two clocks on every derived row:** `event_time` (from the sensor, may be wrong or hostile)
-   and `received_at` (Tuisku's clock). Rules use `event_time` within a bounded skew of
-   `received_at`; records whose `event_time` is implausibly far from `received_at` are flagged.
-6. **Shapes that queries need get columns; the rest stays JSONB.** Columns: ids, `source_id`,
-   `kind`, times, `severity_id`, `entity_keys text[]` (GIN-indexed), `community_id`. The
-   OCSF-shaped payload is `attributes jsonb`.
-7. **Ids:** internal `bigint` identity keys for joins; a `uid uuid` on every row for external
-   reference; deterministic UUIDv5 ids for entities and indicators
-   ([0008](0008-identifiers-and-interchange.md)).
-8. **Retention** is a configured policy per layer (raw records kept N days; anything referenced
-   by an open incident is kept until the incident closes plus N days). It is not built in the
-   first milestone, but the schema keeps it possible: nothing above L0 needs L0's body to stay
-   readable.
-9. **Scale path, not built now:** monthly range partitioning of `raw_records` and `observations`
-   by `received_at`; moving cold L0 bodies to object storage by content hash. Both fit the
-   schema without changing ids.
+2. **Every migration declares `expand_only = True|False`.** An expand-only migration adds
+   tables, nullable columns or indexes and nothing else, so an older image can still run against
+   the newer schema. Migrations never run on API start. A separate `tuisku migrate` step runs
+   them under an advisory lock.
+3. **Roles enforce append-only, not just triggers.** Three roles have distinct jobs:
+   - `tuisku_owner` owns the schema and is used only by `tuisku migrate`.
+   - `tuisku_app` is used by the API and the worker. On evidence tables it has `SELECT` and
+     `INSERT` only: no `UPDATE`, `DELETE` or `TRUNCATE`, and it does not own the tables, so it
+     cannot disable triggers. On working tables (findings, incidents, the work queue) it has
+     the privileges it needs.
+   - Retention runs only through a `SECURITY DEFINER` function owned by `tuisku_owner`. That
+     function enforces the holds (anything an open incident references is kept), clears raw
+     bodies rather than deleting rows, and writes an append-only tombstone (row id, sha256,
+     actor, time).
+
+   Row and statement triggers that reject `UPDATE`, `DELETE` and `TRUNCATE` on evidence tables
+   stay as a second line of defence. `tuisku_app` is never a member of `tuisku_owner`.
+4. **Evidence tables** are the append-only ones: `raw_records`, `parse_attempts`,
+   `raw_duplicates`, `observations`, `detections`, the link tables between them, and
+   `incident_events`. Findings and incidents are mutable projections. Every incident change
+   writes an `incident_events` row.
+5. **Idempotent ingestion.** `raw_records` has `UNIQUE (source_id, sha256)`, where `sha256` is
+   the digest of the UTF-8 bytes of the envelope's `raw` string. It does not cover the envelope
+   itself, because `collector` metadata such as path or offset changes when a shipper re-reads a
+   rotated file. A re-delivery inserts nothing and is reported as a duplicate. Each duplicate
+   receipt is recorded in `raw_duplicates (raw_record_id, received_at)`, so a burst of
+   byte-identical lines is visible as a count rather than lost. Sensors we target include a
+   timestamp in every line (Harava logs carry millisecond time), so real events rarely collide.
+6. **Two clocks on every derived row.** `event_time` comes from the sensor and may be wrong or
+   hostile. `received_at` is Tuisku's own clock. A row whose `event_time` is more than a
+   configured skew away from `received_at` is flagged `clock_skew`. Rules then evaluate it at
+   `received_at` rather than skipping it, so a forged timestamp cannot hide an event. For
+   fixture replay and backfill, the ingest path accepts an injected clock (tests and the
+   `tuisku replay` command), so old fixtures keep their meaning.
+7. **Columns for what queries need, JSONB for the rest.** Columns hold ids, `source_id`, `kind`,
+   times, `severity_id`, `entity_keys text[]` (GIN-indexed) and `community_id`. The OCSF-shaped
+   payload is `attributes jsonb`.
+8. **Ids.**
+   - internal `bigint` identity keys for joins
+   - a `uid uuid` (v4) on every row for external reference
+   - deterministic UUIDv5 ids only for exported STIX objects ([0008](0008-identifiers-and-interchange.md))
+9. **Retention** is a configured policy per layer, for example raw bodies kept for N days.
+   Anything an open incident references is held until the incident closes, plus N days.
+   Retention is a prerequisite for ingesting user-traffic sources such as HTTP and DNS logs,
+   which carry personal data. It must be configured before such a source is enabled in
+   production; the first milestone's Harava source carries no URLs or values. Nothing above L0
+   needs the L0 body to stay readable.
+10. **Scale path, not built now:** monthly range partitioning of `raw_records` and `observations`
+    by `received_at`, and moving cold L0 bodies to object storage by content hash. Both fit
+    without changing ids.
 
 ## Consequences
 
 - At-least-once shippers are safe to use.
-- Tables grow fast; partitioning and retention are known follow-ups.
-- Without an ORM, the SQL in `tuisku.store` is the single place schema knowledge lives in code;
-  tests run it against a real Postgres.
+- A compromised API process can add evidence but cannot rewrite or remove it.
+- Tables grow fast, so partitioning and retention are known follow-ups.
+- Without an ORM, the SQL in `tuisku.store` is the single place in code that holds schema
+  knowledge, and tests run it against a real Postgres.

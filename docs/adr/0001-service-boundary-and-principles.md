@@ -48,6 +48,6 @@ Principles every later decision must keep:
 - Adapters carry real weight: they are where provenance and layer separation are decided.
 - Deployment-specific detection content needs a loading path from outside the image from the
   start.
-- Licensing boundaries stay explicit: third-party rule sets (Sigma rules under DRL 1.1, ET Open,
-  Falco rules) are referenced or fetched at runtime with their own licences, never vendored into
+- Licensing boundaries stay explicit: third-party rule sets (Sigma rules under DRL 1.1, ET Open
+  under GPLv2, Falco's rules under Apache-2.0) are referenced or fetched at runtime with their own licences, never vendored into
   the MIT tree. Schema specifications we align to (OCSF, Apache-2.0) are attributed in `NOTICE`.

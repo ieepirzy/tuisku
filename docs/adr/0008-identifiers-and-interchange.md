@@ -49,10 +49,16 @@ These go in attributes and are never Tuisku enums:
 
 ### STIX 2.1 identity for shareable things
 
-Indicators, observables and sightings that leave Tuisku get deterministic STIX ids. For cyber
-observables (SCOs) that is UUIDv5 in the STIX namespace over the ID-contributing properties
-serialized with RFC 8785 (JCS). The same IP, domain or file hash therefore gets the same id from
-Tuisku, Apogee or anyone else. This prepares the purple-team loop: Apogee can later publish
+Objects that leave Tuisku as STIX get ids by the STIX rules:
+
+- **Cyber observables (SCOs):** UUIDv5 in the STIX SCO namespace
+  (`00abedb4-aa42-466c-9c01-fed23315a9b7`), computed over the ID-contributing properties
+  serialized with RFC 8785 (JCS). The same IP, domain or file hash therefore gets the same id
+  from Tuisku, Apogee or anyone else.
+- **Domain and relationship objects** (`indicator`, `sighting`, `observed-data`, `grouping`,
+  `note`): UUIDv5 in a **Tuisku-specific namespace**
+  (`e45f460c-9810-4548-8a33-e0b6397b6608`), computed over the Tuisku `uid` of the source row.
+  Re-exporting the same row is then idempotent, and the SCO namespace is never used for SDOs. This prepares the purple-team loop: Apogee can later publish
 *expected indicators* (`indicator` linked to an `attack-pattern`), and Tuisku records a STIX
 `sighting` when an observation matches one.
 
@@ -66,6 +72,12 @@ Tuisku, Apogee or anyone else. This prepares the purple-team loop: Apogee can la
   `tuisku_hypothesis`, `tuisku_rule_pack` (a pack version as published). Each incident status
   change after export is a Loimi supersession. `as_of` is the event time and `properties` carry
   the entity keys, ATT&CK ids, rule refs and Tuisku `uid`s.
+- **Personal data is minimised on export.** IP, identity and caller entity keys are
+  pseudonymised by default, using HMAC-SHA-256 with a deployment-held key and the type prefix
+  kept (`ip:hmac:…`). Correlation inside the estate still works, and the raw values stay in
+  Tuisku under its retention policy. Exported hypotheses are labelled `inference`, so a reader,
+  including another agent, never takes them for fact. Notifications and STIX exports follow the
+  same rule unless a deployment explicitly turns it off for a channel.
 - Provenance stays one hop: a `tuisku_finding` lists the `tuisku_rule_pack` artifact it came
   from in `sources`; a `tuisku_hypothesis` lists the findings it cites.
 - Export is a separate, idempotent job keyed by Tuisku `uid`. It is not in the first milestone.
