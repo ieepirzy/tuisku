@@ -75,6 +75,14 @@ wheels = [
 ]
 
 [[package]]
+name = "communityid"
+version = "1.5.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/39/bb/84dfd98be7ffe11af287f1c7482e73f68d6f3268a197d70113289db6276e/communityid-1.5.0-py3-none-any.whl", hash = "sha256:aa74ddd554f8f012d2dd3bc0008eadd5e1c4bc0c6c7728f2080c637016eade6d", size = 18950, upload-time = "2023-11-29T21:36:43.071Z" },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.162.0"
 source = { registry = "https://pypi.org/simple" }
@@ -822,6 +830,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
+    { name = "communityid" },
     { name = "fastapi" },
     { name = "psycopg", extra = ["binary"] },
     { name = "psycopg-pool" },
@@ -841,6 +850,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
+    { name = "communityid", specifier = ">=1.5.0" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "psycopg-pool", specifier = ">=3.2" },
