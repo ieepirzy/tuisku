@@ -159,6 +159,14 @@ correlation run asynchronously, so slow rules never apply back-pressure to senso
 
 ## Consequences
 
+- **Line-oriented text sources can be forged from inside.** A log message that contains a newline
+  or a crafted exception text, or a continuation chunk of an over-long line (Docker splits at 16
+  KiB, CRI writes partial `P` chunks), arrives as a separate line. Such a line can look exactly
+  like a sensor verdict. Adapters flag partial and continuation chunks where the wrapper allows
+  it. Pack rules that page on a text-log verdict should require corroboration from an
+  independent channel of the same sensor where one exists, for example Harava's refusal
+  counters over OTLP; without it, they should lower the severity.
+
 - Shipper configuration is minimal and the same across sensors.
 - All normalization can be reproduced from L0 inside Tuisku.
 - Compromising one source token lets an attacker inject records for that source only. Injected

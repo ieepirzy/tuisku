@@ -48,9 +48,10 @@ title: Agent caller had outbound data refused
 severity: high               # informational | low | medium | high | critical
 attack: [T1567]              # ATT&CK technique ids, verbatim, optional
 select:                      # which rows feed the rule
-  layer: detection           # observation | detection
-  kind: harava.outbound_refused
+  layer: observation         # observation | detection
+  kind: harava.refusal       # the fact; the sensor's verdict is a separate detection row
   where:                     # all predicates must hold
+    - {field: attributes.type, op: eq, value: outbound}
     - {field: attributes.caller, op: in, value: {param: restricted_callers}}
 correlation:                 # optional; absent = each selected row fires on its own
   type: event_count
