@@ -6,7 +6,8 @@ options always give the same drafts. Mixed records are split: sensor facts becom
 sensor verdicts become detections that reference them (ADR 0002).
 
 Everything an adapter reads is attacker-controlled. Adapters bound string sizes, check types and
-raise :class:`AdapterError` for input they cannot parse; the ingest path records that failure on
+raise :class:`AdapterError` for input they cannot parse (:class:`LimitExceeded` when a
+structural limit is breached); the ingest path records that failure on
 the raw record and carries on with the rest of the batch.
 """
 
@@ -53,6 +54,18 @@ class AdapterError(ValueError):
     """The record cannot be parsed. The message must never contain the raw body."""
 
 
+class LimitExceeded(AdapterError):
+    """The record breaches a structural limit (ADR 0005), e.g. JSON depth or key count.
+
+    ``limit`` names the limit (``"json_depth"``, ``"json_keys"``, ``"datapoints"``) so the ingest
+    path can record the breach as a ``tuisku.meta.*`` meta-detection instead of absorbing it.
+    """
+
+    def __init__(self, limit: str, message: str | None = None) -> None:
+        super().__init__(message or f"limit exceeded: {limit}")
+        self.limit = limit
+
+
 @dataclass(frozen=True, slots=True)
 class RawRecord:
     """One L0 record as received: the exact bytes plus receipt metadata.
@@ -80,7 +93,9 @@ class ObservationDraft:
 
     ``attributes`` is the OCSF-shaped payload; ``unmapped`` keeps source fields with no OCSF home,
     exactly as received. ``correlation`` holds sensor-scoped join keys (e.g.
-    ``{"suricata.flow_id": "1676750115612680"}``), which the store qualifies by source.
+    ``{"suricata.flow_id": "1676750115612680"}``), which the store qualifies by source. A key
+    may carry several values as a tuple, e.g. ``{"zeek.fuid": ("Fa1", "Fb2")}`` for a Zeek http
+    record that references more than one file; order is kept as reported.
     ``flags`` are short machine-readable notes such as ``community_id_mismatch``.
     """
 
@@ -91,7 +106,7 @@ class ObservationDraft:
     unmapped: Mapping[str, Any] = field(default_factory=dict)
     entity_keys: tuple[str, ...] = ()
     community_id: str | None = None
-    correlation: Mapping[str, str] = field(default_factory=dict)
+    correlation: Mapping[str, str | tuple[str, ...]] = field(default_factory=dict)
     flags: tuple[str, ...] = ()
 
 
