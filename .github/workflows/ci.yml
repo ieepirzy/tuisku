@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          # Throwaway credentials for the CI service container only.
+          POSTGRES_USER: tuisku
+          POSTGRES_PASSWORD: tuisku-ci
+          POSTGRES_DB: tuisku
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tuisku -d tuisku"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CI: "true"
+      TUISKU_TEST_DATABASE_URL: postgresql://tuisku:tuisku-ci@localhost:5432/tuisku
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.11.32" # keep in step with the uv image in Dockerfile
+      - name: Install dependencies
+        run: uv sync --locked --dev
+      - name: Ruff lint
+        run: uv run ruff check .
+      - name: Ruff format
+        run: uv run ruff format --check .
+      - name: Pyright
+        run: uv run pyright
+      - name: Pytest
+        run: uv run pytest -q -ra

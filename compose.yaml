@@ -1,0 +1,23 @@
+# LOCAL DEVELOPMENT ONLY. The credentials below are throwaway values for a
+# database bound to 127.0.0.1; never reuse them anywhere else.
+#
+#   TUISKU_DATABASE_URL=postgresql://tuisku:tuisku-dev@127.0.0.1:55432/tuisku
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: tuisku
+      POSTGRES_PASSWORD: tuisku-dev  # dev-only throwaway password
+      POSTGRES_DB: tuisku
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - tuisku-dev-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tuisku -d tuisku"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  tuisku-dev-pg:
