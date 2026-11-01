@@ -38,8 +38,12 @@ sensor sees.
   - `accepted`: the raw record is stored. Its parse may still have failed; the response then
     adds `parse: failed`.
   - `duplicate`: the record was already stored.
-  - `rejected`: the record is *not* stored, for example because it is over a limit or the
-    envelope is malformed.
+  - `rejected`: the record is *not* stored because its envelope is malformed. Example: `raw`
+    is missing or not a string.
+  - A line longer than the line limit is **not** rejected. It is stored with its body truncated
+    to the limit, its sha256 computed over the full line, and the flag `truncated`. It gets no
+    parse attempt (`parse: skipped`) and raises the source's limit meta-detection. Over-long
+    output from a sensor is therefore never silently lost.
 
   A shipper can therefore safely retry a partial batch.
 
@@ -90,11 +94,15 @@ sensor sees.
   - `admin`: sources, tokens, packs
 - **Approval is separate from triage.** The `approve` role confirms hypotheses and approves
   proposed actions and evidence requests ([0009](0009-agent-runtime-and-authority.md)).
-  - It can only be granted to a token bound to a **named person**, recorded at creation.
-  - Admin tokens do not imply it.
-  - An approval is refused when the approver token belongs to whoever started the
-    investigator session that made the proposal.
-  - Deployments must keep operator tokens off the network the investigator runtime can reach.
+  - **Issued out of band.** Approve tokens cannot be created through the API, not even by an
+    admin. They are created only by `tuisku approver add --person …`, a command that connects
+    as `tuisku_owner`, the database owner, which the API and worker never use. An admin
+    therefore cannot mint approval authority. Binding persons to an external identity provider
+    (OIDC) is a later step; until then, the person is whoever the database owner records.
+  - **Four-eyes.** An approval is refused when the approving person is the person who started
+    the investigator session that made the proposal.
+  - **Network.** Deployments must keep operator and approve tokens off the network that the
+    investigator runtime can reach.
 - **Every request is attributed.** The token id is recorded on every raw record and on every
   timeline event the token causes.
 - **Transport:** comparison is between hashes. TLS is terminated by the deployment (mesh or

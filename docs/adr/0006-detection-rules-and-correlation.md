@@ -68,7 +68,9 @@ incident: open               # open | none
 The field reference is built up from the following pieces.
 
 - **Predicates** are a closed set: `eq`, `neq`, `in`, `not_in`, `gt`, `gte`, `lt`, `lte`,
-  `exists`, `contains`, `startswith`, `cidr`.
+  `exists`, `contains`, `startswith`, `cidr`. A predicate whose field is missing or has the
+  wrong type evaluates to **false**; it never raises an error. One hostile field therefore
+  cannot make a row fail evaluation for every rule.
 - **Field paths** address either the row envelope or `attributes.*`. The envelope fields are:
   - `kind`
   - `source` (the source's *name*; the stored column is `source_id`)
@@ -107,8 +109,8 @@ detecting:
 - Further firings for new groups fold into one **overflow finding** for that rule. Its
   fingerprint is JCS `["overflow", <rule id>, <rule rev>]`, it has high severity, it records the
   `group_by` values in its evidence, and it sends a notification.
-- At the live-incident cap, the overflow finding opens or attaches to one overflow incident,
-  keyed the same way.
+- At the live-incident cap, findings that would open new incidents attach instead to one
+  overflow incident for the rule, keyed the same way, so nothing is left without an incident.
 - Cap checks run under a per-rule advisory lock, so concurrent workers cannot overshoot.
 - An attacker who sprays many distinct group values therefore gets one loud finding, not
   silence.
@@ -152,11 +154,14 @@ content produced it.
     them in sorted order, so two workers cannot deadlock on them. Two workers that see rows of
     the same group therefore cannot both fire or both open a finding.
 - **Current derivations only.** Reprocessing L0 with a new adapter version writes a new parse
-  attempt and new rows, and **enqueues the new current rows**. A worker skips queued rows whose
-  parse attempt is no longer current. Correlation queries count only rows from current attempts,
-  which are defined in [0002](0002-epistemic-layers.md), so reprocessing never double-counts. A
-  firing is suppressed when a detection already exists for the same rule, group and overlapping
-  window, so re-evaluation does not page twice.
+  attempt and new rows, and **enqueues the new current rows**.
+  - A worker skips queued *adapter-derived* rows whose parse attempt is no longer current.
+  - Correlation queries count only adapter-derived rows from current attempts, which are
+    defined in [0002](0002-epistemic-layers.md), so reprocessing never double-counts.
+  - Rows without a parse attempt are always current: Tuisku rule output and meta-detections.
+  - A firing is suppressed when a detection already exists for the same rule, group and
+    overlapping window, *while that detection's finding is still attachable*. Re-evaluation
+    therefore does not page twice.
 - **Windows.** A row's evaluation time is its `event_time`. It is its `received_at` instead
   when the row is flagged `clock_skew` (future-dated) or has no event time. The correlation
   window is `(t - timespan, t]`.
@@ -168,11 +173,17 @@ content produced it.
   - **Later than that,** a row is evaluated at `received_at`. Its lateness is recorded in the
     resulting detection's explanation, never by changing the row.
 - **Firing.** A correlation fires when its condition first holds for a group in a window. It
-  fires again for that group only after `timespan` has passed since the last firing.
-  - Rows that match between firings are linked to the most recent firing detection through the
-    append-only `detection_evidence` table, with a timestamp. They also move the finding's
-    `last_seen`. The chain finding → detection → rows stays complete, and no new detections are
-    produced. Packs are rejected at load unless `finding.window >= correlation.timespan`.
+  fires again for that group once `timespan` has passed since the last firing, **or as soon as
+  the finding of the last firing leaves the attachable states**: resolved, expired, or resolved
+  because its incident was resolved or closed. Closing an incident or resolving a finding
+  re-arms the group immediately, so the next matching row fires and opens a new finding.
+  Triage can never mute a rule.
+  - Rows that match between firings, while the finding is still attachable, are linked to the
+    most recent firing detection through the append-only `detection_evidence` table, with a
+    timestamp. They also move the finding's `last_seen`. The chain finding → detection → rows
+    stays complete.
+  - At load time, a pack is rejected unless `finding.window >= correlation.timespan` and
+    `finding.max_lifetime >= correlation.timespan`.
   - Rules without a `correlation` block fire once per selected row.
 - **Metric samples** (OTLP cumulative counters) are turned into deltas at evaluation time.
   - **Series key:** metric name + label set + resource attributes.

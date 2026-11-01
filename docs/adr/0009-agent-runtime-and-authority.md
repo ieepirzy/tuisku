@@ -64,15 +64,22 @@ login or rate limits for their products, including agents built on the Claude Ag
      started.
    - The tool surface connects to Postgres as a separate `tuisku_investigator` role. That role
      can `SELECT` what its tier allows and `INSERT` only into L4 tables, so even a bug in the
-     tool surface cannot write L0–L3.
+     tool surface cannot write L0–L3. The matching timeline events (`hypothesis_added`,
+     `evidence_requested`, `action_proposed`, `session_*`) are written by an `AFTER INSERT`
+     trigger on each L4 table. The trigger is owned by `tuisku_owner` and runs as
+     `SECURITY DEFINER`. It inserts only the L4 row id, the session id and an actor derived from
+     the session row, so the investigator never writes L3 directly.
 
    A declaration is only a claim, so the deployment must also enforce it: run the investigator
    runtime with no tools other than Tuisku's MCP server, and deny network egress except to the
    model provider and Tuisku.
-4. **The runtime contract** is a small interface:
+4. **The runtime contract** is a small interface that **Tuisku calls on the harness**:
    - `start(incident, budget, declaration)`
    - `continue(session, new_evidence)`
    - `cancel(session)`
+
+   An operator action, or a deployment policy run by the worker, triggers the call. The harness
+   never holds operator tokens. It gets only its session's `tsk_inv_` token.
 
    The caller does not pick the session's **tier**. It comes from deployment policy, optionally
    raised for one incident by an `approve`-role operator, and is recorded at session start.
@@ -145,8 +152,8 @@ login or rate limits for their products, including agents built on the Claude Ag
 - The tier bounds what an injected instruction can achieve. At most, it produces a wrong
   hypothesis or a proposal that a human must approve. Nothing the agent writes executes.
 - Harava's content-signal verdicts, and similar injection detectors, can be applied to evidence
-  text before it is shown. A `likely` verdict is recorded on the incident as a signal in its own
-  right.
+  text before it is shown. Their results are ordinary L1/L2 rows from their own adapters. They
+  appear as evidence like anything else and are not special-cased.
 
 ## Consequences
 

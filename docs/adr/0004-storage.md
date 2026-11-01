@@ -38,15 +38,17 @@ are mutable working objects that keep a history.
        is not `closed`, or that closed less than the configured hold period ago. It also leaves
        alone anything in the closure of a finding that is neither `resolved` nor `expired`.
      - **What it redacts:** besides L0 bodies and L1/L2 payloads, it also redacts
-       `entity_keys` and the payloads of closed findings and incidents once they pass the hold
+       `entity_keys`, the payloads of closed findings and incidents, and the payloads of their
+       `finding_events` and `incident_events` (notes, old and new values) once they pass the hold
        period. The ids, hashes, kinds, times and statuses stay.
      - **Trigger exception:** the evidence-table triggers allow exactly one change, and only
        when `current_user = 'tuisku_owner'`. That change sets the payload columns (`body`,
-       `attributes`, `unmapped`, `explanation`, `entity_keys`) to NULL or empty, and the
+       `attributes`, `unmapped`, `explanation`, `entity_keys`, event `payload`) to NULL or empty, and the
        trigger checks that every other column is unchanged (`OLD` equals `NEW`).
-     - **Retention periods:** the policy table rejects an L1/L2 period shorter than the longest
-       baseline lookback of any loaded rule (`windows × timespan`), so retention cannot quietly
-       break baselines.
+     - **Retention periods:** the worker refuses to load a pack whose longest baseline lookback
+       (`windows × timespan`) is longer than the configured L1/L2 retention period. It also
+       refuses a retention policy shorter than the lookback of any pack already loaded. Either
+       way, retention cannot quietly break baselines.
 
    Row and statement triggers that reject `UPDATE`, `DELETE` and `TRUNCATE` on evidence tables
    stay as a second line of defence. `tuisku_app` is never a member of `tuisku_owner`.
