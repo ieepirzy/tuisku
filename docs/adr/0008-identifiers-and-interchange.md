@@ -4,17 +4,16 @@ Status: Accepted (2026-11-01)
 
 ## Context
 
-Tuisku must later exchange knowledge with **Loimi** (the organization's immutable artifact store
-with provenance) and **Apogee** (offensive security: "how can this system be broken?") without
-either owning the other (issue #1). Facts from the neighbours:
+Tuisku will later exchange knowledge with **Loimi**, an immutable artifact store with
+provenance, and with **Apogee**, an offensive-security service ("how can this system be
+broken?"). Neither side may own the other (issue #1).
 
-- Loimi artifacts are immutable, have a free-text `kind`, `properties` JSON, one-hop `sources`
-  provenance, an `as_of` event time, and supersession for change. It is a general knowledge
-  store, not a security data store.
-- Apogee keeps mutable operational state in its own database and durable findings in Loimi,
-  under `apogee_*` kinds. It records CVSS vectors and CWE ids verbatim, uses an OCSF-derived
-  status lifecycle, and makes claims with `observed | inferred | verified | unknown` status plus
-  evidence references. Its digests are algorithm-prefixed (`sha256:…`), and a target is a domain.
+What matters for interchange:
+
+- **Loimi:** artifacts are immutable and carry a `kind`, `properties`, one-hop `sources`
+  provenance and an `as_of` time. Changes are made by supersession.
+- **Apogee:** keeps its durable findings in Loimi under its own kinds. It records CVSS vectors
+  and CWE ids verbatim, and its claims carry an epistemic status plus evidence references.
 
 ## Decision
 
@@ -58,7 +57,11 @@ Objects that leave Tuisku as STIX get ids by the STIX rules:
 - **Domain and relationship objects** (`indicator`, `sighting`, `observed-data`, `grouping`,
   `note`): UUIDv5 in a **Tuisku-specific namespace**
   (`e45f460c-9810-4548-8a33-e0b6397b6608`), computed over the Tuisku `uid` of the source row.
-  Re-exporting the same row is then idempotent, and the SCO namespace is never used for SDOs. This prepares the purple-team loop: Apogee can later publish
+  Re-exporting the same row is then idempotent, and the SCO namespace is never used for SDOs.
+  STIX 2.1 recommends (SHOULD) UUIDv4 for these objects; we deviate on purpose so that exports
+  are idempotent.
+
+This prepares the purple-team loop: Apogee can later publish
 *expected indicators* (`indicator` linked to an `attack-pattern`), and Tuisku records a STIX
 `sighting` when an observation matches one.
 
@@ -73,11 +76,16 @@ Objects that leave Tuisku as STIX get ids by the STIX rules:
   change after export is a Loimi supersession. `as_of` is the event time and `properties` carry
   the entity keys, ATT&CK ids, rule refs and Tuisku `uid`s.
 - **Personal data is minimised on export.** IP, identity and caller entity keys are
-  pseudonymised by default, using HMAC-SHA-256 with a deployment-held key and the type prefix
-  kept (`ip:hmac:…`). Correlation inside the estate still works, and the raw values stay in
-  Tuisku under its retention policy. Exported hypotheses are labelled `inference`, so a reader,
-  including another agent, never takes them for fact. Notifications and STIX exports follow the
-  same rule unless a deployment explicitly turns it off for a channel.
+  pseudonymised by default. The pseudonym is HMAC-SHA-256 under a deployment-held key, with the
+  type prefix kept (`ip:hmac:…`). Correlation inside the estate still works, and the raw values
+  stay in Tuisku under its retention policy. Notifications follow the same rule. Exported
+  hypotheses are labelled `inference`, so no reader, including another agent, takes them for
+  fact.
+- **STIX exports choose per channel.** A pseudonym cannot be a STIX SCO value. Each STIX channel
+  is therefore configured one of two ways:
+  - **real values:** for trusted sharing, with deterministic SCO ids
+  - **no SCOs:** SDOs only, with entity references in a custom `x_tuisku_entity_keys` property
+    holding the pseudonyms
 - Provenance stays one hop: a `tuisku_finding` lists the `tuisku_rule_pack` artifact it came
   from in `sources`; a `tuisku_hypothesis` lists the findings it cites.
 - Export is a separate, idempotent job keyed by Tuisku `uid`. It is not in the first milestone.

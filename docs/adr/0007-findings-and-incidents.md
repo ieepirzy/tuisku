@@ -30,25 +30,28 @@ Grouping keys are built from attacker-controlled values, so the grouping itself 
   `["finding", <rule id>, <rule rev>, [<group_by values in order>]]`. Canonical encoding means an
   attacker-chosen value cannot move field boundaries and collide with another group.
 - **Attach or open.** A new firing for a fingerprint attaches to the existing finding only if
-  all of these hold:
-  - the finding is not `resolved`
-  - its `last_seen` is within `window`
-  - its `first_seen` is within `max_lifetime`
-
-  Otherwise a new finding opens. Without the lifetime cap, a trickle of benign matches could
-  keep one finding open forever and absorb later real activity.
+  the finding is `open`, `acknowledged` or `suppressed`, its `last_seen` is within `window`, and
+  its `first_seen` is within `max_lifetime`. Otherwise a new finding opens. Without the
+  lifetime cap, a trickle of benign matches could keep one finding open forever and absorb later
+  real activity.
+- **Expiry.** The worker sets a finding to `expired` once `last_seen + window` or
+  `first_seen + max_lifetime` has passed. An expired finding no longer counts toward the rule's
+  cap.
 - **Attaching** increments `count`, moves `last_seen`, which is the evaluation time of the
   newest row, and links the detection in `finding_detections`. The underlying detections are
   never merged or deleted.
 - **Fields:**
-  - `uid` and `fingerprint`
-  - `title`
-  - `severity_id`: the maximum of the finding's detections
-  - `status`: `open | acknowledged | resolved | suppressed`
+  - `uid`, `fingerprint` and `title`
+  - `severity_id`: the maximum of its detections
+  - `status`: one of `open`, `acknowledged`, `resolved`, `suppressed` or `expired`
   - `first_seen`, `last_seen` and `count`
-  - `entity_keys`: the union across detections
+  - `entity_keys`: the union across its detections
   - `rule_ref`
-  - `explanation`: from the first detection, plus the latest correlation values
+  - `explanation`: taken from the first detection, plus the latest correlation values
+- **History.** Every change to a finding appends a `finding_events` row recording actor, kind,
+  old and new values, and reason. This includes status changes, suppressions and their expiry,
+  severity changes and attachments. Suppression, the cheapest way to blind detection, is always
+  attributable.
 - **Suppressed** findings keep collecting evidence but trigger no notifications until their
   suppression expires. Suppression always has an expiry and a recorded reason.
 - **Notifications** fire:
@@ -57,12 +60,13 @@ Grouping keys are built from attacker-controlled values, so the grouping itself 
   - when its severity rises
 - **Status mapping to OCSF `status_id`:**
 
-  | Tuisku status | OCSF `status_id` |
+  | Tuisku | OCSF |
   |---|---|
   | open | New |
   | acknowledged | In Progress |
   | suppressed | Suppressed |
   | resolved | Resolved |
+  | expired | Other (`status` = "Expired") |
 
 ### Incidents (durable investigations)
 
@@ -80,23 +84,24 @@ Grouping keys are built from attacker-controlled values, so the grouping itself 
   `resolved` and `closed` are separate states because confirming that nothing recurs is a step
   of its own.
 - **New evidence on a late-stage incident.** When a finding attaches to an incident that is
-  `contained` or `resolved`, the incident returns to `investigating` with a `reopened` event,
-  and an **escalation** notification fires. Escalation means exactly one of three things:
-  - severity increased
-  - evidence attached at `contained` or later
-  - a reopen
+  `contained` or `resolved`, the incident returns to `investigating` with a `reopened` event and
+  an **escalation** notification.
+- **Escalation**, defined exactly, is either of two events:
+  - the incident's severity increases
+  - the incident is reopened
 - **Closing.** A disposition is required: `true_positive`, `benign_true_positive`,
   `false_positive`, `duplicate` or `inconclusive`. After an incident is closed, a new finding
   with the same fingerprint opens a new incident that links to the old one.
 - **Timeline.** Every change appends an `incident_events` row with an `actor`, a `kind` and a
   JSON payload.
-  - `actor`: `system`, `rule:<id>@<rev>`, `operator:<token id>`, or later
-    `investigator:<session id>`.
-  - `kind`: `opened`, `finding_attached`, `status_changed`, `reopened`, `note`,
+  - `actor` is one of `system`, `rule:<id>@<rev>` or `operator:<token id>`. The server always
+    sets it; it never comes from request content.
+  - `kind` is one of: `opened`, `finding_attached`, `status_changed`, `reopened`, `note`,
     `hypothesis_added`, `hypothesis_confirmed`, `action_proposed`, `action_decided`,
     `action_executed`.
-
-  The incident row is a projection of its timeline: current status, severity and counts.
+  - Events about L4 rows (`hypothesis_added`, `action_proposed`) carry only the L4 row id and
+    the investigator session id. The content stays in L4 ([0002](0002-epistemic-layers.md)).
+  - The incident row is a projection of its timeline: current status, severity and counts.
 - **Evidence.** An incident's evidence is the transitive closure of its findings, through their
   detections and observations, down to L0. It is computed, never copied.
 - **Entities.** The union of `entity_keys` across the incident's findings, stored for lookup.

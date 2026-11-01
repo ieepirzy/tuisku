@@ -32,13 +32,23 @@ sensor sees.
   in front (with the `otlphttp` exporter set to JSON) provides retries and queueing. Protobuf
   encoding is a follow-up. Only cumulative-temporality sums are interpreted; other metric types
   are kept as generic observations.
-- Tuisku answers **2xx only after the transaction commits**. The response gives a result per
-  line (`accepted | duplicate | failed`), so a shipper retrying a partial batch is safe.
+- Tuisku answers **2xx only after the transaction commits**. Each record runs inside its own
+  `SAVEPOINT`, so a database error on one record cannot abort the batch. The response gives one
+  result per line:
+  - `accepted`: the raw record is stored. Its parse may still have failed; the response then
+    adds `parse: failed`.
+  - `duplicate`: the record was already stored.
+  - `rejected`: the record is *not* stored, for example because it is over a limit or the
+    envelope is malformed.
+
+  A shipper can therefore safely retry a partial batch.
 
 ### Limits (enforced at the boundary; configurable)
 
 - **Request size**
-  - Body size: 5 MiB. Larger bodies get 413 and are not truncated.
+  - Body size: 5 MiB. Larger bodies get 413 and are not truncated. OTLP exporters and log
+    shippers usually do not retry a 413, so a deployment must keep its shipper batch sizes below
+    these limits.
   - Lines per request: 5,000.
   - Line length: 256 KiB.
   - `collector` object: 4 KiB.
@@ -48,8 +58,14 @@ sensor sees.
   - OTLP datapoints per body: 10,000.
 - **Per-source rate:** a token bucket of records per second. When the bucket is empty Tuisku
   returns 429. Shippers buffer and retry, so evidence is delayed, not lost.
-- **Breaches:** exceeding a limit is itself recorded as a meta-detection on the source
-  (`tuisku.source.limit_exceeded`) and is not silently absorbed.
+- **Breaches:** exceeding a limit is recorded as a **meta-detection**, never silently absorbed.
+  A meta-detection has:
+  - kind `tuisku.meta.<name>`, for example `tuisku.meta.source_limit_exceeded`
+  - evaluator `tuisku`, authorship `tuisku`, and no raw record
+  - the source as an entity key
+
+  At most one meta-detection is written per source and kind per 5 minutes; repeats increment a
+  counter in its explanation. Rules can select meta-detections by kind.
 
 ### Sources, tokens and roles
 
@@ -65,10 +81,17 @@ sensor sees.
   - A source can hold several active tokens at once, so a token can be rotated without a gap
     and a leaked token revoked without disabling the source.
   - A token is valid only for its own source.
-- **Operator tokens** (`tsk_op_`) carry a role. Each role includes the ones before it:
+- **Operator tokens** (`tsk_op_`) carry a role, and each role includes the ones before it:
   - `read`: findings, incidents, evidence
-  - `triage`: status changes, notes, dispositions
+  - `triage`: status changes, notes, dispositions, suppression
   - `admin`: sources, tokens, packs
+- **Approval is separate from triage.** The `approve` role confirms hypotheses and approves
+  proposed actions and evidence requests ([0009](0009-agent-runtime-and-authority.md)).
+  - It can only be granted to a token bound to a **named person**, recorded at creation.
+  - Admin tokens do not imply it.
+  - An approval is refused when the approver token belongs to whoever started the
+    investigator session that made the proposal.
+  - Deployments must keep operator tokens off the network the investigator runtime can reach.
 - **Every request is attributed.** The token id is recorded on every raw record and on every
   timeline event the token causes.
 - **Transport:** comparison is between hashes. TLS is terminated by the deployment (mesh or

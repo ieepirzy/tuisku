@@ -5,9 +5,9 @@ Status: Accepted (2026-11-01)
 ## Context
 
 Tuisku is not deployed anywhere yet. Its first target is intrusion detection and cyber-defense
-on a small Kubernetes cluster that is managed with GitOps, gives each service its own Postgres
-database, and runs an OpenTelemetry collector. Which sensors to run, and what Tuisku agents may
-do, are decisions for the deploying estate.
+on a small Kubernetes cluster that is managed with GitOps and gives each service its own Postgres
+database. Which sensors to run, and what Tuisku agents may do, are decisions for the deploying
+estate.
 
 This ADR describes Tuisku's own topology in generic terms. The estate-specific manifests live
 in the estate's own configuration repository (principle 6 in [0001](0001-service-boundary-and-principles.md)).
@@ -47,14 +47,14 @@ Also:
 
 These are recommendations for the estate's sensor decision, not assumptions Tuisku depends on:
 
-- **Runtime (host):** Falco with the `modern_ebpf` driver, or Tetragon on clusters that already
-  run Cilium. Both need host-level access, which admission policy must explicitly allow.
-  Workloads in sandboxed runtimes such as gVisor are invisible to host eBPF syscall hooks;
-  covering them needs the sandbox's own runtime monitoring.
-- **Network:** on Cilium clusters, Hubble flow logs give L3/L4 and DNS visibility with no new sensor (an
-  adapter is a natural next step after this milestone). Suricata or Zeek in AF_PACKET mode on a
-  node with host networking adds L7 signatures and protocol logs where deep inspection is
-  wanted, for example on the nodes where ingress and egress traffic leave the cluster.
+- **Runtime (host):** an eBPF-based runtime sensor, such as Falco with the `modern_ebpf` driver
+  or Tetragon. Either needs host-level access, which admission policy must explicitly allow.
+  Workloads in sandboxed container runtimes need the sandbox's own monitoring; the deploying
+  estate should check its coverage.
+- **Network:** flow logs from the cluster network plugin, where available, give L3/L4 and DNS
+  visibility without a new sensor. An adapter for them is a natural next step. Suricata or Zeek
+  in AF_PACKET mode on a host-networked node adds L7 signatures and protocol logs where deep
+  inspection is wanted, for example where traffic enters or leaves the cluster.
 - **Application signals:** Harava's agent-safety signals (issue #2) need no new sensor.
 
 ### Exposure

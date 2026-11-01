@@ -86,19 +86,26 @@ The field reference is built up from the following pieces.
   - `temporal` and `temporal_ordered` come later, when a rule needs them.
 - **Params** let a pack ship generic defaults while a deployment supplies its own thresholds and
   lists. A param can supply a predicate value or a correlation number.
-- **Feedback** is opt-in: rules do not see `evaluator = tuisku` detections (other rules' output)
-  unless `select.include_rule_output: true`.
+- **Feedback** is opt-in. Rules do not see `evaluator = tuisku` detections (other rules'
+  output) unless `select.include_rule_output: true`. A rule can never select detections whose
+  `identity` is its own id. Meta-detections (`tuisku.meta.*`) can always be selected by kind.
 
 ### Hard limits
 
-These are checked when a pack loads, and a pack that exceeds them is rejected:
+These are checked when a pack loads, and a pack that breaks them is rejected:
 
 - `timespan` and `window` ≤ 7 days, `max_lifetime` ≤ 30 days, baseline `windows` ≤ 30
-- `group_by` ≤ 4 fields, values truncated to 256 characters before grouping
-- at most 1,000 open findings and 100 open incidents per rule
+- `group_by` ≤ 4 fields, with values truncated to 256 characters before grouping
+- at most 1,000 open findings and 100 live incidents per rule
 
-Each rule evaluation runs under a Postgres `statement_timeout`. Reaching a cap raises a
-`tuisku.rule.cap_reached` meta-detection. It does not silently stop alerting.
+**At the cap, detection continues.** A rule at its open-findings cap does not stop detecting.
+Further firings for new groups fold into one **overflow finding** for that rule, with high
+severity, `group_by` values recorded in its evidence, and a notification. An attacker who sprays
+many distinct group values therefore produces one loud finding, not silence. Findings past
+`window` and `max_lifetime` expire automatically (see [0007](0007-findings-and-incidents.md)),
+so the cap drains.
+
+Each rule evaluation runs under a Postgres `statement_timeout`.
 
 ### Where estate-specific content lives
 
@@ -116,32 +123,47 @@ content produced it.
 ### Evaluation
 
 - **Work queue, not a cursor.** The ingest transaction inserts one row per new observation or
-  detection into `evaluation_queue`. Workers (`tuisku worker`) claim batches with
-  `FOR UPDATE SKIP LOCKED`, evaluate them, and delete the queue rows in the same transaction as
-  their results. Rows that commit late are therefore never skipped, and several workers can run
-  side by side.
-- **Current derivations only.** Reprocessing L0 with a new adapter version writes new rows and
-  marks the new parse attempt current. It enqueues nothing unless the operator asks for
-  re-evaluation. Correlation queries count only rows from current parse attempts, so
+  detection into `evaluation_queue`.
+  - Workers (`tuisku worker`) claim batches with `FOR UPDATE SKIP LOCKED`, evaluate them, and
+    delete the queue rows in the same transaction as their results. Rows that commit late are
+    never skipped, and several workers can run side by side.
+  - Each queue row has an `attempts` counter. After 5 failed attempts it moves to
+    `evaluation_dead_letter` and raises a `tuisku.meta.evaluation_failed` meta-detection, so a
+    poison row cannot block the queue or be retried forever.
+  - **Serialized per group.** Before deciding whether a correlation fires, and before deciding
+    whether a finding attaches or opens, a worker takes
+    `pg_advisory_xact_lock(<64-bit hash of the fingerprint>)`. Two workers that see rows of the
+    same group therefore cannot both fire or both open a finding.
+- **Current derivations only.** Reprocessing L0 with a new adapter version writes a new parse
+  attempt and new rows, and enqueues nothing unless the operator asks for re-evaluation. A
+  worker skips queued rows whose parse attempt is no longer current. Correlation queries count
+  only rows from current attempts, which are defined in [0002](0002-epistemic-layers.md), so
   reprocessing never double-counts.
-- **Windows.** A row's evaluation time is its `event_time`, or `received_at` when the row is
-  flagged `clock_skew` or has no event time. The correlation window is
-  `(t - timespan, t]`.
-  - Late rows, within an allowed lateness of 1 hour by default, are evaluated against the
-    window they belong to.
-  - Rows later than that are evaluated at `received_at` and flagged `late`.
+- **Windows.** A row's evaluation time is its `event_time`. It is its `received_at` instead
+  when the row is flagged `clock_skew` (future-dated) or has no event time. The correlation
+  window is `(t - timespan, t]`.
+  - **Late rows** are evaluated against the window they belong to, up to an allowed lateness of
+    1 hour by default.
+  - **Later still,** a row is evaluated at `received_at`. Its lateness is recorded in the
+    resulting detection's explanation, never by changing the row.
 - **Firing.** A correlation fires when its condition first holds for a group in a window. It
-  fires again for that group only after `timespan` has passed since the last firing. Matching
-  rows between firings are linked as evidence to the existing finding rather than producing new
-  detections. Rules without a `correlation` block fire once per selected row.
-- **Metric samples** (OTLP cumulative counters) become deltas at evaluation time:
-  - The series key is metric name + label set + resource attributes.
-  - Within a series, `delta = value - previous value` while `start_time` is unchanged.
-  - A changed `start_time`, or a value lower than the previous one, is a **reset**. The new
-    value itself is then the delta, because it counts from the new `start_time`.
-  - The first sample ever seen for a series counts its full value, since OTel counters appear
-    only on their first increment. This way the first refusal after a restart is counted.
-  - Sums with delta temporality are taken as-is.
+  fires again for that group only after `timespan` has passed since the last firing.
+  - Rows that match between firings are linked to the most recent firing detection through the
+    append-only `detection_evidence` table, with a timestamp. The chain finding → detection →
+    rows stays complete, and no new detections are produced.
+  - Rules without a `correlation` block fire once per selected row.
+- **Metric samples** (OTLP cumulative counters) are turned into deltas at evaluation time.
+  - **Series key:** metric name + label set + resource attributes.
+  - **Within a series,** `delta = value - previous value` while `start_time` is unchanged.
+  - **Reset:** a changed `start_time`, or a value lower than the previous one, is a reset. The
+    new value itself is then the delta, because it counts from the new `start_time`.
+  - **First sample ever seen for a series:** its full value counts only if its `start_time` is
+    no earlier than the source's first `received_at` minus one export interval (default 60 s).
+    That covers a counter that began while Tuisku was already listening. OTel counters appear
+    only on their first increment, so the first refusal is counted. Otherwise the first sample
+    is a baseline with delta 0, so connecting Tuisku to a long-running process does not
+    produce a false spike.
+  - **Delta temporality:** sums with delta temporality are taken as-is.
 - **Output.** When a rule fires, the worker writes a detection with `evaluator = tuisku`, the
   pack's authorship, and `identity = <rule id>`. It then folds the detection into a **finding**
   ([0007](0007-findings-and-incidents.md)). The detection's `explanation` records:

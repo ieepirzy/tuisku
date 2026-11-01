@@ -33,7 +33,7 @@ deterministic provenance from suggested relevance.
 | L1 observation | `observations` | a versioned adapter, deterministically from L0 | a network flow, a DNS answer, a process exec, a metric sample |
 | L2 detection | `detections` | a deterministic mechanism evaluating a rule or built-in check | Zeek `notice`, Suricata signature match, Falco rule match, Harava refusal, a Tuisku pack rule |
 | L3 finding / incident | `findings`, `incidents`, `incident_events` | Tuisku's deterministic grouping, and people | "the agent caller had outbound data refused 3× in 1h" |
-| L4 inference | `hypotheses` (later) | an agent or other investigator | "likely objective: exfiltration through an agent tool" |
+| L4 inference | `hypotheses`, `investigator_sessions`, `tool_calls`, `proposed_actions` (later) | an agent or other investigator | "likely objective: exfiltration through an agent tool" |
 
 A row's layer is fixed by the table it is in and cannot change.
 
@@ -70,17 +70,27 @@ names. A pack declares its authorship in its manifest ([0006](0006-detection-rul
    - a hypothesis names lower-layer ids
 
    Nothing at a lower layer is changed by anything above it.
-3. **Derivations are versioned.** Every L1/L2 row records `adapter@version`, or for a rule its
-   `id@rev` and pack version and hash. Re-running a newer adapter over the same L0 writes new rows
-   and a new parse attempt, and marks that attempt current. Old rows stay, and rules read only
-   rows from current attempts ([0006](0006-detection-rules-and-correlation.md)).
-4. **L0 rows are never deleted by the application.** Retention removes the stored body through
-   one audited database function and keeps the row, its hash and a tombstone
-   ([0004](0004-storage.md)).
-5. **Agent output never lands in L0–L3 tables.** An investigator writes L4 hypotheses. Each must
-   cite at least one lower-layer id and carries the status `inferred` or `unknown`, plus a
-   confidence. An agent cannot label its own output as observed or verified. Confirming a
-   hypothesis is a human act, recorded as an incident timeline event with the human as actor.
+3. **Derivations are versioned.** Every L1/L2 row records the `parse_attempt_id` that produced
+   it, and through that `adapter@version`. For a rule, it records `id@rev` plus the pack version
+   and hash. Re-running a newer adapter over the same L0 writes a new parse attempt and new rows.
+   The **current** derivation of a raw record is derived, not stored: it is the newest
+   *successful* parse attempt, so a newer attempt that fails leaves the previous one current. Old
+   rows stay, and rules read only rows from current attempts
+   ([0006](0006-detection-rules-and-correlation.md)).
+4. **Evidence rows are never deleted by the application.** Retention clears L0 bodies and
+   redacts L1/L2 payloads through one audited database function. It keeps the rows, their hashes
+   and a tombstone ([0004](0004-storage.md)).
+5. **Agent output never lands in L0–L3 tables.** Everything an investigator produces is stored
+   in L4 tables: hypotheses, session records (the harness declaration, the model, usage and the
+   tool-call log), and proposed actions and evidence requests.
+   - A hypothesis must cite at least one lower-layer id. It carries the status `inferred` or
+     `unknown` and a confidence.
+   - The incident timeline (L3) may record *that* an L4 row was added. It does this only as a
+     server-written event whose actor and L4 row id are set by Tuisku. It never copies L4
+     content.
+   - An agent cannot label its own output as observed or verified. Confirming a hypothesis is a
+     human act, recorded as a timeline event with an approving person as the actor
+     ([0009](0009-agent-runtime-and-authority.md)).
 6. **Parse failures are evidence too.** When an adapter cannot parse a raw record, that is
    recorded in `parse_attempts` with the error. The raw record itself is never updated. Malformed
    input aimed at the parser is itself a signal, and operators can see it.

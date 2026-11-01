@@ -24,30 +24,52 @@ are mutable working objects that keep a history.
      `INSERT` only: no `UPDATE`, `DELETE` or `TRUNCATE`, and it does not own the tables, so it
      cannot disable triggers. On working tables (findings, incidents, the work queue) it has
      the privileges it needs.
-   - Retention runs only through a `SECURITY DEFINER` function owned by `tuisku_owner`. That
-     function enforces the holds (anything an open incident references is kept), clears raw
-     bodies rather than deleting rows, and writes an append-only tombstone (row id, sha256,
-     actor, time).
+   - Retention runs only through one `SECURITY DEFINER` function, `tuisku_apply_retention()`,
+     owned by `tuisku_owner`.
+     - **Inputs:** it takes no parameters. The policy, meaning the retention period per layer,
+       comes from a table that only `tuisku_owner` can write.
+     - **Access:** `EXECUTE` is revoked from `PUBLIC` and granted only to a `tuisku_retention`
+       role. The app role is not a member of that role. The function pins `search_path`.
+     - **What it does:** it records `session_user` as the actor. Past their retention periods,
+       it clears raw bodies and redacts L1/L2 payloads (`attributes`, `unmapped`,
+       `explanation`) instead of deleting rows. Each time, it writes an append-only tombstone:
+       row id, sha256, actor and time.
+     - **Holds:** it touches nothing in the transitive evidence closure of an incident whose
+       status is not `closed`. The same applies to a finding that is not `resolved` or
+       `expired`.
+     - **Trigger exception:** the evidence-table triggers allow exactly one change, setting
+       those payload columns to NULL, and only when `current_user = 'tuisku_owner'`.
 
    Row and statement triggers that reject `UPDATE`, `DELETE` and `TRUNCATE` on evidence tables
    stay as a second line of defence. `tuisku_app` is never a member of `tuisku_owner`.
-4. **Evidence tables** are the append-only ones: `raw_records`, `parse_attempts`,
-   `raw_duplicates`, `observations`, `detections`, the link tables between them, and
-   `incident_events`. Findings and incidents are mutable projections. Every incident change
-   writes an `incident_events` row.
-5. **Idempotent ingestion.** `raw_records` has `UNIQUE (source_id, sha256)`, where `sha256` is
-   the digest of the UTF-8 bytes of the envelope's `raw` string. It does not cover the envelope
+4. **Evidence tables** are the append-only ones:
+   - `raw_records`, `parse_attempts` and `raw_duplicates`
+   - `observations`, `detections`, and the link tables between them (including
+     `detection_evidence`)
+   - the histories: `finding_events` and `incident_events`
+   - later, the L4 tables (`hypotheses`, `investigator_sessions`, `tool_calls`,
+     `proposed_actions`)
+
+   Findings and incidents are mutable projections. Every change to one writes a
+   `finding_events` or `incident_events` row.
+5. **Idempotent ingestion.** `raw_records` has `UNIQUE (source_id, sha256)`. For NDJSON records,
+   `sha256` is the digest of the UTF-8 bytes of the envelope's `raw` string. For OTLP, it is the
+   digest of the request body bytes. It does not cover the envelope
    itself, because `collector` metadata such as path or offset changes when a shipper re-reads a
    rotated file. A re-delivery inserts nothing and is reported as a duplicate. Each duplicate
    receipt is recorded in `raw_duplicates (raw_record_id, received_at)`, so a burst of
    byte-identical lines is visible as a count rather than lost. Sensors we target include a
    timestamp in every line (Harava logs carry millisecond time), so real events rarely collide.
-6. **Two clocks on every derived row.** `event_time` comes from the sensor and may be wrong or
-   hostile. `received_at` is Tuisku's own clock. A row whose `event_time` is more than a
-   configured skew away from `received_at` is flagged `clock_skew`. Rules then evaluate it at
-   `received_at` rather than skipping it, so a forged timestamp cannot hide an event. For
-   fixture replay and backfill, the ingest path accepts an injected clock (tests and the
-   `tuisku replay` command), so old fixtures keep their meaning.
+6. **Two clocks on every derived row.**
+   - `event_time` comes from the sensor and may be wrong or hostile. `received_at` is Tuisku's
+     own clock.
+   - A row whose `event_time` lies in the *future* by more than a configured tolerance is
+     flagged `clock_skew`. Rules evaluate that row at `received_at` instead of skipping it, so a
+     forged timestamp cannot hide an event.
+   - Rows that arrive *late* are handled by the lateness rules in
+     [0006](0006-detection-rules-and-correlation.md).
+   - For fixture replay and backfill, the ingest path accepts an injected clock (used by tests
+     and the `tuisku replay` command), so old fixtures keep their meaning.
 7. **Columns for what queries need, JSONB for the rest.** Columns hold ids, `source_id`, `kind`,
    times, `severity_id`, `entity_keys text[]` (GIN-indexed) and `community_id`. The OCSF-shaped
    payload is `attributes jsonb`.

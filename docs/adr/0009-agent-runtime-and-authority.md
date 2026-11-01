@@ -63,17 +63,25 @@ login or rate limits for their products, including agents built on the Claude Ag
    A declaration is only a claim, so the deployment must also enforce it: run the investigator
    runtime with no tools other than Tuisku's MCP server, and deny network egress except to the
    model provider and Tuisku.
-4. **The runtime contract** is a small interface: `start(incident, tier, budget, declaration)`,
-   `continue(session, new_evidence)` and `cancel(session)`. Results come back only through the
-   tools (`submit_hypothesis`, `propose_action`). Tuisku records the following in the incident
-   timeline:
+4. **The runtime contract** is a small interface:
+   - `start(incident, budget, declaration)`
+   - `continue(session, new_evidence)`
+   - `cancel(session)`
+
+   The caller does not pick the session's **tier**. It comes from deployment policy, optionally
+   raised for one incident by an `approve`-role operator, and is recorded at session start.
+
+   Results come back only through the tools (`submit_hypothesis`, `propose_action`). Tuisku
+   stores the session record in L4 tables (`investigator_sessions`, `tool_calls`), not in the
+   incident timeline. The record holds:
    - the harness name and version
    - the model identifier the harness reports
-   - the session id
+   - the declaration
    - token usage
    - the tool-call log
 
-   Tuisku does not depend on any harness's internals.
+   The timeline only records, as server-written events, that a session started or ended and its
+   id ([0002](0002-epistemic-layers.md)). Tuisku does not depend on any harness's internals.
 5. **Model credentials belong to the harness, not to Tuisku.** Tuisku never stores, requests or
    brokers model credentials, and it ships no login flow. Each deployment chooses how its harness
    authenticates, in line with the model provider's terms, including the restriction quoted
@@ -101,9 +109,11 @@ login or rate limits for their products, including agents built on the Claude Ag
 - **Tainted parameters.** Any parameter derived from an attacker-controlled field is marked as
   tainted and shown that way to the approver. An evidence request never makes Tuisku contact a
   host named in telemetry.
-- **Approval.** Until a containment ADR exists, only a human approves an action or an evidence
-  request. No policy may auto-approve, and agent confidence or hypotheses are never inputs to
-  approval. Execution credentials are never reachable from investigator sessions.
+- **Approval.** Until a containment ADR exists, only a person holding an `approve`-role token
+  approves an action or an evidence request ([0005](0005-source-adapters-and-ingestion.md)).
+  The person must differ from whoever started the session. No policy may auto-approve, and agent
+  confidence or hypotheses are never inputs to approval. Execution credentials are never
+  reachable from investigator sessions.
 - **Corroboration.** Any future automated response must require corroborating evidence from more
   than one source, because a single compromised source token can forge evidence for its source
   ([0005](0005-source-adapters-and-ingestion.md)).
@@ -111,9 +121,10 @@ login or rate limits for their products, including agents built on the Claude Ag
 ### Data handling
 
 - **Redaction by default.** Agent tools return redacted views. Secrets and credentials are
-  removed, including authorization headers, tokens in URLs, and key-like strings. Personal data
-  fields such as user identifiers are pseudonymised. Unredacted L0 needs the `investigate` tier
-  and a stated justification, and both are logged on the timeline.
+  removed, including authorization headers, tokens in URLs and key-like strings. Personal-data
+  fields such as user identifiers are pseudonymised. An agent cannot unlock unredacted L0
+  itself. Unredacted L0 is only available through an evidence request that a person approves,
+  and the request and approval are both recorded.
 - **The model provider is a data processor.** Anything shown to an agent is sent to its model
   provider. A deployment that turns the agent layer on documents that provider as a processor
   and assesses data protection impact (a DPIA where GDPR applies) before enabling it on
