@@ -35,3 +35,8 @@ def test_secret_never_appears_in_repr() -> None:
 def test_pool_bounds_are_validated() -> None:
     with pytest.raises(ValidationError):
         Settings(pool_max_size=0)
+
+
+def test_pool_min_must_not_exceed_max() -> None:
+    with pytest.raises(ValidationError, match="pool_min_size must not exceed pool_max_size"):
+        Settings(pool_min_size=5, pool_max_size=2)

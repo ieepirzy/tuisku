@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -46,6 +47,17 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]):
         report.longrepr = f"unexpected skip in CI: {report.longrepr}"
 
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_make_collect_report(collector: pytest.Collector):
+    # Collection-time skips (e.g. `pytest.skip(allow_module_level=True)`) are
+    # also failures in CI.
+    outcome = yield
+    report = outcome.get_result()
+    if _in_ci() and report.skipped:
+        report.outcome = "failed"
+        report.longrepr = f"unexpected collection skip in CI: {report.longrepr}"
+
+
 def _with_dbname(url: str, dbname: str) -> str:
     parts = urlsplit(url)
     return urlunsplit(parts._replace(path=f"/{dbname}"))
@@ -74,18 +86,31 @@ def admin_database_url() -> str:
     return url
 
 
-@pytest.fixture(scope="session")
-def database_url(admin_database_url: str) -> Iterator[str]:
-    """A fresh, migrated database for this test session."""
+@contextmanager
+def _temporary_database(admin_database_url: str) -> Iterator[str]:
+    """Create a uniquely named empty database; drop it on exit."""
     name = f"tuisku_test_{uuid.uuid4().hex[:12]}"
     with psycopg.connect(admin_database_url, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
-    url = _with_dbname(admin_database_url, name)
     try:
-        run_migrations(make_settings(url))
-        yield url
+        yield _with_dbname(admin_database_url, name)
     finally:
         with psycopg.connect(admin_database_url, autocommit=True) as admin:
             admin.execute(
                 sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
             )
+
+
+@pytest.fixture(scope="session")
+def database_url(admin_database_url: str) -> Iterator[str]:
+    """A fresh database for this test session, migrated with the repository's migrations."""
+    with _temporary_database(admin_database_url) as url:
+        run_migrations(make_settings(url))
+        yield url
+
+
+@pytest.fixture
+def empty_database_url(admin_database_url: str) -> Iterator[str]:
+    """A fresh, unmigrated database for one test."""
+    with _temporary_database(admin_database_url) as url:
+        yield url

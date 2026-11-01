@@ -21,6 +21,7 @@ def create_pool(settings: Settings) -> AsyncConnectionPool:
         max_size=settings.pool_max_size,
         kwargs={"connect_timeout": 5},
         open=False,
+        check=AsyncConnectionPool.check_connection,
         name="tuisku",
     )
 

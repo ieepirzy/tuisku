@@ -1,7 +1,5 @@
 import asyncio
 
-import psycopg
-
 from tests.conftest import make_settings
 from tuisku import db
 
@@ -21,7 +19,3 @@ def test_fetch_helpers_return_dicts(database_url: str) -> None:
             await pool.close()
 
     asyncio.run(run())
-
-
-def test_psycopg_is_importable() -> None:
-    assert psycopg.__version__

@@ -6,9 +6,10 @@ The database URL is a secret: it is held as ``SecretStr`` so it never appears in
 
 from __future__ import annotations
 
+from typing import Self
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ALLOWED_SCHEMES = frozenset({"postgresql", "postgres"})
@@ -34,6 +35,11 @@ class Settings(BaseSettings):
     ready_timeout_seconds: float = Field(default=2.0, gt=0)
     # Path to alembic.ini; relative paths resolve against the working directory.
     alembic_config: str = "alembic.ini"
+    # How long `tuisku migrate` waits for another migrator's advisory lock.
+    migration_lock_timeout_seconds: float = Field(default=300.0, gt=0)
+    # Postgres lock_timeout for migration DDL, so a blocked ALTER fails fast
+    # instead of queueing every other query on the table behind it.
+    migration_ddl_lock_timeout_seconds: float = Field(default=30.0, gt=0)
 
     @field_validator("database_url")
     @classmethod
@@ -46,6 +52,12 @@ class Settings(BaseSettings):
             # Never echo the value: it may carry a password.
             raise ValueError("must be a postgresql:// URL")
         return value
+
+    @model_validator(mode="after")
+    def _check_pool_bounds(self) -> Self:
+        if self.pool_min_size > self.pool_max_size:
+            raise ValueError("pool_min_size must not exceed pool_max_size")
+        return self
 
     def require_database_url(self) -> str:
         """Return the database URL, or raise ConfigError when it is not configured."""

@@ -14,7 +14,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.pool import NullPool
 
 from tuisku.config import Settings
-from tuisku.migrate import to_sqlalchemy_url
+from tuisku.migrate import migration_lock, to_sqlalchemy_url
 
 config = context.config
 
@@ -24,13 +24,13 @@ if config.config_file_name is not None and not config.attributes.get("skip_loggi
 target_metadata = None
 
 
-def _database_url() -> str:
-    return to_sqlalchemy_url(Settings().require_database_url())
+def _database_url(settings: Settings) -> str:
+    return to_sqlalchemy_url(settings.require_database_url())
 
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=_database_url(),
+        url=_database_url(Settings()),
         target_metadata=target_metadata,
         literal_binds=True,
         transaction_per_migration=True,
@@ -51,14 +51,15 @@ def _run(connection: Connection) -> None:
 
 def run_migrations_online() -> None:
     # `tuisku migrate` passes a connection that already holds the migration
-    # advisory lock; plain `alembic upgrade` falls back to its own connection.
+    # advisory lock; plain `alembic upgrade` opens its own and takes the same lock.
     connection: Connection | None = config.attributes.get("connection")
     if connection is not None:
         _run(connection)
         return
-    engine = create_engine(_database_url(), poolclass=NullPool)
+    settings = Settings()
+    engine = create_engine(_database_url(settings), poolclass=NullPool)
     try:
-        with engine.connect() as conn:
+        with engine.connect() as conn, migration_lock(conn, settings):
             _run(conn)
     finally:
         engine.dispose()
