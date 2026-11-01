@@ -55,10 +55,16 @@ login or rate limits for their products, including agents built on the Claude Ag
    MCP servers, shell, web fetch. An injected instruction could use those tools to exfiltrate data
    or act. The runtime contract therefore works like this:
    - The harness declares its complete tool list and network egress policy at `start`.
-   - Tuisku compares the declaration with a deployment allowlist for the tier. It refuses the
-     session, or marks it untrusted, if the declaration includes anything beyond Tuisku's tools
-     and the allowlist.
-   - Tuisku records the declaration in the incident timeline.
+   - Tuisku compares the declaration with a deployment allowlist for the tier, and **refuses**
+     the session if it includes anything beyond Tuisku's tools and that allowlist.
+   - The declaration is stored in the session's L4 record (`investigator_sessions`). The
+     timeline only notes, by id, that a session started.
+   - A session can only be started with a person-bound operator token. The four-eyes rule
+     compares *persons*, not tokens: a person never approves proposals from a session they
+     started.
+   - The tool surface connects to Postgres as a separate `tuisku_investigator` role. That role
+     can `SELECT` what its tier allows and `INSERT` only into L4 tables, so even a bug in the
+     tool surface cannot write L0–L3.
 
    A declaration is only a claim, so the deployment must also enforce it: run the investigator
    runtime with no tools other than Tuisku's MCP server, and deny network egress except to the
@@ -145,7 +151,6 @@ login or rate limits for their products, including agents built on the Claude Ag
 ## Consequences
 
 - The deterministic core ships first and is useful on its own. The agent layer plugs in later,
-  with no schema changes beyond the `hypotheses`, `proposed_actions` and `evidence_requests`
-  tables.
+  with no schema changes beyond the L4 tables (`hypotheses`, `investigator_sessions`, `tool_calls`, `proposed_actions`, `evidence_requests`).
 - Swapping Miragen for another harness changes no Tuisku code.
 - Autonomous containment needs its own ADR, and the deploying estate's own decision.

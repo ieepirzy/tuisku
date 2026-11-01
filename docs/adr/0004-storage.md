@@ -34,11 +34,19 @@ are mutable working objects that keep a history.
        it clears raw bodies and redacts L1/L2 payloads (`attributes`, `unmapped`,
        `explanation`) instead of deleting rows. Each time, it writes an append-only tombstone:
        row id, sha256, actor and time.
-     - **Holds:** it touches nothing in the transitive evidence closure of an incident whose
-       status is not `closed`. The same applies to a finding that is not `resolved` or
-       `expired`.
-     - **Trigger exception:** the evidence-table triggers allow exactly one change, setting
-       those payload columns to NULL, and only when `current_user = 'tuisku_owner'`.
+     - **Holds:** it touches nothing in the transitive evidence closure of an incident that
+       is not `closed`, or that closed less than the configured hold period ago. It also leaves
+       alone anything in the closure of a finding that is neither `resolved` nor `expired`.
+     - **What it redacts:** besides L0 bodies and L1/L2 payloads, it also redacts
+       `entity_keys` and the payloads of closed findings and incidents once they pass the hold
+       period. The ids, hashes, kinds, times and statuses stay.
+     - **Trigger exception:** the evidence-table triggers allow exactly one change, and only
+       when `current_user = 'tuisku_owner'`. That change sets the payload columns (`body`,
+       `attributes`, `unmapped`, `explanation`, `entity_keys`) to NULL or empty, and the
+       trigger checks that every other column is unchanged (`OLD` equals `NEW`).
+     - **Retention periods:** the policy table rejects an L1/L2 period shorter than the longest
+       baseline lookback of any loaded rule (`windows × timespan`), so retention cannot quietly
+       break baselines.
 
    Row and statement triggers that reject `UPDATE`, `DELETE` and `TRUNCATE` on evidence tables
    stay as a second line of defence. `tuisku_app` is never a member of `tuisku_owner`.
@@ -47,8 +55,7 @@ are mutable working objects that keep a history.
    - `observations`, `detections`, and the link tables between them (including
      `detection_evidence`)
    - the histories: `finding_events` and `incident_events`
-   - later, the L4 tables (`hypotheses`, `investigator_sessions`, `tool_calls`,
-     `proposed_actions`)
+   - later, the L4 tables (`hypotheses`, `investigator_sessions`, `tool_calls`, `proposed_actions`, `evidence_requests`)
 
    Findings and incidents are mutable projections. Every change to one writes a
    `finding_events` or `incident_events` row.
@@ -78,7 +85,8 @@ are mutable working objects that keep a history.
    - a `uid uuid` (v4) on every row for external reference
    - deterministic UUIDv5 ids only for exported STIX objects ([0008](0008-identifiers-and-interchange.md))
 9. **Retention** is a configured policy per layer, for example raw bodies kept for N days.
-   Anything an open incident references is held until the incident closes, plus N days.
+   Anything an incident references is held until the incident has been closed for the hold
+   period.
    Retention is a prerequisite for ingesting user-traffic sources such as HTTP and DNS logs,
    which carry personal data. It must be configured before such a source is enabled in
    production; the first milestone's Harava source carries no URLs or values. Nothing above L0

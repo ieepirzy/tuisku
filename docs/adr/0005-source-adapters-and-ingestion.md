@@ -55,7 +55,8 @@ sensor sees.
 - **Parsed structure**
   - JSON nesting depth: 64.
   - Object keys per record: 4,096.
-  - OTLP datapoints per body: 10,000.
+  - OTLP datapoints per body: 10,000. For OTLP bodies the datapoint cap and the body-size cap replace the
+    key-count limit, which a 10,000-point body would otherwise exceed.
 - **Per-source rate:** a token bucket of records per second. When the bucket is empty Tuisku
   returns 429. Shippers buffer and retry, so evidence is delayed, not lost.
 - **Breaches:** exceeding a limit is recorded as a **meta-detection**, never silently absorbed.
@@ -64,8 +65,10 @@ sensor sees.
   - evaluator `tuisku`, authorship `tuisku`, and no raw record
   - the source as an entity key
 
-  At most one meta-detection is written per source and kind per 5 minutes; repeats increment a
-  counter in its explanation. Rules can select meta-detections by kind.
+  At most one meta-detection is written per source, kind and 5-minute bucket. A unique key on
+  `(source_id, kind, bucket)` with `ON CONFLICT DO NOTHING` enforces this, so it also holds
+  across API replicas. Repeats are counted in a mutable working table, `meta_counters`, never by
+  updating the detection. Rules can select meta-detections by kind.
 
 ### Sources, tokens and roles
 

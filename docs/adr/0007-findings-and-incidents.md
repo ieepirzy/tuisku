@@ -83,9 +83,15 @@ Grouping keys are built from attacker-controlled values, so the grouping itself 
 
   `resolved` and `closed` are separate states because confirming that nothing recurs is a step
   of its own.
-- **New evidence on a late-stage incident.** When a finding attaches to an incident that is
-  `contained` or `resolved`, the incident returns to `investigating` with a `reopened` event and
-  an **escalation** notification.
+- **New evidence on a late-stage incident.** "Attaching" here means any new detection or
+  linked row reaching a finding of the incident, including an existing finding that is still
+  open.
+  - If the incident is `contained` or `resolved`, it returns to `investigating` with a
+    `reopened` event and an **escalation** notification.
+  - If the incident is `closed`, a new incident opens and links to the closed one.
+  - **Closing or resolving an incident** sets each of its open findings to `resolved`, with a
+    `finding_events` row. Later activity therefore opens a new finding instead of being absorbed
+    silently. Closing an incident cannot mute detection.
 - **Escalation**, defined exactly, is either of two events:
   - the incident's severity increases
   - the incident is reopened
@@ -96,11 +102,12 @@ Grouping keys are built from attacker-controlled values, so the grouping itself 
   JSON payload.
   - `actor` is one of `system`, `rule:<id>@<rev>` or `operator:<token id>`. The server always
     sets it; it never comes from request content.
-  - `kind` is one of: `opened`, `finding_attached`, `status_changed`, `reopened`, `note`,
-    `hypothesis_added`, `hypothesis_confirmed`, `action_proposed`, `action_decided`,
+  - `kind` is one of `opened`, `finding_attached`, `status_changed`, `reopened`, `note`,
+    `session_started`, `session_ended`, `hypothesis_added`, `hypothesis_confirmed`,
+    `evidence_requested`, `evidence_decided`, `action_proposed`, `action_decided` or
     `action_executed`.
-  - Events about L4 rows (`hypothesis_added`, `action_proposed`) carry only the L4 row id and
-    the investigator session id. The content stays in L4 ([0002](0002-epistemic-layers.md)).
+  - Events about L4 rows (`session_*`, `hypothesis_added`, `evidence_requested`,
+    `action_proposed`) carry only the L4 row id and the investigator session id. The content stays in L4 ([0002](0002-epistemic-layers.md)).
   - The incident row is a projection of its timeline: current status, severity and counts.
 - **Evidence.** An incident's evidence is the transitive closure of its findings, through their
   detections and observations, down to L0. It is computed, never copied.

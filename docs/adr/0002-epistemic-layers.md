@@ -33,7 +33,7 @@ deterministic provenance from suggested relevance.
 | L1 observation | `observations` | a versioned adapter, deterministically from L0 | a network flow, a DNS answer, a process exec, a metric sample |
 | L2 detection | `detections` | a deterministic mechanism evaluating a rule or built-in check | Zeek `notice`, Suricata signature match, Falco rule match, Harava refusal, a Tuisku pack rule |
 | L3 finding / incident | `findings`, `incidents`, `incident_events` | Tuisku's deterministic grouping, and people | "the agent caller had outbound data refused 3× in 1h" |
-| L4 inference | `hypotheses`, `investigator_sessions`, `tool_calls`, `proposed_actions` (later) | an agent or other investigator | "likely objective: exfiltration through an agent tool" |
+| L4 inference | `hypotheses`, `investigator_sessions`, `tool_calls`, `proposed_actions`, `evidence_requests` (later) | an agent or other investigator | "likely objective: exfiltration through an agent tool" |
 
 A row's layer is fixed by the table it is in and cannot change.
 
