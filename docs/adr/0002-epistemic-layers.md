@@ -53,8 +53,9 @@ are not merged into one flag:
   - `tuisku`: a pack shipped in this repository.
 
 Adapters infer authorship conservatively and allow an override through adapter options.
-Suricata signature ids 1000000–1999999 are reserved for local rules by convention; every other
-sid is `community`. Falco rules default to `community`, and a deployment can list its local rule
+Suricata signature ids 1000000–1999999 are reserved for local rules by convention, and
+ids 2200000–2299999 are Suricata's own decoder, stream and app-layer event rules (`builtin`);
+every other sid is `community`. Falco rules default to `community`, and a deployment can list its local rule
 names. A pack declares its authorship in its manifest ([0006](0006-detection-rules-and-correlation.md)).
 
 ### Rules for every layer
