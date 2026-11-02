@@ -1,0 +1,207 @@
+[
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [
+          "host:node-1"
+        ],
+        "event_time": "2026-10-30T12:30:00+00:00",
+        "explanation": {
+          "matched_rule": "Synthetic odd priority rule",
+          "output": "Odd priority",
+          "priority": "Spicy",
+          "source": "syscall",
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Synthetic odd priority rule",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "Spicy",
+          "rule": "Synthetic odd priority rule",
+          "source": "syscall",
+          "tags": []
+        },
+        "severity": 0,
+        "title": "Synthetic odd priority rule"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "device": {
+            "hostname": "node-1"
+          },
+          "event_time_ns": 1793363400000000000,
+          "process": {
+            "name": "bash",
+            "pid": 77
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [
+          "host:node-1"
+        ],
+        "event_time": "2026-10-30T12:30:00+00:00",
+        "flags": [],
+        "kind": "falco.event",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "output_fields": {
+            "evt.time": 1793363400000000000
+          },
+          "record": {
+            "time": "2026-10-30T12:30:00Z"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [
+          "T1611"
+        ],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [
+          "host:node-1"
+        ],
+        "event_time": "2026-10-30T12:31:00+00:00",
+        "explanation": {
+          "attack_tags": [
+            "T1611"
+          ],
+          "matched_rule": "Synthetic emergency rule",
+          "output": "Mixed case",
+          "priority": "EMERGENCY",
+          "source": "syscall",
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Synthetic emergency rule",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "EMERGENCY",
+          "rule": "Synthetic emergency rule",
+          "source": "syscall",
+          "tags": [
+            "T1611"
+          ]
+        },
+        "severity": 5,
+        "title": "Synthetic emergency rule"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "device": {
+            "hostname": "node-1"
+          },
+          "event_time_ns": 1793363460000000000,
+          "process": {
+            "name": "mount",
+            "pid": 78
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [
+          "host:node-1"
+        ],
+        "event_time": "2026-10-30T12:31:00+00:00",
+        "flags": [],
+        "kind": "falco.event",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "output_fields": {
+            "evt.time": 1793363460000000000,
+            "evt.type": "mount"
+          },
+          "record": {
+            "time": "2026-10-30T12:31:00Z"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [
+          "host:node-1"
+        ],
+        "event_time": "2026-10-30T12:32:00+00:00",
+        "explanation": {
+          "matched_rule": "Synthetic debug rule",
+          "output": "Debug",
+          "priority": "Debug",
+          "source": "syscall",
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Synthetic debug rule",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "Debug",
+          "rule": "Synthetic debug rule",
+          "source": "syscall",
+          "tags": []
+        },
+        "severity": 1,
+        "title": "Synthetic debug rule"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "device": {
+            "hostname": "node-1"
+          },
+          "event_time_ns": 1793363520000000000
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [
+          "host:node-1"
+        ],
+        "event_time": "2026-10-30T12:32:00+00:00",
+        "flags": [],
+        "kind": "falco.event",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "output_fields": {
+            "evt.time": 1793363520000000000
+          },
+          "record": {
+            "time": "2026-10-30T12:32:00Z"
+          }
+        }
+      }
+    ]
+  }
+]

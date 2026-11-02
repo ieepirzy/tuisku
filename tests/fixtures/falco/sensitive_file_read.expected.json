@@ -1,0 +1,105 @@
+[
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [
+          "T1555"
+        ],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [
+          "host:build-02.example.com"
+        ],
+        "event_time": "2026-10-30T12:05:10+00:00",
+        "explanation": {
+          "attack_tags": [
+            "T1555"
+          ],
+          "matched_rule": "Read sensitive file untrusted",
+          "mitre_tactics": [
+            "mitre_credential_access"
+          ],
+          "output": "12:05:10.000000001: Warning Sensitive file opened for reading by non-trusted program (file=/etc/shadow gparent=bash ggparent=sshd evt_type=openat user=alice user_uid=1001 process=cat proc_exepath=/usr/bin/cat parent=bash command=cat /etc/shadow container_id=host container_image=<NA>)",
+          "priority": "Warning",
+          "source": "syscall",
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Read sensitive file untrusted",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "Warning",
+          "rule": "Read sensitive file untrusted",
+          "source": "syscall",
+          "tags": [
+            "maturity_stable",
+            "host",
+            "container",
+            "filesystem",
+            "mitre_credential_access",
+            "T1555"
+          ]
+        },
+        "severity": 3,
+        "title": "Read sensitive file untrusted"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "actor": {
+            "user": {
+              "name": "alice",
+              "uid": "1001"
+            }
+          },
+          "device": {
+            "hostname": "build-02.example.com"
+          },
+          "event_time_ns": 1793361910000000001,
+          "file": {
+            "path": "/etc/shadow"
+          },
+          "process": {
+            "cmd_line": "cat /etc/shadow",
+            "file": {
+              "path": "/usr/bin/cat"
+            },
+            "name": "cat",
+            "parent_process": {
+              "name": "bash"
+            },
+            "pid": 31337
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [
+          "host:build-02.example.com"
+        ],
+        "event_time": "2026-10-30T12:05:10+00:00",
+        "flags": [],
+        "kind": "file.access",
+        "ocsf_class_uid": 1001,
+        "unmapped": {
+          "output_fields": {
+            "container.id": "host",
+            "container.image.repository": null,
+            "evt.time": 1793361910000000001,
+            "evt.type": "openat",
+            "proc.aname[2]": "bash",
+            "proc.aname[3]": "sshd"
+          },
+          "record": {
+            "time": "2026-10-30T12:05:10.000000001Z"
+          }
+        }
+      }
+    ]
+  }
+]

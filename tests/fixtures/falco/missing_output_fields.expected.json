@@ -1,0 +1,65 @@
+[
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [
+          "host:node-3"
+        ],
+        "event_time": "2026-10-30T12:40:00.987654+00:00",
+        "explanation": {
+          "matched_rule": "Synthetic rule without fields",
+          "output": "12:40:00.000000000: Error Something matched",
+          "priority": "Error",
+          "source": "syscall",
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Synthetic rule without fields",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "Error",
+          "rule": "Synthetic rule without fields",
+          "source": "syscall",
+          "tags": [
+            "maturity_sandbox"
+          ]
+        },
+        "severity": 4,
+        "title": "Synthetic rule without fields"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "device": {
+            "hostname": "node-3"
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [
+          "host:node-3"
+        ],
+        "event_time": "2026-10-30T12:40:00.987654+00:00",
+        "flags": [
+          "output_fields_missing"
+        ],
+        "kind": "falco.event",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "record": {
+            "time": "2026-10-30T12:40:00.987654321Z"
+          }
+        }
+      }
+    ]
+  }
+]

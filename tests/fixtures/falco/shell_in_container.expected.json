@@ -1,0 +1,126 @@
+[
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [
+          "T1059"
+        ],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [
+          "host:node-1",
+          "k8s:default/web-1",
+          "k8s-ns:default",
+          "image:docker.io/library/nginx",
+          "sha256:abababababababababababababababababababababababababababababababab",
+          "process:node-1/4242/1793361590000000000"
+        ],
+        "event_time": "2026-10-30T12:00:00.123456+00:00",
+        "explanation": {
+          "attack_tags": [
+            "T1059"
+          ],
+          "matched_rule": "Terminal shell in container",
+          "mitre_tactics": [
+            "mitre_execution"
+          ],
+          "output": "12:00:00.123456789: Notice A shell was spawned in a container with an attached terminal (evt_type=execve user=root user_uid=0 process=sh proc_exepath=/bin/sh parent=runc command=sh terminal=34816 container_id=3ad7b26ded6d container_image=docker.io/library/nginx k8s_ns=default k8s_pod_name=web-1)",
+          "priority": "Notice",
+          "source": "syscall",
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Terminal shell in container",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "Notice",
+          "rule": "Terminal shell in container",
+          "source": "syscall",
+          "tags": [
+            "T1059",
+            "container",
+            "maturity_stable",
+            "mitre_execution",
+            "shell"
+          ]
+        },
+        "severity": 2,
+        "title": "Terminal shell in container"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "actor": {
+            "user": {
+              "name": "root",
+              "uid": "0"
+            }
+          },
+          "container": {
+            "image": {
+              "name": "docker.io/library/nginx",
+              "tag": "1.27"
+            },
+            "name": "web",
+            "uid": "3ad7b26ded6d"
+          },
+          "device": {
+            "hostname": "node-1"
+          },
+          "event_time_ns": 1793361600123456789,
+          "k8s": {
+            "namespace": "default",
+            "pod": "web-1"
+          },
+          "process": {
+            "cmd_line": "sh",
+            "file": {
+              "path": "/bin/sh"
+            },
+            "name": "sh",
+            "parent_process": {
+              "name": "runc",
+              "pid": 4200
+            },
+            "pid": 4242
+          }
+        },
+        "community_id": null,
+        "correlation": {
+          "falco.uuid": "5d0b0f8e-1b7a-4c1e-9d2a-2f0e6c1a9b01"
+        },
+        "entity_keys": [
+          "host:node-1",
+          "k8s:default/web-1",
+          "k8s-ns:default",
+          "image:docker.io/library/nginx",
+          "sha256:abababababababababababababababababababababababababababababababab",
+          "process:node-1/4242/1793361590000000000"
+        ],
+        "event_time": "2026-10-30T12:00:00.123456+00:00",
+        "flags": [],
+        "kind": "process.exec",
+        "ocsf_class_uid": 1007,
+        "unmapped": {
+          "output_fields": {
+            "container.image.digest": "sha256:abababababababababababababababababababababababababababababababab",
+            "evt.time": 1793361600123456789,
+            "evt.type": "execve",
+            "proc.pid.ts": 1793361590000000000,
+            "proc.tty": 34816,
+            "user.loginuid": -1
+          },
+          "record": {
+            "time": "2026-10-30T12:00:00.123456789Z"
+          }
+        }
+      }
+    ]
+  }
+]

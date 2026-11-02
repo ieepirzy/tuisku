@@ -1,0 +1,81 @@
+[
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "device": {
+            "hostname": "node-1"
+          },
+          "event_time_ns": 1793372400000000000
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [
+          "host:node-1"
+        ],
+        "event_time": "2026-10-30T15:00:00+00:00",
+        "flags": [],
+        "kind": "falco.internal",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "output": "Falco metrics snapshot",
+          "output_fields": {
+            "evt.source": "syscall",
+            "evt.time": 1793372400000000000,
+            "falco.host_num_cpus": 4,
+            "falco.kernel_release": "6.1.0-example",
+            "falco.outputs_queue_num_drops": 0,
+            "falco.version": "0.39.0",
+            "scap.n_drops": 0,
+            "scap.n_evts": 123456
+          },
+          "record": {
+            "priority": "Informational",
+            "rule": "Falco internal: metrics snapshot",
+            "source": "syscall",
+            "time": "2026-10-30T15:00:00.000000000Z"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "device": {
+            "hostname": "node-1"
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [
+          "host:node-1"
+        ],
+        "event_time": "2026-10-30T15:01:00+00:00",
+        "flags": [],
+        "kind": "falco.internal",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "output": "Falco internal: syscall event drop. 12 system calls dropped in last second.",
+          "output_fields": {
+            "ebpf_enabled": "1",
+            "n_drops": 12,
+            "n_evts": 5000
+          },
+          "record": {
+            "priority": "Critical",
+            "rule": "Falco internal: syscall event drop",
+            "source": "internal",
+            "tags": [],
+            "time": "2026-10-30T15:01:00Z"
+          }
+        }
+      }
+    ]
+  }
+]
