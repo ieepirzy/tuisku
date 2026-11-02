@@ -20,15 +20,19 @@ OPERATOR = "00000000-0000-4000-8000-000000000000"  # its token secret is its uid
 RULE = "66666666-6666-4666-8666-666666666666"
 
 
-@pytest.fixture(autouse=True)
-def _live_operator(app_db: AppDatabase) -> None:
-    """Triage requests need a live operator token (ADR 0011)."""
-    with psycopg.connect(app_db.owner_url) as conn:
+def _ensure_operator(owner_url: str) -> None:
+    with psycopg.connect(owner_url) as conn:
         conn.execute(
             "INSERT INTO operator_tokens (uid, name, roles, token_sha256) VALUES (%s, "
             "'test-operator', '{triage}', sha256(%s::bytea)) ON CONFLICT (uid) DO NOTHING",
             (OPERATOR, OPERATOR.encode()),
         )
+
+
+@pytest.fixture(autouse=True)
+def _live_operator(app_db: AppDatabase) -> None:
+    """Triage requests need a live operator token (ADR 0011)."""
+    _ensure_operator(app_db.owner_url)
 
 
 NEW_EVIDENCE_TABLES = [
@@ -41,6 +45,7 @@ NEW_EVIDENCE_TABLES = [
     "pack_loads",
     "notifications",
     "notification_deliveries",
+    "triage_requests",
 ]
 _COLUMN = {
     "finding_events": "kind",
@@ -52,6 +57,7 @@ _COLUMN = {
     "pack_loads": "version",
     "notifications": "kind",
     "notification_deliveries": "status",
+    "triage_requests": "status",
 }
 
 
@@ -85,7 +91,19 @@ def _an_ingested_observation(app_url: str, owner_url: str) -> int:
             "'dummy.record', now(), now(), '1.9.0', '{}') RETURNING id",
             (raw, attempt, source_id),
         ).fetchall()
+        [(det,)] = conn.execute(
+            "INSERT INTO detections (raw_record_id, parse_attempt_id, source_id, evaluator, "
+            "authorship, kind, identity, title, severity_id, received_at, eval_time, "
+            "ocsf_version, rule_ref) VALUES (%s, %s, %s, 'sensor', 'community', 'dummy.alert', "
+            "'x', 't', 1, now(), now(), '1.9.0', '{}') RETURNING id",
+            (raw, attempt, source_id),
+        ).fetchall()
+        conn.execute(
+            "INSERT INTO detection_observations (detection_id, observation_id) VALUES (%s, %s)",
+            (det, obs),
+        )
         conn.execute("INSERT INTO evaluation_queue (observation_id) VALUES (%s)", (obs,))
+        conn.execute("INSERT INTO evaluation_queue (detection_id) VALUES (%s)", (det,))
     return obs
 
 
@@ -94,6 +112,7 @@ def worked(app_db: AppDatabase) -> AppDatabase:
     """Rows in every new evidence table, written with SQL as the worker role, as the worker
     writes them: a rule detection linked to its row and firing key, a finding and an incident
     with their links and events, a pack load, and a delivered notification."""
+    _an_ingested_observation(app_db.app_url, app_db.owner_url)  # a second, unlinked row
     obs = _an_ingested_observation(app_db.app_url, app_db.owner_url)
     with psycopg.connect(app_db.worker_url) as conn:
         [(det,)] = conn.execute(
@@ -168,6 +187,14 @@ def worked(app_db: AppDatabase) -> AppDatabase:
             "INSERT INTO notification_deliveries (notification_id, status) "
             "VALUES (%s, 'delivered')",
             (note,),
+        )
+    _ensure_operator(app_db.owner_url)  # module scope runs before the autouse fixture
+    with psycopg.connect(app_db.app_url) as conn:  # a triage request, as the API makes it
+        conn.execute("SELECT set_config('tuisku.operator_token', %s, true)", (OPERATOR,))
+        conn.execute(
+            "INSERT INTO triage_requests (target, target_uid, status, actor) SELECT 'finding', "
+            "uid, 'resolved', %s FROM findings WHERE title = 'seed 2'",
+            (f"operator:{OPERATOR}",),
         )
     for table in NEW_EVIDENCE_TABLES:
         assert query(app_db.owner_url, f"SELECT count(*) FROM {table}")[0][0] > 0, table
@@ -489,3 +516,86 @@ def test_a_triage_request_cannot_expire_a_finding(worked: AppDatabase) -> None:
                 conn.execute(statement)  # type: ignore[arg-type]
         conn.rollback()
     assert info.value.diag.sqlstate == "TK409"
+
+
+@pytest.mark.parametrize(
+    ("url", "statements"),
+    [
+        (
+            "app_url",
+            [
+                f"SELECT set_config('tuisku.operator_token', '{OPERATOR}', true)",
+                "INSERT INTO triage_requests (target, target_uid, status, actor, requested_at) "
+                f"SELECT 'finding', uid, 'acknowledged', 'operator:{OPERATOR}', '2000-01-01Z' "
+                "FROM findings WHERE status = 'open' ORDER BY id LIMIT 1 RETURNING requested_at",
+            ],
+        ),
+        (
+            "worker_url",
+            [
+                "INSERT INTO notifications (dedupe_key, kind, severity_id, payload, created_at) "
+                "VALUES ('forged:' || gen_random_uuid(), 'x', 0, '{}', '2000-01-01Z') "
+                "RETURNING created_at"
+            ],
+        ),
+    ],
+    ids=["triage_requests.requested_at", "notifications.created_at"],
+)
+def test_request_and_outbox_timestamps_come_from_the_database(
+    worked: AppDatabase, url: str, statements: list[str]
+) -> None:
+    with psycopg.connect(getattr(worked, url)) as conn:
+        for statement in statements[:-1]:
+            conn.execute(statement)  # type: ignore[arg-type]
+        rows = conn.execute(statements[-1]).fetchall()  # type: ignore[arg-type]
+        [(now,)] = conn.execute("SELECT now()").fetchall()
+        conn.rollback()
+    assert rows == [(now,)]
+
+
+@pytest.mark.parametrize("table", ["finding_events", "incident_events"])
+def test_operators_write_only_triage_event_kinds(worked: AppDatabase, table: str) -> None:
+    """Behind the grants (the API role has no INSERT on events): given one, in a transaction that
+    is rolled back, a live operator still cannot write a non-triage event such as `opened`."""
+    parent = "finding_id" if table == "finding_events" else "incident_id"
+    source = "findings" if table == "finding_events" else "incidents"
+    with psycopg.connect(worked.owner_url) as conn:
+        conn.execute(f'GRANT "{worked.app_role}" TO CURRENT_USER')  # type: ignore[arg-type]
+        conn.execute(f'GRANT INSERT ON {table} TO "{worked.app_role}"')  # type: ignore[arg-type]
+        conn.execute(f'SET LOCAL ROLE "{worked.app_role}"')  # type: ignore[arg-type]
+        with pytest.raises(errors.InsufficientPrivilege, match="only triage events"):
+            conn.execute(  # type: ignore[arg-type]
+                f"INSERT INTO {table} ({parent}, actor, kind) SELECT id, "
+                f"'operator:{OPERATOR}', 'opened' FROM {source} LIMIT 1"
+            )
+        conn.rollback()
+
+
+def test_revision_0002_needs_the_worker_role_with_an_app_role(
+    app_db: AppDatabase, empty_database_url: str
+) -> None:
+    from alembic import command
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import NullPool
+
+    from tests.conftest import make_settings
+    from tuisku.migrate import alembic_config, run_migrations, to_sqlalchemy_url
+
+    settings = make_settings(
+        empty_database_url, app_role=app_db.app_role, worker_role=app_db.worker_role
+    )
+    run_migrations(settings, "0001")
+    cfg = alembic_config(settings)
+    engine = create_engine(to_sqlalchemy_url(settings.require_database_url()), poolclass=NullPool)
+    try:
+        with engine.connect() as conn:
+            cfg.attributes.update(
+                connection=conn,
+                skip_logging_config=True,
+                app_role=app_db.app_role,
+                worker_role=None,
+            )
+            with pytest.raises(ValueError, match="separate worker role is required"):
+                command.upgrade(cfg, "0002")
+    finally:
+        engine.dispose()
