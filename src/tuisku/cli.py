@@ -145,6 +145,12 @@ def _build_parser() -> argparse.ArgumentParser:
     worker.add_argument(
         "--check-packs", action="store_true", help="load and validate the packs, then exit"
     )
+    worker.add_argument(
+        "--health-port",
+        type=int,
+        default=None,
+        help="serve the worker's health (status only, unauthenticated) on this port",
+    )
     _add_admin_commands(sub)
     return parser
 
@@ -266,6 +272,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "worker":
             from tuisku.worker.run import run_worker
 
+            if args.health_port is not None:
+                settings = settings.model_copy(update={"worker_health_port": args.health_port})
             return run_worker(settings, once=args.once, check_only=args.check_packs)
         elif args.command == "migrate":
             from tuisku.migrate import run_migrations

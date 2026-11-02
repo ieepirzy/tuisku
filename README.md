@@ -183,7 +183,9 @@ append-only `triage_requests`, nothing more: no `UPDATE` on findings or incident
 events. An owner trigger applies each request with the triage rules (a live, unexpired operator
 token with the triage role; a suppression at most 30 days from the finding's first suppression;
 the incident transition table) and writes its event, or refuses it, and the API answers 404 or
-409 as before. It cannot write notifications at all: the pages triage causes are written by
+409 as before. The request must come with the operator's bearer secret, which the API sets
+for the transaction only and the trigger checks against the token's hash, so the API role
+cannot triage as an operator whose token it has not seen. It cannot write notifications at all: the pages triage causes are written by
 owner-defined triggers. ADR 0011 lists exactly what each role can
 write.
 
@@ -202,11 +204,15 @@ reserve slots for the worker so an exhausted pool cannot lock it out: set
 `reserved_connections` (for example 3) and `GRANT pg_use_reserved_connections TO
 tuisku_worker`. Give the database a disk quota, or at least disk alerts, sized to the retention
 policy. The worker's backlog check (`tuisku.meta.backlog`) pages when the queue or the
-notification outbox falls behind. A stalled worker cannot page about itself, so poll the
-unauthenticated `GET /v1/worker/health` from a monitor outside Tuisku: it answers 503 when no
-worker heartbeat is newer than `TUISKU_WORKER_HEARTBEAT_STALE_SECONDS` (120) or the oldest
-undelivered notification is older than `TUISKU_WORKER_BACKLOG_SECONDS`, and reports the age of
-the oldest queued row and undelivered notification (ADR 0011, "Availability limits").
+notification outbox falls behind. A stalled worker cannot page about itself, and a compromised API could fake any health
+view it serves, so monitor the worker process directly: `tuisku worker --health-port 8081`
+(or `TUISKU_WORKER_HEALTH_PORT`, bound to `TUISKU_WORKER_HEALTH_HOST`) answers any `GET` with
+200 `{"status": "ok"}` while its last healthy pass is newer than
+`TUISKU_WORKER_HEARTBEAT_STALE_SECONDS` (120), and 503 otherwise, without authentication and
+with status only. Set `TUISKU_WORKER_DEADMAN_URL` to have the worker fetch a dead-man's-switch
+URL after each healthy round. `GET /v1/worker/health` on the API is advisory and needs the
+`read` role: it shows the heartbeat and the age of the oldest queued row and undelivered
+notification (ADR 0011, "Availability limits").
 
 Only the worker role writes rule output: `tuisku`-evaluated detections and their links,
 `detection_evidence`, `rule_firings`, `findings`, `incidents`, `finding_detections`,

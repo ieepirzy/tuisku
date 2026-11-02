@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from psycopg import errors
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from tuisku.api.deps import get_clock, get_pool, require_role
+from tuisku.api.deps import bearer_token, get_clock, get_pool, require_role
 from tuisku.store import lifecycle, triage
 from tuisku.store.admin import OperatorCredential
 from tuisku.store.tokens import Role
@@ -130,6 +130,7 @@ async def set_incident_status(
             uid,
             body.status,
             actor=lifecycle.operator_actor(operator.token_uid),
+            bearer=bearer_token(request),
             disposition=body.disposition,
             reason=body.reason,
             now=now,
@@ -154,6 +155,7 @@ async def set_finding_status(
             uid,
             body.status,
             actor=lifecycle.operator_actor(operator.token_uid),
+            bearer=bearer_token(request),
             reason=body.reason,
             suppressed_until=body.suppressed_until,
             now=now,

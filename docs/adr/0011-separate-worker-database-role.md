@@ -53,13 +53,25 @@ able to forge rule output or firing keys.
     When a token was last used is kept in the API-only `source_token_usage` table, which the
     worker never reads. Sources are renamed only by the owner.
   - `operator_tokens`: `SELECT`, `INSERT` of tokens without a person (read, triage, admin;
-    person-bound and approve tokens stay owner-only, ADR 0005), `UPDATE (revoked_at)` only,
-    never `DELETE`. The worker never reads it.
+    person-bound and approve tokens stay owner-only, ADR 0005), never `UPDATE` or `DELETE`. A
+    token is revoked by inserting an `operator_token_revocations` row (append-only), which an
+    owner trigger applies, so a revocation cannot be undone; authentication and triage also
+    check the revocation rows. Person-bound and approve tokens are revoked only by the owner.
+    On `operator_tokens`, `sources` and `source_tokens` rows the API role creates, a trigger
+    sets `created_at` (and any `revoked_at` or `disabled_at` given) to `now()`. The worker
+    never reads `operator_tokens`.
   - `triage_requests`: `INSERT` only (append-only, `requested_at` forced to `now()`). The API
     role has no `UPDATE` on `findings` or `incidents` and no `INSERT` on their events. Each
     triage request is applied by an owner trigger (`SECURITY DEFINER`) with the rules of ADR
     0007. The actor must be an `operator:<uid>` naming a live operator token (not revoked, not
-    expired, holding `triage` or `admin`). Only attachable findings change, and a finding is
+    expired, holding `triage` or `admin`), and the request must come with that token's bearer
+    secret: the API sets it for the transaction only (`set_config('tuisku.operator_token', ...,
+    true)`, cleared after the insert, never stored), and the trigger hashes it and matches it
+    against the token's `token_sha256`. A missing or mismatched secret is refused. This stops
+    the API role from attributing triage to an operator whose token it has not seen. It does
+    not stop a compromised API process from reusing a token presented to it while it is
+    compromised, or from triaging as a token it issued itself; both are attributed to that
+    token. Only attachable findings change, and a finding is
     never set to `expired`. A suppression needs an expiry and a reason, and ends within 30
     days of the finding's first suppression, so a lift and re-suppress does not restart the
     clock. The trigger sets the suppression's start and count itself. Incidents move only
@@ -88,8 +100,8 @@ able to forge rule output or firing keys.
   least of all a `SECURITY DEFINER` pager, to a table of its own.
 - **No row locks the worker waits on, no table locks, no advisory locks.** A row lock needs
   `UPDATE` (or `DELETE`). The only tables the API role may update are `meta_counters` (its own
-  ingest counters; row-level security hides the rest), `operator_tokens` and
-  `source_token_usage`, none of which the worker locks or writes. So `FOR UPDATE`,
+  ingest counters; row-level security hides the rest) and `source_token_usage`, neither of
+  which the worker locks or writes. So `FOR UPDATE`,
   `FOR NO KEY UPDATE`, `FOR SHARE` and `FOR KEY SHARE` are refused on every other table. `LOCK
   TABLE` above `ROW EXCLUSIVE` needs table-level `UPDATE`, `DELETE` or `TRUNCATE`, which the
   API role holds only on `source_token_usage`. Postgres checks no privilege on advisory locks,
@@ -109,8 +121,16 @@ able to forge rule output or firing keys.
   Tuisku expects a database of its own. Any role may still create large objects
   (`lo_create()`), and the API role may insert evidence as fast as Postgres accepts it.
   Deployments set a disk quota, or at least disk alerts.
-- **Delivery order.** The drain delivers the most severe notification first, then the oldest,
-  so a backlog of lesser pages never holds back a newer high-severity one.
+- **Delivery order.** The drain delivers pages about Tuisku itself first: backlog and
+  dead-letter pages, and pages of `tuisku-meta` findings (which include
+  `notification_undeliverable` and `evaluation_failed`). A trigger sets `notifications.meta`
+  from what the page refers to, whatever the writer supplies. Then the most severe first, then
+  the oldest, so a backlog of lesser pages never holds back a newer high-severity one.
+- **Pages triage and expiry cause.** A finding leaving `suppressed` by any route (triage, the
+  suppression's own expiry, its incident closing, or the finding expiring while suppressed)
+  pages every threshold crossed meanwhile and one `finding_suppression_ended` summary with the
+  count accumulated during the suppression. An incident reopened pages an escalation at most
+  once per incident per 5-minute bucket, however often a request bounces it.
 - **The worker role** writes all of the above that the API cannot. A queued row whose parse
   attempt was superseded is never dropped as stale: no reprocessing run exists yet, so the
   worker raises a `tuisku.meta.evaluation_failed` (subject `superseded_derivation`) and
@@ -138,12 +158,19 @@ able to forge rule output or firing keys.
   `pg_use_reserved_connections` (Postgres 16) to keep slots free for the worker.
 - Integrity is enforced: no role but the worker writes rule output, findings, incidents or
   pages, and every change by the API role is an attributed request. Availability is not
-  prevented, only detected. The worker writes a heartbeat (`worker_heartbeats`, worker-only to
-  write) on every pass, with the age of the oldest queued row and undelivered notification.
-  `GET /v1/worker/health` is unauthenticated and answers 503 when no heartbeat is fresh
-  (`TUISKU_WORKER_HEARTBEAT_STALE_SECONDS`, 120 s) or when the oldest undelivered notification
-  is older than `TUISKU_WORKER_BACKLOG_SECONDS`. A monitor outside the database (and outside
-  Tuisku) must poll it, because a stalled worker cannot page about itself.
+  prevented, only detected, and only from outside what a compromised API controls. The worker
+  process serves its own health: `tuisku worker --health-port` (or
+  `TUISKU_WORKER_HEALTH_PORT`) is a minimal, unauthenticated HTTP listener answering
+  `{"status": "ok"}` with 200 while its last healthy pass is newer than
+  `TUISKU_WORKER_HEARTBEAT_STALE_SECONDS` (120 s), and 503 otherwise. A pass is healthy when
+  every step ran and the oldest undelivered notification is within
+  `TUISKU_WORKER_BACKLOG_SECONDS`. It reports status only. `TUISKU_WORKER_DEADMAN_URL`, when
+  set, is fetched after each round of healthy passes, so a dead-man's-switch service notices
+  when the calls stop. A monitor outside Tuisku must use one of the two, because a stalled
+  worker cannot page about itself.
+- The worker also writes a heartbeat row (`worker_heartbeats`, worker-only to write) every
+  pass. `GET /v1/worker/health` on the API shows it with the backlog figures, but only to the
+  `read` role and marked `advisory`: a compromised API could answer it however it liked.
 - The sweep that expires findings claims with `SKIP LOCKED`. A finding row held by an open
   triage request is skipped until the next pass, which only delays its expiry.
 

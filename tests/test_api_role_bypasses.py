@@ -152,8 +152,10 @@ def _request(
     disposition: str = "NULL",
     actor: str = f"'{OPERATOR}'",
     extra: str = "",
+    bearer: str | None = None,
 ) -> str:
-    """A triage request as SQL, for the finding ``%(uid)s`` (or its incident)."""
+    """A triage request as SQL, for the finding ``%(uid)s`` (or its incident), preceded by the
+    bearer secret the API sets (by default the actor's: test tokens are their own uid)."""
     target_uid = "%(uid)s" if target == "finding" else _INCIDENT_OF
     columns = "target, target_uid, status, suppressed_until, reason, disposition, actor"
     values = f"'{target}', {target_uid}, '{status}', {until}, {reason}, {disposition}, {actor}"
@@ -161,7 +163,10 @@ def _request(
         name, value = extra.split("=", 1)
         columns += f", {name}"
         values += f", {value}"
-    return f"INSERT INTO triage_requests ({columns}) VALUES ({values})"
+    if bearer is None:
+        bearer = actor.strip("'").removeprefix("operator:")
+    secret = f"SELECT set_config('tuisku.operator_token', '{bearer}', true); "
+    return secret + f"INSERT INTO triage_requests ({columns}) VALUES ({values})"
 
 
 @pytest.mark.parametrize(
@@ -225,7 +230,8 @@ def test_findings_cannot_be_silenced_or_rewritten(
 def test_a_triage_request_applies_with_its_event(app_db: AppDatabase, tmp_path: Path) -> None:
     uid, *_ = _agent_finding(app_db, tmp_path)
     with psycopg.connect(app_db.app_url) as conn:
-        conn.execute(
+        _run_all(
+            conn,
             _request(status="suppressed", until="now() + interval '1 day'", reason="'maint'"),
             {"uid": uid},
         )
@@ -349,7 +355,7 @@ def test_a_victims_derivation_cannot_be_superseded(app_db: AppDatabase) -> None:
 
 
 def _suppress(conn: psycopg.Connection, uid: str, until: str) -> None:
-    conn.execute(_request(status="suppressed", until=until, reason="'x'"), {"uid": uid})
+    _run_all(conn, _request(status="suppressed", until=until, reason="'x'"), {"uid": uid})
 
 
 _LIFT = _request(status="open")
@@ -381,8 +387,9 @@ def test_leaving_a_suppression_pages_the_thresholds_crossed(
     notifier = RecordingNotifier()
     run_worker(app_db.worker_url, rules, Clock(AT + timedelta(minutes=21)), notifier)
     pages = [n for n in notifier.sent if n.get("finding_uid") == uid]
-    assert [(n["kind"], n["threshold"], n["count"]) for n in pages] == [
-        ("finding_threshold", 10, 11)
+    assert [(n["kind"], n.get("threshold"), n["count"]) for n in pages] == [
+        ("finding_suppression_ended", None, 11),
+        ("finding_threshold", 10, 11),
     ]
 
 
@@ -465,6 +472,57 @@ def test_the_api_role_writes_no_events(app_db: AppDatabase, tmp_path: Path, kind
         assert "permission denied" in str(exc)
 
 
+@pytest.mark.parametrize("bearer", ["", "wrong", "11111111-1111-4111-8111-111111111111"])
+def test_triage_cannot_be_attributed_to_a_token_the_api_has_not_seen(
+    app_db: AppDatabase, tmp_path: Path, bearer: str
+) -> None:
+    """Round ten: the actor must come with its own bearer secret, hashed by the trigger, so a
+    compromised API cannot triage as an operator (an owner-issued person token here) whose
+    token it never saw."""
+    uid, *_ = _agent_finding(app_db, tmp_path)
+    person = str(uuid.uuid4())
+    with psycopg.connect(app_db.owner_url) as conn:
+        conn.execute(
+            "INSERT INTO operator_tokens (uid, name, person, roles, token_sha256) "
+            "VALUES (%s, 'alice', 'Alice', '{triage}', sha256(%s::bytea))",
+            (person, person.encode()),
+        )
+    for actor in (OPERATOR, f"operator:{person}"):
+        exc = _refused(app_db.app_url, _request(actor=f"'{actor}'", bearer=bearer), {"uid": uid})
+        assert "own token" in str(exc)
+    # Without any secret set at all.
+    exc = _refused(
+        app_db.app_url,
+        _request(actor=f"'operator:{person}'").split("; ", 1)[1],
+        {"uid": uid},
+    )
+    assert "own token" in str(exc)
+    # The secret does not outlive the request: cleared right after it, inside the transaction.
+    from tuisku.store.lifecycle import _request_triage
+
+    class Rollback(Exception):
+        pass
+
+    async def once(aconn: Any) -> str:
+        try:
+            async with aconn.transaction():
+                assert await _request_triage(
+                    aconn,
+                    target="finding",
+                    uid=uid,
+                    status="acknowledged",
+                    actor=OPERATOR,
+                    bearer=OPERATOR.removeprefix("operator:"),
+                )
+                cur = await aconn.execute("SELECT current_setting('tuisku.operator_token', true)")
+                [(left,)] = await cur.fetchall()
+                raise Rollback(left)
+        except Rollback as done:
+            return str(done)
+
+    assert run_async(app_db.app_url, once) == ""
+
+
 def test_a_revoked_operator_cannot_triage(app_db: AppDatabase, tmp_path: Path) -> None:
     uid, *_ = _agent_finding(app_db, tmp_path)
     token = str(uuid.uuid4())
@@ -512,7 +570,10 @@ def test_closing_the_incident_of_a_suppressed_finding_pages_its_thresholds(
     notifier = RecordingNotifier()
     run_worker(app_db.worker_url, rules, Clock(AT + timedelta(minutes=21)), notifier)
     pages = [n for n in notifier.sent if n.get("finding_uid") == uid]
-    assert [(n["kind"], n["threshold"]) for n in pages] == [("finding_threshold", 10)]
+    assert [(n["kind"], n.get("threshold")) for n in pages] == [
+        ("finding_suppression_ended", None),
+        ("finding_threshold", 10),
+    ]
 
 
 # --- round seven: the temp-table attack on the definer pagers ---------------------------------
@@ -618,6 +679,7 @@ def test_triage_requests_need_an_unexpired_triage_token(
         ("tuisku_check_firing_identity", "BEFORE INSERT"),
         ("tuisku_events_operator_only", "BEFORE INSERT"),
         ("tuisku_apply_triage", "AFTER INSERT"),
+        ("tuisku_classify_notification", "BEFORE INSERT"),
     ],
 )
 def test_revision_0002_trigger_functions_refuse_other_tables(
@@ -727,7 +789,7 @@ def test_the_worker_progresses_while_the_api_role_holds_rows(
     ingest(app_db.app_url, source, "harava", [_refusal(AT + timedelta(minutes=2), caller)])
     hold = psycopg.connect(app_db.app_url)  # an open transaction
     try:
-        hold.execute(_request(status="acknowledged"), {"uid": uid})
+        _run_all(hold, _request(status="acknowledged"), {"uid": uid})
         from tuisku.worker.engine import Worker, WorkerConfig
 
         notifier = RecordingNotifier()
@@ -784,7 +846,6 @@ def test_every_lock_the_api_role_can_take_leaves_pages_flowing(app_db: AppDataba
     tables = _readable_tables(app_db.app_url)
     assert {t for t, upd, _ in tables if upd} == {
         "meta_counters",
-        "operator_tokens",
         "source_token_usage",
     }
     critical, critical_uid = _falco_victim(app_db)
@@ -829,20 +890,22 @@ def test_every_lock_the_api_role_can_take_leaves_pages_flowing(app_db: AppDataba
 # --- round nine: the worker's heartbeat and the health endpoint -------------------------------
 
 
-def test_the_health_endpoint_tells_an_outside_monitor_whether_the_worker_runs(
-    app_db: AppDatabase,
-) -> None:
-    from tests.support import client
+def test_the_api_health_view_is_advisory_and_needs_the_read_role(app_db: AppDatabase) -> None:
+    """Round ten: a compromised API could fake it, so the API's view of the heartbeat is only
+    advisory, with its backlog figures behind the read role. Monitoring uses the worker's own
+    listener (tuisku.worker.health)."""
+    from tests.support import auth, client, operator_token
+    from tuisku.store.tokens import Role
 
+    reader = operator_token(app_db.app_url, Role.READ)
     with psycopg.connect(app_db.owner_url) as conn:
         conn.execute("DELETE FROM worker_heartbeats")
     with client(app_db.app_url, worker_backlog_seconds=1e9) as c:
-        r = c.get("/v1/worker/health")  # unauthenticated
-        assert (r.status_code, r.json()["status"]) == (503, "no_worker")
+        assert c.get("/v1/worker/health").status_code == 401  # unauthenticated: nothing
+        r = c.get("/v1/worker/health", headers=auth(reader))
+        assert (r.status_code, r.json()["status"], r.json()["advisory"]) == (503, "no_worker", True)
         run_worker(app_db.worker_url, builtin_rules(), Clock(AT))
-        [(beats,)] = query(app_db.worker_url, "SELECT count(*) FROM worker_heartbeats")
-        assert beats == 1
-        r = c.get("/v1/worker/health")
+        r = c.get("/v1/worker/health", headers=auth(reader))
         assert (r.status_code, r.json()["status"]) == (200, "ok"), r.text
         assert r.json()["heartbeat_age_seconds"] < 60
     # The API role reads the heartbeat; it cannot forge one.
@@ -851,27 +914,116 @@ def test_the_health_endpoint_tells_an_outside_monitor_whether_the_worker_runs(
         "UPDATE worker_heartbeats SET beat_at = now()",
     ]:
         assert "permission denied" in str(_refused(app_db.app_url, statement))
-    with psycopg.connect(app_db.owner_url) as conn:  # a stale heartbeat
-        conn.execute("UPDATE worker_heartbeats SET beat_at = now() - interval '1 hour'")
-    with client(app_db.app_url, worker_backlog_seconds=1e9) as c:
-        r = c.get("/v1/worker/health")
-        assert (r.status_code, r.json()["status"]) == (503, "no_worker")
+    with client(app_db.app_url, worker_backlog_seconds=0.001) as c:
+        with psycopg.connect(app_db.worker_url) as conn:  # one notification never delivered
+            conn.execute(
+                "INSERT INTO notifications (dedupe_key, kind, severity_id, payload, created_at) "
+                "VALUES (%s, 'test', 0, '{}', now())",
+                (f"health:{uuid.uuid4()}",),
+            )
+        r = c.get("/v1/worker/health", headers=auth(reader))
+        assert (r.status_code, r.json()["status"]) == (503, "backlog"), r.text
 
 
-def test_the_health_endpoint_pages_an_undelivered_backlog(app_db: AppDatabase) -> None:
-    from tests.support import client
+def _health_get(port: int) -> tuple[int, Any]:
+    import urllib.error
+    import urllib.request
 
-    run_worker(app_db.worker_url, builtin_rules(), Clock(AT))
-    with psycopg.connect(app_db.worker_url) as conn:  # one notification never delivered
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read())
+
+
+def test_the_worker_serves_its_own_health(app_db: AppDatabase) -> None:
+    """Round ten: `tuisku worker --health-port` answers from the worker process: 503 until a
+    healthy pass, 200 after one, 503 once it is stale or the outbox is behind. Status only."""
+    import asyncio
+    import socket
+
+    from tuisku.worker import health
+    from tuisku.worker.engine import Worker, WorkerConfig
+
+    worker = Worker(
+        rule_set=builtin_rules(),
+        clock=Clock(AT),
+        notifier=RecordingNotifier(),
+        config=WorkerConfig(backlog_after=timedelta(hours=1)),
+    )
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    async def scenario() -> list[tuple[int, Any]]:
+        server = await health.serve(lambda: worker.healthy_at, 60, "127.0.0.1", port)
+        seen = []
+        try:
+            seen.append(await asyncio.to_thread(_health_get, port))  # no pass yet
+            conn = await psycopg.AsyncConnection.connect(app_db.worker_url, autocommit=True)
+            async with conn:
+                await worker.run_until_idle(conn)
+            seen.append(await asyncio.to_thread(_health_get, port))  # healthy
+            assert worker.healthy_at is not None
+            worker.healthy_at -= 120  # stale
+            seen.append(await asyncio.to_thread(_health_get, port))
+        finally:
+            server.close()
+            await server.wait_closed()
+        return seen
+
+    assert asyncio.run(scenario()) == [
+        (503, {"status": "unhealthy"}),
+        (200, {"status": "ok"}),
+        (503, {"status": "unhealthy"}),
+    ]
+
+
+def test_a_pass_with_an_undelivered_backlog_is_not_healthy(app_db: AppDatabase) -> None:
+    from tuisku.worker.engine import Worker, WorkerConfig
+
+    class Down(RecordingNotifier):
+        def deliver(self, notification: dict[str, Any]) -> None:
+            raise ConnectionError("notifier down")
+
+    with psycopg.connect(app_db.worker_url) as conn:
         conn.execute(
-            "INSERT INTO notifications (dedupe_key, kind, severity_id, payload) "
-            "VALUES (%s, 'test', 0, '{}')",
+            "INSERT INTO notifications (dedupe_key, kind, severity_id, payload, created_at) "
+            "VALUES (%s, 'test', 0, '{}', now())",  # created_at is the database's
             (f"health:{uuid.uuid4()}",),
         )
-    with client(app_db.app_url, worker_backlog_seconds=0.001) as c:
-        r = c.get("/v1/worker/health")
-    assert (r.status_code, r.json()["status"]) == (503, "backlog"), r.text
-    assert r.json()["oldest_undelivered_seconds"] > 0
+    import time
+
+    time.sleep(0.05)
+    worker = Worker(
+        rule_set=builtin_rules(),
+        clock=Clock(AT),
+        notifier=Down(),
+        config=WorkerConfig(backlog_after=timedelta(milliseconds=10)),
+    )
+    run_async(app_db.worker_url, worker.run_once)
+    assert worker.healthy_at is None
+
+
+def test_the_dead_mans_switch_is_called_after_a_healthy_pass_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tuisku.worker import health
+
+    calls: list[str] = []
+    monkeypatch.setattr(health, "_get", calls.append)
+    import asyncio
+
+    asyncio.run(health.ping("https://deadman.invalid/ping"))
+    assert calls == ["https://deadman.invalid/ping"]
+
+    def broken(url: str) -> None:
+        raise OSError("unreachable")
+
+    monkeypatch.setattr(health, "_get", broken)
+    asyncio.run(health.ping("https://deadman.invalid/ping"))  # logged, never raised
+    assert health.is_healthy(100.0, 60, now=150.0) and not health.is_healthy(100.0, 60, now=161.0)
+    assert not health.is_healthy(None, 60)
 
 
 @pytest.mark.parametrize("step", ["_finish", "_dead_letter"])
@@ -907,3 +1059,89 @@ def test_one_stuck_row_never_cancels_the_drain(
         app_db.owner_url, "SELECT count(*) FROM evaluation_queue WHERE detection_id = %s", (stuck,)
     )
     assert left == 1  # still queued, retried later
+
+
+# --- round ten: expiry while suppressed, reopen floods, meta pages first ----------------------
+
+
+def test_expiry_while_suppressed_pages_what_it_held_back(
+    app_db: AppDatabase, tmp_path: Path
+) -> None:
+    uid, caller, rules, source = _agent_finding(app_db, tmp_path)
+    with psycopg.connect(app_db.app_url) as conn:
+        _suppress(conn, uid, "now() + interval '20 days'")
+        conn.commit()
+    ingest(
+        app_db.app_url,
+        source,
+        "harava",
+        [_refusal(AT + timedelta(minutes=2, seconds=i), caller) for i in range(15)],
+    )
+    quiet = RecordingNotifier()
+    run_worker(app_db.worker_url, rules, Clock(AT + timedelta(minutes=5)), quiet)
+    assert not [n for n in quiet.sent if n.get("finding_uid") == uid]
+    notifier = RecordingNotifier()  # the window (1h) and max_lifetime (24h) pass
+    run_worker(app_db.worker_url, rules, Clock(AT + timedelta(hours=30)), notifier)
+    [(status,)] = query(app_db.owner_url, "SELECT status FROM findings WHERE uid = %s", (uid,))
+    assert status == "expired"
+    pages = [n for n in notifier.sent if n.get("finding_uid") == uid]
+    assert [(n["kind"], n.get("threshold")) for n in pages] == [
+        ("finding_suppression_ended", None),
+        ("finding_threshold", 10),
+    ]
+    assert (pages[0]["count_while_suppressed"], pages[0]["ended_as"]) == (15, "expired")
+
+
+def test_reopen_pages_are_one_per_incident_per_bucket(app_db: AppDatabase, tmp_path: Path) -> None:
+    uid, *_ = _agent_finding(app_db, tmp_path)
+    [(incident,)] = query(
+        app_db.owner_url,
+        "SELECT i.uid::text FROM incidents i JOIN findings f ON f.incident_id = i.id "
+        "WHERE f.uid = %s",
+        (uid,),
+    )
+    with psycopg.connect(app_db.app_url) as conn:
+        _run_all(conn, _request("incident", "contained"), {"uid": uid})
+        conn.commit()
+        for _ in range(50):  # the probe bounced 200 times; each bounce paged
+            for status in ("investigating", "contained"):
+                _run_all(conn, _request("incident", status), {"uid": uid})
+                conn.commit()
+    [(pages, buckets)] = query(
+        app_db.owner_url,
+        "SELECT count(*), count(DISTINCT split_part(dedupe_key, ':', 4)) FROM notifications "
+        "WHERE kind = 'incident_escalated' AND payload ->> 'incident_uid' = %s "
+        "AND payload ->> 'reason' = 'reopened'",
+        (incident,),
+    )
+    assert pages == buckets and 1 <= pages <= 2  # one per 5-minute bucket (two at a boundary)
+
+
+def test_meta_pages_are_delivered_first_and_marked_by_the_database(app_db: AppDatabase) -> None:
+    keys = {name: f"order:{name}:{uuid.uuid4()}" for name in ("rule", "backlog", "forged")}
+    with psycopg.connect(app_db.worker_url) as conn:
+        insert = (
+            "INSERT INTO notifications (dedupe_key, kind, severity_id, payload, created_at, meta) "
+            "VALUES (%s, %s, %s, '{}', now(), %s)"
+        )
+        conn.execute(insert, (keys["rule"], "finding_occurrence", 6, False))
+        conn.execute(insert, (keys["backlog"], "tuisku_backlog", 1, False))
+        conn.execute(insert, (keys["forged"], "finding_occurrence", 0, True))  # writer says meta
+    marked = dict(
+        query(
+            app_db.owner_url,
+            "SELECT dedupe_key, meta FROM notifications WHERE dedupe_key = ANY(%s)",
+            (list(keys.values()),),
+        )
+    )
+    assert marked == {keys["rule"]: False, keys["backlog"]: True, keys["forged"]: False}
+    notifier = RecordingNotifier()
+    run_worker(app_db.worker_url, builtin_rules(), Clock(AT), notifier)
+    order = [n["uid"] for n in notifier.sent]
+    [(rule_uid,), (backlog_uid,)] = [
+        query(app_db.owner_url, "SELECT uid::text FROM notifications WHERE dedupe_key = %s", (k,))[
+            0
+        ]
+        for k in (keys["rule"], keys["backlog"])
+    ]
+    assert order.index(backlog_uid) < order.index(rule_uid)  # severity 1 meta before severity 6

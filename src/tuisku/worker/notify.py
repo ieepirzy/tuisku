@@ -80,7 +80,8 @@ async def drain(
     limit: int = 500,
     backoff: Backoff = DEFAULT_BACKOFF,
 ) -> int:
-    """Deliver the notifications that are due, most severe first and then oldest first; returns
+    """Deliver the notifications that are due, meta pages first, then most severe first and then
+    oldest first; returns
     how many were delivered. Every notification is written by the worker or by an owner trigger
     (the API role has no INSERT on notifications, ADR 0011).
 
@@ -110,6 +111,7 @@ async def drain(
         rows = await db.fetch_all(
             conn,
             "WITH pending AS (SELECT n.id, n.uid, n.kind, n.severity_id, n.payload, n.created_at, "
+            "  n.meta, "
             "  (SELECT count(*) FROM notification_deliveries d WHERE d.notification_id = n.id "
             "   AND d.status = 'failed') AS failures, "
             "  (SELECT max(d.at) FROM notification_deliveries d WHERE d.notification_id = n.id "
@@ -118,9 +120,11 @@ async def drain(
             "  WHERE d.notification_id = n.id AND d.status = 'delivered')) "
             "SELECT * FROM pending WHERE failures = 0 OR last_failed + make_interval(secs => "
             "  least(%s::float8, %s::float8 * power(2, least(failures - 1, 30)))) <= now() "
-            # Fair: the most severe first, then the oldest, so no backlog of lesser pages (or
-            # of retries) can hold back a newer high-severity one.
-            "ORDER BY severity_id DESC, created_at, id LIMIT %s",
+            # Pages about Tuisku itself first (backlog, dead letters, tuisku-meta findings: the
+            # database marks them), so a flood of rule pages cannot hide that Tuisku is
+            # failing. Then fair: the most severe first, then the oldest, so no backlog of
+            # lesser pages (or of retries) can hold back a newer high-severity one.
+            "ORDER BY meta DESC, severity_id DESC, created_at, id LIMIT %s",
             (backoff.cap_seconds, backoff.base_seconds, limit),
         )
         for row in rows:

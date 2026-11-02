@@ -267,7 +267,10 @@ CREATE TABLE notifications (
     kind         text NOT NULL CHECK (char_length(kind) <= 64),
     severity_id  smallint NOT NULL CHECK (severity_id BETWEEN 0 AND 6),
     payload      jsonb NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
-    created_at   timestamptz NOT NULL
+    created_at   timestamptz NOT NULL,
+    -- Pages about Tuisku itself (backlog, dead letters, tuisku-meta findings), delivered
+    -- ahead of every other page. Set by a trigger, never by the writer.
+    meta         boolean NOT NULL DEFAULT false
 );
 
 CREATE TABLE notification_deliveries (
@@ -518,6 +521,20 @@ BEGIN
         RAISE EXCEPTION 'no live operator token with the triage role: %', NEW.actor
             USING ERRCODE = 'insufficient_privilege';
     END IF;
+    -- The bearer secret, set by the API for this transaction only (never stored): the request
+    -- must come with the actor's own token, so the API role cannot attribute triage to a token
+    -- it has not been shown (ADR 0011).
+    IF NOT EXISTS (
+        SELECT 1 FROM public.operator_tokens t
+        WHERE t.uid = substring(NEW.actor FROM 10)::uuid
+          AND t.token_sha256 = sha256(convert_to(
+                  coalesce(current_setting('tuisku.operator_token', true), ''), 'UTF8'))
+          AND NOT EXISTS (SELECT 1 FROM public.operator_token_revocations r
+                          WHERE r.token_id = t.id)
+    ) THEN
+        RAISE EXCEPTION 'a triage request needs the operator''s own token (ADR 0011)'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
     IF NEW.reason IS NOT NULL AND btrim(NEW.reason) = '' THEN
         RAISE EXCEPTION 'a reason must not be blank' USING ERRCODE = 'TK409';
     END IF;
@@ -662,7 +679,33 @@ BEGIN
         RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
             USING ERRCODE = 'insufficient_privilege';
     END IF;
-    IF OLD.status = 'suppressed' AND NEW.status IN ('open', 'acknowledged', 'resolved') THEN
+    -- Expiry while suppressed is a lift too: it would otherwise end the finding silently.
+    IF OLD.status = 'suppressed' AND NEW.status IN ('open', 'acknowledged', 'resolved',
+                                                    'expired') THEN
+        IF NEW.count > coalesce(OLD.count_at_suppression, NEW.count) THEN
+            -- One summary of what the suppression held back.
+            INSERT INTO public.notifications (dedupe_key, kind, severity_id, payload,
+                                              created_at)
+            VALUES (
+                'finding_suppression_ended:' || NEW.uid || ':' || OLD.count_at_suppression
+                    || ':' || NEW.count,
+                'finding_suppression_ended',
+                NEW.severity_id,
+                jsonb_build_object(
+                    'finding_uid', NEW.uid::text,
+                    'rule', NEW.rule_id::text || '@' || NEW.rule_rev,
+                    'title', NEW.title,
+                    'entity_keys', to_jsonb(NEW.entity_keys[1:32]),
+                    'count', NEW.count,
+                    'count_at_suppression', OLD.count_at_suppression,
+                    'count_while_suppressed', NEW.count - OLD.count_at_suppression,
+                    'suppressed_at', OLD.suppressed_at,
+                    'ended_as', NEW.status
+                ),
+                now()
+            )
+            ON CONFLICT (dedupe_key) DO NOTHING;
+        END IF;
         FOREACH threshold IN ARRAY ARRAY[10, 100, 1000] LOOP
             IF coalesce(OLD.count_at_suppression, NEW.count) < threshold
                AND threshold <= NEW.count THEN
@@ -707,7 +750,9 @@ BEGIN
     IF OLD.status IN ('contained', 'resolved') AND NEW.status = 'investigating' THEN
         INSERT INTO public.notifications (dedupe_key, kind, severity_id, payload, created_at)
         VALUES (
-            'escalation:' || NEW.uid || ':reopened:' || pg_current_xact_id()::text,
+            -- At most one page per incident per 5-minute bucket, however often it bounces.
+            'escalation:' || NEW.uid || ':reopened:'
+                || extract(epoch FROM public.tuisku_current_bucket())::bigint,
             'incident_escalated',
             NEW.severity_id,
             jsonb_build_object(
@@ -759,6 +804,37 @@ $$;
 CREATE TRIGGER detections_page_backlog AFTER INSERT ON detections
     FOR EACH ROW WHEN (NEW.kind = 'tuisku.meta.backlog')
     EXECUTE FUNCTION tuisku_page_backlog();
+
+-- Which notifications are about Tuisku itself, decided by the database from what they refer
+-- to, so the drain can deliver them first (ADR 0011): backlog and dead-letter pages, and pages
+-- of findings (or incidents with findings) of the tuisku-meta pack, which include
+-- notification_undeliverable and evaluation_failed.
+CREATE FUNCTION tuisku_classify_notification() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    uuid_re constant text := '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+BEGIN
+    IF TG_RELID NOT IN ('public.notifications'::regclass::oid) OR TG_WHEN <> 'BEFORE'
+       OR TG_OP NOT IN ('INSERT') OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    NEW.meta := NEW.kind IN ('tuisku_backlog', 'evaluation_dead_lettered')
+        OR (coalesce(NEW.payload ->> 'finding_uid', '') ~ uuid_re AND EXISTS (
+                SELECT 1 FROM public.findings f
+                WHERE f.uid = (NEW.payload ->> 'finding_uid')::uuid
+                  AND f.rule_ref ->> 'pack' = 'tuisku-meta'))
+        OR (coalesce(NEW.payload ->> 'incident_uid', '') ~ uuid_re AND EXISTS (
+                SELECT 1 FROM public.findings f JOIN public.incidents i ON i.id = f.incident_id
+                WHERE i.uid = (NEW.payload ->> 'incident_uid')::uuid
+                  AND f.rule_ref ->> 'pack' = 'tuisku-meta'));
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER notifications_classify BEFORE INSERT ON notifications
+    FOR EACH ROW EXECUTE FUNCTION tuisku_classify_notification();
 """
 
 
@@ -849,5 +925,6 @@ def downgrade() -> None:
         "DROP FUNCTION tuisku_force_event_time(), tuisku_check_firing_identity(), "
         "tuisku_events_operator_only(), "
         "tuisku_apply_triage(), "
-        "tuisku_page_lifted_thresholds(), tuisku_page_reopened_incident(), tuisku_page_backlog()"
+        "tuisku_page_lifted_thresholds(), tuisku_page_reopened_incident(), tuisku_page_backlog(), "
+        "tuisku_classify_notification()"
     )

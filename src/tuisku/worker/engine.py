@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -354,6 +355,11 @@ class Worker:
     name: str = field(default_factory=lambda: f"{socket.gethostname()}:{os.getpid()}"[:200])
     # Test hook: called at the start of each pair evaluation (rule, row envelope).
     before_pair: Callable[[Rule, Mapping[str, Any]], None] | None = None
+    # When the last healthy pass ended (time.monotonic()): every step ran, and the oldest
+    # undelivered notification is within backlog_after. Served by the worker's own health
+    # listener (tuisku.worker.health), never by the API (ADR 0011 "Availability limits").
+    healthy_at: float | None = field(default=None, init=False)
+    _skipped: int = field(default=0, init=False)
 
     @property
     def limits(self) -> fold.Limits:
@@ -388,8 +394,9 @@ class Worker:
         """Sweep, claim one batch, evaluate it and deliver notifications. ``conn`` must be in
         autocommit mode; every step manages its own transaction."""
         stats = Stats()
+        self._skipped = 0
         await self.set_timeouts(conn)
-        await self._step("heartbeat", self.heartbeat(conn), None)
+        undelivered_age = await self._step("heartbeat", self.heartbeat(conn), None)
         stats.backlog = await self._step("backlog check", self.check_backlog(conn), 0)
         stats.expired_findings = await self._step("sweep", self.sweep(conn), 0)
         for queue_row in await self._step("claim", self.claim(conn), []):
@@ -400,13 +407,19 @@ class Worker:
             notify.drain(conn, self.notifier, self.clock(), backoff=self.config.notify_backoff),
             0,
         )
+        backlog = self.config.backlog_after.total_seconds()
+        if self._skipped == 0 and undelivered_age is not None and undelivered_age <= backlog:
+            self.healthy_at = time.monotonic()
         return stats
 
-    async def heartbeat(self, conn: AsyncConnection[Any]) -> None:
+    async def heartbeat(self, conn: AsyncConnection[Any]) -> float:
         """Record that this worker is alive, with what it sees waiting, in the worker-only
-        worker_heartbeats table. GET /v1/worker/health reads it (ADR 0011 "Availability")."""
+        worker_heartbeats table (the API's advisory, read-role health view reads it). Returns
+        the age in seconds of the oldest undelivered notification by the database clock (0 when
+        there is none), which decides whether this pass is healthy."""
         async with conn.transaction():
-            await conn.execute(
+            row = await db.fetch_one(
+                conn,
                 "INSERT INTO worker_heartbeats (worker, beat_at, oldest_queued_at, queued, "
                 "oldest_undelivered_at, undelivered) "
                 "SELECT %s, now(), q.oldest, q.n, o.oldest, o.n FROM "
@@ -417,9 +430,13 @@ class Worker:
                 "ON CONFLICT (worker) DO UPDATE SET beat_at = EXCLUDED.beat_at, "
                 "oldest_queued_at = EXCLUDED.oldest_queued_at, queued = EXCLUDED.queued, "
                 "oldest_undelivered_at = EXCLUDED.oldest_undelivered_at, "
-                "undelivered = EXCLUDED.undelivered",
+                "undelivered = EXCLUDED.undelivered "
+                "RETURNING coalesce(extract(epoch FROM now() - oldest_undelivered_at), 0) "
+                "AS undelivered_age",
                 (self.name,),
             )
+        assert row is not None
+        return float(row["undelivered_age"])
 
     async def set_timeouts(self, conn: AsyncConnection[Any]) -> None:
         """For the whole connection: no step of the worker waits on a lock, or runs, without a
@@ -437,6 +454,7 @@ class Worker:
         try:
             return await work
         except (errors.LockNotAvailable, errors.QueryCanceled) as exc:
+            self._skipped += 1
             log.warning("worker %s skipped this pass: %s", name, type(exc).__name__)
             return fallback
 

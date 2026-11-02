@@ -505,7 +505,10 @@ def test_suppressed_finding_collects_evidence_silently(fresh_database_url: str) 
     ingest(url, "h", "harava", lines((clock.now, "agents")))
     run_worker(url, builtin_rules(), clock, notifier)
     assert query(url, "SELECT status, count FROM findings") == [("open", 3)]
-    assert notifier.kinds() == ["finding_occurrence"]
+    # One summary of what the suppression held back (round ten), then paging resumes.
+    assert notifier.kinds() == ["finding_suppression_ended", "finding_occurrence"]
+    [summary] = [n for n in notifier.sent if n["kind"] == "finding_suppression_ended"]
+    assert (summary["count_while_suppressed"], summary["ended_as"]) == (1, "open")
 
 
 def test_new_evidence_reopens_a_contained_incident(fresh_database_url: str) -> None:

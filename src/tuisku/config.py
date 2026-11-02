@@ -99,8 +99,14 @@ class Settings(BaseSettings):
     worker_allowed_lateness_seconds: float = Field(default=86400.0, ge=0)
     # Queued rows or undelivered notifications older than this page as tuisku.meta.backlog.
     worker_backlog_seconds: float = Field(default=300.0, gt=0)
-    # GET /v1/worker/health answers 503 when no worker has beaten for this long.
+    # The worker's health listener answers 503 when its last healthy pass is older than this;
+    # the API's advisory view (read role) uses it for the heartbeat table too.
     worker_heartbeat_stale_seconds: float = Field(default=120.0, gt=0)
+    # `tuisku worker --health-port` (ADR 0011 "Availability limits"): status only, no auth.
+    worker_health_port: int | None = Field(default=None, ge=1, le=65535)
+    worker_health_host: str = "0.0.0.0"
+    # Optional dead-man's-switch URL, fetched after each healthy pass. May carry a secret.
+    worker_deadman_url: SecretStr | None = None
 
     @field_validator("database_url")
     @classmethod

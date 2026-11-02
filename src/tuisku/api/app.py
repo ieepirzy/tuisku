@@ -10,16 +10,17 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import anyio
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from psycopg_pool import AsyncConnectionPool
 
 from tuisku import __version__, db
 from tuisku.adapters import builtin as _builtin_adapters  # noqa: F401  (registers adapters)
 from tuisku.api import ingest, read, triage
-from tuisku.api.deps import Clock, system_clock
+from tuisku.api.deps import Clock, require_role, system_clock
 from tuisku.api.ratelimit import RateLimiter, RefusalCounter
 from tuisku.config import Settings
+from tuisku.store.tokens import Role
 
 log = logging.getLogger(__name__)
 
@@ -59,11 +60,13 @@ def create_app(settings: Settings | None = None, *, clock: Clock | None = None) 
         """Liveness: the process is up. Never touches the database."""
         return {"status": "ok", "revision": settings.build_revision}
 
-    @app.get("/v1/worker/health")
+    @app.get("/v1/worker/health", dependencies=[Depends(require_role(Role.READ))])
     async def worker_health(request: Request) -> JSONResponse:
-        """Unauthenticated, for an external monitor that does not depend on the worker (ADR
-        0011 "Availability limits"): 503 when no worker heartbeat is fresh, or when the oldest
-        undelivered notification is older than the backlog limit."""
+        """Advisory, for operators with the ``read`` role: the worker's last heartbeat and the
+        backlog figures, as the database shows them. A compromised API could fake this, so
+        monitoring uses the worker's own listener (``tuisku worker --health-port``) or its
+        dead-man's switch instead (ADR 0011 "Availability limits"). 503 when no heartbeat is
+        fresh, or when the oldest undelivered notification is older than the backlog limit."""
         pool: AsyncConnectionPool = request.app.state.pool
         try:
             async with pool.connection(timeout=settings.ready_timeout_seconds) as conn:
@@ -94,6 +97,7 @@ def create_app(settings: Settings | None = None, *, clock: Clock | None = None) 
             status_code=200 if status == "ok" else 503,
             content={
                 "status": status,
+                "advisory": True,
                 "heartbeat_age_seconds": age,
                 "oldest_undelivered_seconds": undelivered,
                 "oldest_queued_seconds": (

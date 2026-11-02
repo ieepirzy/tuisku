@@ -215,19 +215,26 @@ async def _request_triage(
     uid: Any,
     status: str,
     actor: str,
+    bearer: str,
     disposition: str | None = None,
     reason: str | None = None,
     suppressed_until: datetime | None = None,
 ) -> bool:
     """Insert a triage request; the database validates and applies it (tuisku_apply_triage,
-    ADR 0011). False when the target does not exist; TransitionError when it is not allowed."""
+    ADR 0011). False when the target does not exist; TransitionError when it is not allowed.
+
+    ``bearer`` is the operator's own token, as presented. The trigger hashes it and matches it
+    against the actor's token, so the API role cannot attribute triage to a token it has not
+    seen. It is set for this transaction only, cleared right after, and never stored."""
     try:
         async with conn.transaction():
+            await conn.execute("SELECT set_config('tuisku.operator_token', %s, true)", (bearer,))
             await conn.execute(
                 "INSERT INTO triage_requests (target, target_uid, status, disposition, reason, "
                 "suppressed_until, actor) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                 (target, uid, status, disposition, reason, suppressed_until, actor),
             )
+            await conn.execute("SELECT set_config('tuisku.operator_token', '', true)")
     except psycopg.Error as exc:
         if exc.diag.sqlstate == "TK404":
             return False
@@ -243,6 +250,7 @@ async def operator_finding_status(
     new_status: str,
     *,
     actor: str,
+    bearer: str,
     reason: str | None,
     suppressed_until: datetime | None,
     now: datetime,
@@ -299,6 +307,7 @@ async def operator_finding_status(
         uid=uid,
         status=new_status,
         actor=actor,
+        bearer=bearer,
         reason=reason,
         suppressed_until=suppressed_until if new_status == "suppressed" else None,
     )
@@ -313,6 +322,7 @@ async def operator_incident_status(
     new_status: str,
     *,
     actor: str,
+    bearer: str,
     disposition: str | None,
     reason: str | None,
     now: datetime,
@@ -340,6 +350,7 @@ async def operator_incident_status(
         uid=uid,
         status=new_status,
         actor=actor,
+        bearer=bearer,
         disposition=disposition,
         reason=reason,
     )

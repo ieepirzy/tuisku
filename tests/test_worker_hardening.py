@@ -274,7 +274,10 @@ def _one_finding(url: str, clock: Clock) -> str:
 
 def test_resuppression_cannot_extend_past_thirty_days(fresh_database_url: str) -> None:
     url = fresh_database_url
-    clock = Clock(T)
+    # The database applies the cap by its own clock, so start at the real time (a fixed T
+    # would drift away from it as the calendar moves on).
+    start = datetime.now(UTC).replace(microsecond=0)
+    clock = Clock(start)
     uid = _one_finding(url, clock)
     triager = operator_token(url, Role.TRIAGE)
     path = f"/v1/findings/{uid}/status"
@@ -284,10 +287,11 @@ def test_resuppression_cannot_extend_past_thirty_days(fresh_database_url: str) -
         return c.post(path, json=body, headers=auth(triager)).status_code
 
     with client(url, clock=lambda: clock.now) as c:
-        assert suppress(c, T + timedelta(days=20)) == 200
+        assert suppress(c, start + timedelta(days=20)) == 200
         clock.advance(days=15)
-        assert suppress(c, T + timedelta(days=31)) == 409  # 30 days from the first suppression
-        assert suppress(c, T + timedelta(days=30)) == 200
+        # 30 days from the first suppression (which began a moment after `start`).
+        assert suppress(c, start + timedelta(days=31)) == 409
+        assert suppress(c, start + timedelta(days=29)) == 200
 
 
 def test_triage_input_validation(fresh_database_url: str) -> None:
@@ -343,7 +347,10 @@ def test_thresholds_crossed_while_suppressed_page_when_it_lifts(fresh_database_u
     assert notifier.sent == [] and query(url, "SELECT count FROM findings") == [(11,)]
     clock.advance(minutes=20)  # the suppression expires in the sweep; the window has not
     run_worker(url, builtin_rules(), clock, notifier)
-    assert [(n["kind"], n["threshold"]) for n in notifier.sent] == [("finding_threshold", 10)]
+    assert [(n["kind"], n.get("threshold")) for n in notifier.sent] == [
+        ("finding_suppression_ended", None),
+        ("finding_threshold", 10),
+    ]
 
 
 def test_api_retries_a_deadlock(fresh_database_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
