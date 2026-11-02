@@ -62,6 +62,7 @@ finding:
   group_by: [attributes.caller]
   window: 1h
   max_lifetime: 24h
+  notify: each               # each | thresholds (default): page on every detection
 incident: open               # open | none
 ```
 

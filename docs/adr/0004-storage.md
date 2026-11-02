@@ -58,7 +58,9 @@ are mutable working objects that keep a history.
        stay.
      - **Trigger exception:** the evidence-table triggers allow exactly one change, and only
        when `current_user = 'tuisku_owner'`. That change sets the payload columns (`body`,
-       `attributes`, `unmapped`, `explanation`, `entity_keys`, event `payload`) to NULL or empty, and the
+       `attributes`, `unmapped`, `explanation`, `entity_keys`, event `payload`, and the L4 text
+       columns: hypothesis `statement`, tool-call `arguments`/`result`, proposal `parameters`)
+       to NULL or empty, and the
        trigger checks that every other column is unchanged (`OLD` equals `NEW`).
      - **Retention periods:** the worker refuses to load a pack whose longest baseline lookback
        (`windows × timespan`) is longer than the configured L1/L2 retention period. It also

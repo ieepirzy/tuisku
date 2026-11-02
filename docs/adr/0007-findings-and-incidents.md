@@ -58,6 +58,9 @@ Grouping keys are built from attacker-controlled values, so the grouping itself 
   - when a finding opens
   - when its `count` crosses 10, 100 and 1000
   - when its severity rises
+  - on **every** attached detection, if the rule sets `finding.notify: each`. Paging rules
+    that must "page on any occurrence" use this; it still sends no more than one notification
+    per detection.
 - **Status mapping to OCSF `status_id`:**
 
   | Tuisku | OCSF |

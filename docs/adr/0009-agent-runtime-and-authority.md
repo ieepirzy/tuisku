@@ -40,12 +40,13 @@ login or rate limits for their products, including agents built on the Claude Ag
    - propose actions, chosen from a closed catalogue
 2. **Authority is enforced by the tool surface, not by the prompt.** Each investigator session
    gets a short-lived token (`tsk_inv_`) bound to one incident and one tier. The token expires
-   when the session ends or the incident closes. The tiers:
+   when the session ends or the incident closes. Closing an incident writes an end event for
+   each of its live sessions. The tiers:
 
    | Tier | Adds |
    |---|---|
    | `observe` | read-only tools |
-   | `investigate` | bounded queries, evidence requests and raw-view access |
+   | `investigate` | bounded queries and evidence requests (unredacted L0 only through an approved evidence request) |
    | `recommend` | `propose_action` |
 
    `contain` and `remediate` are not exposed until a later ADR designs them as a security
@@ -69,14 +70,18 @@ login or rate limits for their products, including agents built on the Claude Ag
      proposals from a session they started.
    - **The tool surface is a separate process** (`tuisku investigate`). It connects to Postgres
      as a separate `tuisku_investigator` role, which has no `tuisku_app` credentials.
-     - **Reads:** row-level security policies, keyed on the session id that the surface
-       sets per request from the verified token, limit reads to the session's incident. Column
-       access by tier, such as unredacted L0, goes through `SECURITY DEFINER` views. Tier
-       limits are therefore enforced in the database as well as in the process.
-     - **Known limit:** session binding inside the shared role relies on the surface process
-       mapping token → session correctly. A compromised surface could misattribute rows between
-       live sessions *of the same incident*. Per-session database credentials are the stronger
-       option if that ever matters.
+     - **Session binding happens in the database.** On each transaction the surface calls
+       `tuisku_bind_session(token)`, a `SECURITY DEFINER` function. The function checks the raw
+       `tsk_inv_` token against its stored hash, then records `(backend pid, transaction id) →
+       session` in a binding table that only the function can write. Bindings are cleared at
+       transaction end.
+       - Row-level security policies, the L4 trigger and the tier views all read the session
+         from this binding, never from a setting the role could change itself.
+       - A compromised surface can therefore act only as a session whose token it actually
+         holds, and only within that session's incident and tier.
+     - **Reads:** row-level security limits reads to the bound session's incident. Redaction
+       and column access go through `SECURITY DEFINER` views keyed on the binding. Unredacted
+       L0 is returned only for records named in an approved evidence request of that session.
      - **Writes:** it can `INSERT` into `hypotheses`, `tool_calls`, `proposed_actions` and
        `evidence_requests`, and nothing else. It cannot write `investigator_sessions`, and it
        cannot write L0–L3.
@@ -89,8 +94,8 @@ login or rate limits for their products, including agents built on the Claude Ag
        `observe` session cannot insert `proposed_actions`.
      - It then writes only the L4 row id, the session id and an actor taken from the
        Tuisku-written session row.
-   - **Session binding.** The surface sets the session id from the verified `tsk_inv_` token on
-     each request.
+   - **Session binding** uses `tuisku_bind_session` as described above. The trigger rejects L4
+     rows whose session differs from the bound session.
 
    A declaration is only a claim, so the deployment must also enforce it: run the investigator
    runtime with no tools other than Tuisku's MCP server, and deny network egress except to the
@@ -153,9 +158,13 @@ login or rate limits for their products, including agents built on the Claude Ag
   host named in telemetry.
 - **Approval.** Until a containment ADR exists, only a person holding an `approve`-role token
   approves an action or an evidence request ([0005](0005-source-adapters-and-ingestion.md)).
-  The person must differ from whoever started the session. No policy may auto-approve, and agent
-  confidence or hypotheses are never inputs to approval. Execution credentials are never
-  reachable from investigator sessions.
+  The approval is recorded by a `SECURITY DEFINER` function, `tuisku_record_approval(token,
+  proposal)`. That function verifies the raw approve token against its hash, checks four-eyes
+  against the Tuisku-written session row, and writes the approval and its timeline event. A
+  compromised app process can therefore not forge approvals. Any future executor must verify
+  approvals in the database before acting. No policy may auto-approve, and agent confidence or
+  hypotheses are never inputs to approval. Execution credentials are never reachable from
+  investigator sessions.
 - **Corroboration.** Any future automated response must require corroborating evidence from more
   than one source, because a single compromised source token can forge evidence for its source
   ([0005](0005-source-adapters-and-ingestion.md)).
