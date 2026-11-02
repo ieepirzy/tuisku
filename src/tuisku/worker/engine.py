@@ -29,6 +29,8 @@ expires mid-evaluation therefore never writes a second detection or pages twice.
 from __future__ import annotations
 
 import logging
+import os
+import socket
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -100,6 +102,15 @@ class _Transient(Exception):
     def __init__(self, rules: Sequence[Rule]) -> None:
         super().__init__("lock timeout")
         self.rules = list(rules)
+
+
+@dataclass(slots=True)
+class _RowProgress:
+    """What one queue row's evaluation got to, for paging what a lock held up."""
+
+    matched: list[tuple[Rule, dict[str, Any]]] = field(default_factory=list)
+    held_up: list[tuple[Rule, dict[str, Any]]] = field(default_factory=list)
+    aborted: bool = False  # the row's transaction rolled back: nothing of it was kept
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,6 +350,8 @@ class Worker:
     clock: Clock
     notifier: notify.Notifier = field(default_factory=notify.LogNotifier)
     config: WorkerConfig = field(default_factory=WorkerConfig)
+    # Identifies this process in worker_heartbeats.
+    name: str = field(default_factory=lambda: f"{socket.gethostname()}:{os.getpid()}"[:200])
     # Test hook: called at the start of each pair evaluation (rule, row envelope).
     before_pair: Callable[[Rule, Mapping[str, Any]], None] | None = None
 
@@ -376,6 +389,7 @@ class Worker:
         autocommit mode; every step manages its own transaction."""
         stats = Stats()
         await self.set_timeouts(conn)
+        await self._step("heartbeat", self.heartbeat(conn), None)
         stats.backlog = await self._step("backlog check", self.check_backlog(conn), 0)
         stats.expired_findings = await self._step("sweep", self.sweep(conn), 0)
         for queue_row in await self._step("claim", self.claim(conn), []):
@@ -387,6 +401,25 @@ class Worker:
             0,
         )
         return stats
+
+    async def heartbeat(self, conn: AsyncConnection[Any]) -> None:
+        """Record that this worker is alive, with what it sees waiting, in the worker-only
+        worker_heartbeats table. GET /v1/worker/health reads it (ADR 0011 "Availability")."""
+        async with conn.transaction():
+            await conn.execute(
+                "INSERT INTO worker_heartbeats (worker, beat_at, oldest_queued_at, queued, "
+                "oldest_undelivered_at, undelivered) "
+                "SELECT %s, now(), q.oldest, q.n, o.oldest, o.n FROM "
+                "(SELECT min(enqueued_at) AS oldest, count(*) AS n FROM evaluation_queue) q, "
+                "(SELECT min(n.created_at) AS oldest, count(*) AS n FROM notifications n "
+                " WHERE NOT EXISTS (SELECT 1 FROM notification_deliveries d "
+                " WHERE d.notification_id = n.id AND d.status = 'delivered')) o "
+                "ON CONFLICT (worker) DO UPDATE SET beat_at = EXCLUDED.beat_at, "
+                "oldest_queued_at = EXCLUDED.oldest_queued_at, queued = EXCLUDED.queued, "
+                "oldest_undelivered_at = EXCLUDED.oldest_undelivered_at, "
+                "undelivered = EXCLUDED.undelivered",
+                (self.name,),
+            )
 
     async def set_timeouts(self, conn: AsyncConnection[Any]) -> None:
         """For the whole connection: no step of the worker waits on a lock, or runs, without a
@@ -519,20 +552,66 @@ class Worker:
     async def _process(
         self, conn: AsyncConnection[Any], queue_row: dict[str, Any], stats: Stats
     ) -> None:
+        """Evaluate one queue row. A lock or statement timeout anywhere in it (a row held
+        elsewhere) is never fatal to the pass: the row is retried on a later pass, and every
+        firing it held up pages at once, in a transaction of its own (``_page_delayed``)."""
+        seen: _RowProgress = _RowProgress()
         try:
-            async with conn.transaction():
-                await self._evaluate_row(conn, queue_row, stats)
-        except _Transient as exc:
-            # The group locks timed out, so the transaction is gone and nothing was
-            # evaluated. Record an uncounted conflict per rule (capped) in a new one.
+            try:
+                async with conn.transaction():
+                    await self._evaluate_row(conn, queue_row, stats, seen)
+            except _Transient as exc:
+                # The group locks timed out, so the transaction is gone and nothing was
+                # evaluated. Record an uncounted conflict per rule (capped) in a new one.
+                stats.retried_later += 1
+                seen.aborted = True
+                async with conn.transaction():
+                    env = await load_row(conn, queue_row)
+                    failures = [_Failure(r, "lock timeout", counted=False) for r in exc.rules]
+                    done = env is not None and await self._record_failures(
+                        conn, queue_row, env, failures, stats
+                    )
+                    await self._finish(conn, queue_row, done, failures)
+        except (*TRANSIENT, errors.QueryCanceled) as exc:
+            # Held up outside a pair (dead-lettering, finishing): retry the row later.
             stats.retried_later += 1
-            async with conn.transaction():
-                env = await load_row(conn, queue_row)
-                failures = [_Failure(r, "lock timeout", counted=False) for r in exc.rules]
-                done = env is not None and await self._record_failures(
-                    conn, queue_row, env, failures, stats
+            seen.aborted = True
+            log.warning(
+                "queue row %s held up (%s); retried later", queue_row["id"], type(exc).__name__
+            )
+        await self._step("delayed pages", self._page_delayed(conn, queue_row, seen), None)
+
+    async def _page_delayed(
+        self, conn: AsyncConnection[Any], queue_row: dict[str, Any], seen: _RowProgress
+    ) -> None:
+        """Page the firings a lock held up, before their bookkeeping can be done (ADR 0011).
+
+        Only rules without a correlation: those fire on every matching row, so the page is
+        certain. The transaction touches only the notification outbox (worker-only to write);
+        a lock on a finding or incident delays the bookkeeping, never this page.
+        """
+        rules = seen.matched if seen.aborted else seen.held_up
+        certain = [(r, env) for r, env in rules if r.correlation is None]
+        if not certain:
+            return
+        now = self.clock()
+        async with conn.transaction():
+            for rule, env in certain:
+                await notify.emit(
+                    conn,
+                    dedupe_key=f"evaluation_delayed:{queue_row['id']}:{rule.id}",
+                    kind="evaluation_delayed",
+                    severity_id=rule.severity_id,
+                    payload={
+                        "rule": rule.ref,
+                        "rule_name": rule.name,
+                        "title": rule.title,
+                        "row": _row_ref(env),
+                        "entity_keys": list(env["entity_keys"] or [])[:32],
+                        "reason": "finding bookkeeping held up by a lock; retried",
+                    },
+                    now=now,
                 )
-                await self._finish(conn, queue_row, done, failures)
 
     async def _lock(self, conn: AsyncConnection[Any], keys: Iterable[int]) -> None:
         """Serialize on each group and rule key: a row lock on the worker-only group_locks
@@ -570,7 +649,11 @@ class Worker:
         )
 
     async def _evaluate_row(
-        self, conn: AsyncConnection[Any], queue_row: dict[str, Any], stats: Stats
+        self,
+        conn: AsyncConnection[Any],
+        queue_row: dict[str, Any],
+        stats: Stats,
+        seen: _RowProgress | None = None,
     ) -> None:
         await conn.execute(
             "SELECT set_config('statement_timeout', %s, true), "
@@ -596,6 +679,8 @@ class Worker:
             for m in (match(r, env) for r in self.rule_set.rules if r.id not in dead)
             if m is not None
         ]
+        if seen is not None:
+            seen.matched = [(m.rule, env) for m in matches]
         keys: set[int] = set()
         for m in matches:
             fingerprint = fold.fingerprint_for(m.rule, m.group_values)
@@ -610,6 +695,8 @@ class Worker:
             failure = await self._evaluate_pair_with_retries(conn, m, env, stats)
             if failure is not None:
                 failures.append(failure)
+                if not failure.counted and seen is not None:
+                    seen.held_up.append((m.rule, env))
         stats.evaluated += 1
         done = not failures or await self._record_failures(conn, queue_row, env, failures, stats)
         await self._finish(conn, queue_row, done, failures)

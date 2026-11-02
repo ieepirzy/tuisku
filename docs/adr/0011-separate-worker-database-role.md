@@ -47,25 +47,26 @@ able to forge rule output or firing keys.
   - `meta_counters`: `SELECT`, `INSERT`, `UPDATE (count)` (the breach-count upsert), only for
     its own ingest kinds with a source (a trigger). Row-level security hides every other
     counter from it, so it cannot row-lock the worker's.
-  - `sources`: `SELECT`, `INSERT`, `UPDATE (disabled_at)`. `source_tokens`: `SELECT`,
-    `INSERT`, `UPDATE (revoked_at, last_used_at)`. Neither can be deleted, and sources are
-    renamed only by the owner.
+  - `sources`, `source_tokens`: `SELECT`, `INSERT`, never `UPDATE` or `DELETE`. A source is
+    disabled by inserting a `source_admin_requests` row, and a token revoked by inserting a
+    `token_revocations` row; owner triggers apply both. Both request tables are append-only.
+    When a token was last used is kept in the API-only `source_token_usage` table, which the
+    worker never reads. Sources are renamed only by the owner.
   - `operator_tokens`: `SELECT`, `INSERT` of tokens without a person (read, triage, admin;
     person-bound and approve tokens stay owner-only, ADR 0005), `UPDATE (revoked_at)` only,
-    never `DELETE`.
-  - `findings`: `UPDATE` of the triage columns only (`status`, `suppressed_until`,
-    `suppression_reason`, `suppressed_at`, `count_at_suppression`, `updated_at`).
-  - `incidents`: `UPDATE` of `status`, `disposition` and `updated_at` only.
-    For both tables a trigger refuses any other change and any update of a resolved, expired or
-    closed row. It requires a matching operator event inserted in the same transaction. Triage
-    may set a finding only to `open`, `acknowledged`, `resolved` or `suppressed`, never
-    `expired`. The trigger sets a suppression's count itself. It caps every suppression at
-    30 days from the finding's first suppression, so a lift and re-suppress does not restart the
-    clock.
-  - `finding_events`, `incident_events`: `INSERT` only with an `operator:<uid>` actor naming a
-    live operator token (not revoked, not expired, holding `triage` or `admin`), and only
-    triage kinds (`status_changed` and `suppressed`
-    for findings; `status_changed`, `reopened` and `note` for incidents) (a trigger).
+    never `DELETE`. The worker never reads it.
+  - `triage_requests`: `INSERT` only (append-only, `requested_at` forced to `now()`). The API
+    role has no `UPDATE` on `findings` or `incidents` and no `INSERT` on their events. Each
+    triage request is applied by an owner trigger (`SECURITY DEFINER`) with the rules of ADR
+    0007. The actor must be an `operator:<uid>` naming a live operator token (not revoked, not
+    expired, holding `triage` or `admin`). Only attachable findings change, and a finding is
+    never set to `expired`. A suppression needs an expiry and a reason, and ends within 30
+    days of the finding's first suppression, so a lift and re-suppress does not restart the
+    clock. The trigger sets the suppression's start and count itself. Incidents move only
+    along the transition table, and closing needs a disposition. Closing or resolving an
+    incident resolves its attachable findings. Every change writes its event. A refused
+    request raises SQLSTATE `TK404` (no such target) or `TK409` (not allowed), which the API
+    answers 404 and 409, as before.
   - `notifications`: nothing. The pages triage causes are written by owner triggers running as
     `SECURITY DEFINER`, whoever made the change: a finding leaving `suppressed` (to `open`,
     `acknowledged` or `resolved`, directly or through its incident being closed or resolved)
@@ -75,8 +76,8 @@ able to forge rule output or firing keys.
   `finding_detections`, `incident_findings`, `finding_overflow_groups`, `pack_loads`,
   `notification_deliveries`, `evaluation_dead_letter`, `evaluation_dead_letter_rules`,
   `evaluation_attempts`, `notifications`, new findings or incidents, rule detections, queue
-  claims, updates or deletes, events with `system`, `rule:` or `investigator:` actors or
-  non-triage kinds, and the worker's meta kinds (`evaluation_failed`,
+  claims, updates or deletes, any `UPDATE` of a table the worker reads or writes, any event,
+  and the worker's meta kinds (`evaluation_failed`,
   `notification_undeliverable`, `backlog`) in any bucket.
 - **Functions and temporary tables.** No `tuisku_*` function is executable by PUBLIC. Firing a
   trigger needs no `EXECUTE`. Only the read-only helpers `tuisku_is_worker()`,
@@ -85,19 +86,25 @@ able to forge rule output or firing keys.
   run anywhere but on its own table. PUBLIC has no `TEMP` on the database, and the migration
   stops if a runtime role still has it. So no role can attach a Tuisku trigger function,
   least of all a `SECURITY DEFINER` pager, to a table of its own.
-- **No table locks, no advisory locks.** `LOCK TABLE` above `ROW EXCLUSIVE` needs table-level
-  `UPDATE`, `DELETE` or `TRUNCATE`. The API role holds none of them on any table: every
-  `UPDATE` it has is column-level (`sources.disabled_at`, `source_tokens.revoked_at` and
-  `last_used_at`, `operator_tokens.revoked_at`, `meta_counters.count`, and the triage columns of
-  `findings` and `incidents`). Postgres checks no privilege on advisory locks, so the worker uses
-  none. The drain takes a row lock on the worker-only `worker_locks` table. Group and rule
-  serialization take row locks on the worker-only `group_locks` table (one row per key, in
-  sorted key order), which needs `UPDATE` that only the worker role has. The worker connection
-  runs with `lock_timeout` and `statement_timeout`. A row the API role holds for triage
-  therefore delays only what touches that row, within the lock timeout; other work proceeds,
-  and the backlog check pages if the queue falls behind. `group_locks` keeps one small row per
-  group key ever seen. The migration lock (`tuisku migrate`) is still an advisory lock: a
-  compromised API process could delay a migration, but no evaluation or page.
+- **No row locks the worker waits on, no table locks, no advisory locks.** A row lock needs
+  `UPDATE` (or `DELETE`). The only tables the API role may update are `meta_counters` (its own
+  ingest counters; row-level security hides the rest), `operator_tokens` and
+  `source_token_usage`, none of which the worker locks or writes. So `FOR UPDATE`,
+  `FOR NO KEY UPDATE`, `FOR SHARE` and `FOR KEY SHARE` are refused on every other table. `LOCK
+  TABLE` above `ROW EXCLUSIVE` needs table-level `UPDATE`, `DELETE` or `TRUNCATE`, which the
+  API role holds only on `source_token_usage`. Postgres checks no privilege on advisory locks,
+  so the worker uses none. The drain takes a row lock on the worker-only `worker_locks` table,
+  and group and rule serialization take row locks on the worker-only `group_locks` table (one
+  row per key, in sorted key order). `group_locks` keeps one small row per group key ever
+  seen. The worker connection runs with `lock_timeout` and `statement_timeout`.
+  One lock remains: an open, uncommitted triage request holds its finding or incident rows
+  through the owner trigger, for as long as the API keeps the transaction open. That delays
+  only that finding's bookkeeping, within the lock timeout. A firing it holds up for a rule
+  without a correlation pages at once as `evaluation_delayed`, in a transaction of its own
+  that writes only the worker-only outbox. A timeout anywhere in a row's processing,
+  dead-lettering included, retries that row later and never cancels the drain. The backlog
+  check pages if the queue falls behind. The migration lock (`tuisku migrate`) is still an
+  advisory lock: a compromised API process could delay a migration, but no evaluation or page.
 - **A database of its own.** `REVOKE TEMP ON DATABASE ... FROM PUBLIC` is database-wide, so
   Tuisku expects a database of its own. Any role may still create large objects
   (`lo_create()`), and the API role may insert evidence as fast as Postgres accepts it.
@@ -120,12 +127,33 @@ able to forge rule output or firing keys.
 - In single-role development setups (`TUISKU_APP_ROLE` unset), the owner does everything, as
   before.
 
+## Availability limits
+
+- A compromised API process shares the database, so it can still exhaust what the database
+  shares: connections, CPU, I/O, disk, and, through long transactions, vacuum. The migration
+  caps the app role (`ALTER ROLE ... CONNECTION LIMIT`, `TUISKU_APP_ROLE_CONNECTION_LIMIT`,
+  default 20) and sets role defaults for `statement_timeout` (30 s) and
+  `idle_in_transaction_session_timeout` (60 s). The role may override both defaults with `SET`,
+  so they bound mistakes, not an attacker. The README describes `reserved_connections` and
+  `pg_use_reserved_connections` (Postgres 16) to keep slots free for the worker.
+- Integrity is enforced: no role but the worker writes rule output, findings, incidents or
+  pages, and every change by the API role is an attributed request. Availability is not
+  prevented, only detected. The worker writes a heartbeat (`worker_heartbeats`, worker-only to
+  write) on every pass, with the age of the oldest queued row and undelivered notification.
+  `GET /v1/worker/health` is unauthenticated and answers 503 when no heartbeat is fresh
+  (`TUISKU_WORKER_HEARTBEAT_STALE_SECONDS`, 120 s) or when the oldest undelivered notification
+  is older than `TUISKU_WORKER_BACKLOG_SECONDS`. A monitor outside the database (and outside
+  Tuisku) must poll it, because a stalled worker cannot page about itself.
+- The sweep that expires findings claims with `SKIP LOCKED`. A finding row held by an open
+  triage request is skipped until the next pass, which only delays its expiry.
+
 ## Consequences
 
 - A deployment creates two login roles instead of one, and points `TUISKU_DATABASE_URL` for
   `tuisku worker` at the worker role.
-- A compromised API can still triage, as operators can. Every such change is an attributed
-  operator event, and every suppression ends within 30 days. It can still add sensor evidence
+- A compromised API can still triage, as operators can, through triage requests. Every such
+  change is an attributed operator event, and every suppression ends within 30 days. It can
+  still exhaust shared database resources (see Availability limits). It can still add sensor evidence
   and current-bucket ingest meta-detections, and it can still enqueue rows. It can no longer
   write rule output, firing keys, links, findings or incidents. It cannot drop, park or delete
   queue rows, pre-claim a worker notification or meta-detection slot, or rewrite a finding

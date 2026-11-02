@@ -39,6 +39,7 @@ EVIDENCE_TABLES = (
     "pack_loads",
     "notifications",
     "notification_deliveries",
+    "triage_requests",
 )
 # Mutable working tables (ADR 0011: the worker role creates findings and incidents; the API
 # role only triages them).
@@ -50,20 +51,13 @@ WORKING_TABLES = (
 )
 # Worker-only lock tables: the API role gets no privilege at all on them.
 LOCK_TABLES = ("worker_locks", "group_locks")
-# What the API role (ingest and triage) may write here; it reads everything (ADR 0011).
-# The API role writes no notifications at all: the pages triage causes are written by owner
-# triggers (SECURITY DEFINER) below.
-API_INSERT = ("finding_events", "incident_events")
-# Triage changes only these columns (column-level grants; a trigger checks the rest).
-FINDING_TRIAGE_COLUMNS = (
-    "status",
-    "suppressed_until",
-    "suppression_reason",
-    "suppressed_at",
-    "count_at_suppression",
-    "updated_at",
-)
-INCIDENT_TRIAGE_COLUMNS = ("status", "disposition", "updated_at")
+# Worker-only, readable by the API role for GET /v1/worker/health.
+HEARTBEAT_TABLE = "worker_heartbeats"
+# What the API role (ingest and triage) may write here (ADR 0011): triage requests only. It
+# updates no finding or incident and writes no event or notification: an owner trigger
+# (SECURITY DEFINER) validates each request and applies it, so the API role holds no UPDATE, and
+# so no row lock, on anything the worker uses.
+API_INSERT = ("triage_requests",)
 # Operator (triage) event kinds; every other kind is the worker's (ADR 0011).
 OPERATOR_FINDING_EVENT_KINDS = ("status_changed", "suppressed")
 OPERATOR_INCIDENT_EVENT_KINDS = ("status_changed", "reopened", "note")
@@ -79,6 +73,7 @@ FORCED_TIME_COLUMNS = (
     ("pack_loads", "loaded_at"),
     ("notification_deliveries", "at"),
     ("notifications", "created_at"),
+    ("triage_requests", "requested_at"),
 )
 
 _ROLE_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
@@ -290,6 +285,32 @@ CREATE INDEX notification_deliveries_notification_idx
 -- need UPDATE, which only the worker role has. `worker_locks` holds singletons (the notification
 -- drain); `group_locks` serializes each rule's groups and cap checks, one row per key, locked
 -- in sorted key order.
+-- Triage, as requests (ADR 0011). The API role inserts one; tuisku_apply_triage() (owner,
+-- SECURITY DEFINER) validates it with the triage rules and applies it in the same transaction.
+CREATE TABLE triage_requests (
+    id               bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    uid              uuid NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    target           text NOT NULL CHECK (target IN ('finding', 'incident')),
+    target_uid       uuid NOT NULL,
+    status           text NOT NULL CHECK (char_length(status) <= 32),
+    disposition      text CHECK (char_length(disposition) <= 32),
+    reason           text CHECK (char_length(reason) <= 1000),
+    suppressed_until timestamptz,
+    actor            text NOT NULL CHECK (actor ~ '^operator:[0-9a-f-]{36}$'),
+    requested_at     timestamptz NOT NULL DEFAULT now()  -- forced to now() by trigger
+);
+
+-- One row per worker process, updated every pass: GET /v1/worker/health reads it, so a monitor
+-- that does not depend on the worker sees when it stops (ADR 0011 "Availability limits").
+CREATE TABLE worker_heartbeats (
+    worker                text PRIMARY KEY CHECK (char_length(worker) BETWEEN 1 AND 200),
+    beat_at               timestamptz NOT NULL,
+    oldest_queued_at      timestamptz,
+    queued                bigint NOT NULL DEFAULT 0,
+    oldest_undelivered_at timestamptz,
+    undelivered           bigint NOT NULL DEFAULT 0
+);
+
 CREATE TABLE worker_locks (
     name text PRIMARY KEY CHECK (char_length(name) BETWEEN 1 AND 64)
 );
@@ -343,7 +364,7 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
 BEGIN
-    IF TG_RELID NOT IN ('public.finding_events'::regclass::oid, 'public.incident_events'::regclass::oid, 'public.finding_detections'::regclass::oid, 'public.incident_findings'::regclass::oid, 'public.finding_overflow_groups'::regclass::oid, 'public.rule_firings'::regclass::oid, 'public.pack_loads'::regclass::oid, 'public.notification_deliveries'::regclass::oid, 'public.notifications'::regclass::oid) OR TG_WHEN <> 'BEFORE' OR TG_OP NOT IN ('INSERT')
+    IF TG_RELID NOT IN ('public.finding_events'::regclass::oid, 'public.incident_events'::regclass::oid, 'public.finding_detections'::regclass::oid, 'public.incident_findings'::regclass::oid, 'public.finding_overflow_groups'::regclass::oid, 'public.rule_firings'::regclass::oid, 'public.pack_loads'::regclass::oid, 'public.notification_deliveries'::regclass::oid, 'public.notifications'::regclass::oid, 'public.triage_requests'::regclass::oid) OR TG_WHEN <> 'BEFORE' OR TG_OP NOT IN ('INSERT')
        OR TG_LEVEL <> 'ROW' THEN
         RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
             USING ERRCODE = 'insufficient_privilege';
@@ -458,115 +479,170 @@ CREATE TRIGGER incident_events_actor BEFORE INSERT ON incident_events
 """
 
 
-# ADR 0011: what the API role may do to findings, incidents and notifications. The worker (and
-# the owner) are not restricted here. For the API role:
-# - only triage columns may change; window, lifetime, counts, severity and every other column
-#   are refused (the column grants refuse them too);
-# - a suppression starts now, by the database clock, records the count then, and never runs
-#   past 30 days from when it began, however often it is renewed;
-# - every change needs a matching operator event inserted in the same transaction (the same
-#   xmin check as firing keys), so no triage change is silent;
-# - only the notification dedupe-key prefixes triage emits are accepted, so the API cannot
-#   pre-claim a key the worker will use and swallow that page.
-TRIAGE_GUARD_SQL = f"""
-CREATE FUNCTION tuisku_findings_triage_guard() RETURNS trigger
+# ADR 0011: triage requests, applied by an owner trigger, and the pages owner triggers write.
+TRIAGE_SQL = """
+-- Applies a triage request as the owner (ADR 0011), with the triage rules (ADR 0007): only
+-- attachable findings change, never to `expired`; a suppression has an expiry and a reason and
+-- ends within 30 days of the finding's first suppression; incidents move only along the
+-- transition table, closing needs a disposition, and closing or resolving resolves the
+-- incident's attachable findings. Every change writes its event, actor the request's operator,
+-- who must hold a live, unexpired token with the triage role. Errors: SQLSTATE TK404 (no such
+-- target) and TK409 (not allowed), which the API answers 404 and 409.
+CREATE FUNCTION tuisku_apply_triage() RETURNS trigger
 LANGUAGE plpgsql
+SECURITY DEFINER
 SET search_path = pg_catalog
 AS $$
 DECLARE
-    began timestamptz;
+    f        record;
+    fr       record;
+    inc      record;
+    inc_id   bigint;
+    began    timestamptz;
+    old_st   text;
+    ev_kind  text;
+    payload  jsonb;
+    states   text[] := ARRAY['open', 'triaged', 'investigating', 'contained', 'resolved', 'closed'];
 BEGIN
-    IF TG_RELID NOT IN ('public.findings'::regclass::oid) OR TG_WHEN <> 'BEFORE' OR TG_OP NOT IN ('UPDATE')
+    IF TG_RELID NOT IN ('public.triage_requests'::regclass::oid) OR TG_WHEN <> 'AFTER' OR TG_OP NOT IN ('INSERT')
        OR TG_LEVEL <> 'ROW' THEN
         RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
             USING ERRCODE = 'insufficient_privilege';
     END IF;
-    IF public.tuisku_is_worker() THEN
-        RETURN NEW;
-    END IF;
-    -- Triage sets these states only; expiry is the worker's.
-    IF NEW.status NOT IN ('open', 'acknowledged', 'resolved', 'suppressed') THEN
-        RAISE EXCEPTION 'triage cannot set a finding to % (ADR 0011)', NEW.status
+    IF NOT EXISTS (
+        SELECT 1 FROM public.operator_tokens t
+        WHERE t.uid = substring(NEW.actor FROM 10)::uuid AND t.revoked_at IS NULL
+          AND (t.expires_at IS NULL OR t.expires_at > now())
+          AND t.roles && ARRAY['triage', 'admin']::text[]
+    ) THEN
+        RAISE EXCEPTION 'no live operator token with the triage role: %', NEW.actor
             USING ERRCODE = 'insufficient_privilege';
     END IF;
-    IF (to_jsonb(NEW) - {_sql_array(FINDING_TRIAGE_COLUMNS)})
-       IS DISTINCT FROM (to_jsonb(OLD) - {_sql_array(FINDING_TRIAGE_COLUMNS)}) THEN
-        RAISE EXCEPTION 'triage may change only a finding''s status and suppression (ADR 0011)'
-            USING ERRCODE = 'insufficient_privilege';
+    IF NEW.reason IS NOT NULL AND btrim(NEW.reason) = '' THEN
+        RAISE EXCEPTION 'a reason must not be blank' USING ERRCODE = 'TK409';
     END IF;
-    IF OLD.status NOT IN ('open', 'acknowledged', 'suppressed') THEN
-        RAISE EXCEPTION 'a % finding can no longer change', OLD.status
-            USING ERRCODE = 'insufficient_privilege';
-    END IF;
-    IF NEW.status = 'suppressed' THEN
-        IF OLD.status = 'suppressed' THEN
-            NEW.count_at_suppression := OLD.count_at_suppression;
+    IF NEW.target = 'finding' THEN
+        SELECT * INTO f FROM public.findings WHERE uid = NEW.target_uid FOR UPDATE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'no such finding' USING ERRCODE = 'TK404';
+        END IF;
+        IF f.status NOT IN ('open', 'acknowledged', 'suppressed') THEN
+            RAISE EXCEPTION 'finding is %; it can no longer change', f.status
+                USING ERRCODE = 'TK409';
+        END IF;
+        IF NEW.status NOT IN ('open', 'acknowledged', 'resolved', 'suppressed') THEN
+            RAISE EXCEPTION 'cannot set a finding to %', NEW.status USING ERRCODE = 'TK409';
+        END IF;
+        IF NEW.status = f.status AND NEW.status <> 'suppressed' THEN
+            RAISE EXCEPTION 'finding is already %', NEW.status USING ERRCODE = 'TK409';
+        END IF;
+        IF NEW.status = 'suppressed' THEN
+            IF f.overflow THEN
+                RAISE EXCEPTION 'an overflow finding cannot be suppressed, only resolved'
+                    USING ERRCODE = 'TK409';
+            END IF;
+            IF NEW.suppressed_until IS NULL OR NEW.reason IS NULL THEN
+                RAISE EXCEPTION 'suppression needs an expiry and a reason' USING ERRCODE = 'TK409';
+            END IF;
+            SELECT min(e.at) INTO began FROM public.finding_events e
+            WHERE e.finding_id = f.id AND e.kind = 'suppressed';
+            began := least(coalesce(began, now()),
+                           CASE WHEN f.status = 'suppressed' THEN coalesce(f.suppressed_at, now())
+                                ELSE now() END);
+            IF NEW.suppressed_until > began + interval '30 days' THEN
+                RAISE EXCEPTION 'suppression expiry must be in the future and within 30 days of '
+                    'when the suppression began' USING ERRCODE = 'TK409';
+            END IF;
+            INSERT INTO public.finding_events (finding_id, actor, kind, old_value, new_value,
+                                               reason)
+            VALUES (f.id, NEW.actor, 'suppressed', jsonb_build_object('status', f.status),
+                    jsonb_build_object('status', 'suppressed',
+                                       'suppressed_until', NEW.suppressed_until),
+                    NEW.reason);
+            UPDATE public.findings SET status = 'suppressed',
+                suppressed_until = NEW.suppressed_until, suppression_reason = NEW.reason,
+                suppressed_at = began,
+                count_at_suppression = CASE WHEN f.status = 'suppressed'
+                                            THEN f.count_at_suppression ELSE f.count END,
+                updated_at = now()
+            WHERE id = f.id;
         ELSE
-            NEW.count_at_suppression := OLD.count;
+            INSERT INTO public.finding_events (finding_id, actor, kind, old_value, new_value,
+                                               reason)
+            VALUES (f.id, NEW.actor, 'status_changed', jsonb_build_object('status', f.status),
+                    jsonb_build_object('status', NEW.status), NEW.reason);
+            UPDATE public.findings SET status = NEW.status, suppressed_until = NULL,
+                suppression_reason = NULL, suppressed_at = NULL, count_at_suppression = NULL,
+                updated_at = now()
+            WHERE id = f.id;
         END IF;
-        -- The 30 days run from the finding's first suppression ever, so lifting and
-        -- re-suppressing (a bounce) never restarts the clock. The operator event for this
-        -- change is already written, so the earliest one is never later than now().
-        SELECT min(e.at) INTO began FROM public.finding_events e
-        WHERE e.finding_id = NEW.id AND e.kind = 'suppressed';
-        began := least(coalesce(began, now()), coalesce(OLD.suppressed_at, now()), now());
-        NEW.suppressed_at := began;
-        IF NEW.suppressed_until IS NULL OR NEW.suppressed_until > began + interval '30 days' THEN
-            RAISE EXCEPTION 'a suppression ends within 30 days of when it began (ADR 0007)'
-                USING ERRCODE = 'insufficient_privilege';
-        END IF;
+        RETURN NULL;
     END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM public.finding_events e
-        WHERE e.finding_id = NEW.id AND e.actor LIKE 'operator:%'
-          AND e.new_value ->> 'status' = NEW.status
-          AND public.tuisku_xmin_is_current(e.xmin)
+    -- An incident: lock its findings first, then the incident (the worker's order).
+    SELECT id INTO inc_id FROM public.incidents WHERE uid = NEW.target_uid;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'no such incident' USING ERRCODE = 'TK404';
+    END IF;
+    PERFORM 1 FROM public.findings fx JOIN public.incident_findings l ON l.finding_id = fx.id
+    WHERE l.incident_id = inc_id ORDER BY fx.id FOR UPDATE OF fx;
+    SELECT * INTO inc FROM public.incidents WHERE id = inc_id FOR UPDATE;
+    old_st := inc.status;
+    IF NOT (NEW.status = ANY (states)) THEN
+        RAISE EXCEPTION 'unknown incident state %', NEW.status USING ERRCODE = 'TK409';
+    END IF;
+    IF old_st = 'closed' OR NEW.status = old_st OR NOT (
+        NEW.status = 'closed'
+        OR (old_st IN ('contained', 'resolved') AND NEW.status = 'investigating')
+        OR array_position(states, NEW.status) > array_position(states, old_st)
     ) THEN
-        RAISE EXCEPTION 'a triage change needs its operator event in the same transaction'
-            USING ERRCODE = 'insufficient_privilege';
+        RAISE EXCEPTION 'an incident cannot go from % to %', old_st, NEW.status
+            USING ERRCODE = 'TK409';
     END IF;
-    RETURN NEW;
+    IF NEW.status = 'closed' THEN
+        IF NEW.disposition IS NULL OR NEW.disposition NOT IN ('true_positive',
+               'benign_true_positive', 'false_positive', 'duplicate', 'inconclusive') THEN
+            RAISE EXCEPTION 'closing needs a disposition: true_positive, benign_true_positive, '
+                'false_positive, duplicate, inconclusive' USING ERRCODE = 'TK409';
+        END IF;
+    ELSIF NEW.disposition IS NOT NULL THEN
+        RAISE EXCEPTION 'a disposition is given only when closing' USING ERRCODE = 'TK409';
+    END IF;
+    ev_kind := CASE WHEN old_st IN ('contained', 'resolved') AND NEW.status = 'investigating'
+                    THEN 'reopened' ELSE 'status_changed' END;
+    payload := jsonb_build_object('from', old_st, 'to', NEW.status);
+    IF NEW.disposition IS NOT NULL THEN
+        payload := payload || jsonb_build_object('disposition', NEW.disposition);
+    END IF;
+    IF NEW.reason IS NOT NULL THEN
+        payload := payload || jsonb_build_object('reason', NEW.reason);
+    END IF;
+    INSERT INTO public.incident_events (incident_id, actor, kind, payload)
+    VALUES (inc.id, NEW.actor, ev_kind, payload);
+    UPDATE public.incidents SET status = NEW.status, disposition = NEW.disposition,
+        updated_at = now()
+    WHERE id = inc.id;
+    IF NEW.status IN ('resolved', 'closed') THEN
+        FOR fr IN
+            SELECT fx.* FROM public.findings fx JOIN public.incident_findings l
+                ON l.finding_id = fx.id
+            WHERE l.incident_id = inc.id AND fx.status IN ('open', 'acknowledged', 'suppressed')
+            ORDER BY fx.id
+        LOOP
+            INSERT INTO public.finding_events (finding_id, actor, kind, old_value, new_value,
+                                               reason)
+            VALUES (fr.id, NEW.actor, 'status_changed', jsonb_build_object('status', fr.status),
+                    jsonb_build_object('status', 'resolved'), 'incident ' || NEW.status);
+            UPDATE public.findings SET status = 'resolved', suppressed_until = NULL,
+                suppression_reason = NULL, suppressed_at = NULL, count_at_suppression = NULL,
+                updated_at = now()
+            WHERE id = fr.id;
+        END LOOP;
+    END IF;
+    RETURN NULL;
 END
 $$;
-CREATE TRIGGER findings_triage_guard BEFORE UPDATE ON findings
-    FOR EACH ROW EXECUTE FUNCTION tuisku_findings_triage_guard();
-
-CREATE FUNCTION tuisku_incidents_triage_guard() RETURNS trigger
-LANGUAGE plpgsql
-SET search_path = pg_catalog
-AS $$
-BEGIN
-    IF TG_RELID NOT IN ('public.incidents'::regclass::oid) OR TG_WHEN <> 'BEFORE' OR TG_OP NOT IN ('UPDATE')
-       OR TG_LEVEL <> 'ROW' THEN
-        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
-            USING ERRCODE = 'insufficient_privilege';
-    END IF;
-    IF public.tuisku_is_worker() THEN
-        RETURN NEW;
-    END IF;
-    IF (to_jsonb(NEW) - {_sql_array(INCIDENT_TRIAGE_COLUMNS)})
-       IS DISTINCT FROM (to_jsonb(OLD) - {_sql_array(INCIDENT_TRIAGE_COLUMNS)}) THEN
-        RAISE EXCEPTION 'triage may change only an incident''s status and disposition (ADR 0011)'
-            USING ERRCODE = 'insufficient_privilege';
-    END IF;
-    IF OLD.status = 'closed' THEN
-        RAISE EXCEPTION 'a closed incident can no longer change'
-            USING ERRCODE = 'insufficient_privilege';
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM public.incident_events e
-        WHERE e.incident_id = NEW.id AND e.actor LIKE 'operator:%'
-          AND e.kind IN ('status_changed', 'reopened') AND e.payload ->> 'to' = NEW.status
-          AND public.tuisku_xmin_is_current(e.xmin)
-    ) THEN
-        RAISE EXCEPTION 'a triage change needs its operator event in the same transaction'
-            USING ERRCODE = 'insufficient_privilege';
-    END IF;
-    RETURN NEW;
-END
-$$;
-CREATE TRIGGER incidents_triage_guard BEFORE UPDATE ON incidents
-    FOR EACH ROW EXECUTE FUNCTION tuisku_incidents_triage_guard();
+CREATE TRIGGER triage_requests_apply AFTER INSERT ON triage_requests
+    FOR EACH ROW EXECUTE FUNCTION tuisku_apply_triage();
 
 -- Pages triage causes, written by the owner (SECURITY DEFINER) whoever made the change, so the
 -- API role needs no notification privilege at all (ADR 0011):
@@ -723,7 +799,7 @@ def upgrade() -> None:
         )
     op.execute(FIRING_IDENTITY_FUNCTION_SQL)
     op.execute(EVENT_ACTOR_SQL)
-    op.execute(TRIAGE_GUARD_SQL)
+    op.execute(TRIAGE_SQL)
     op.execute(REVOKE_FUNCTIONS_SQL)
     # The evidence trigger function comes from revision 0001.
     for table in EVIDENCE_TABLES:
@@ -745,13 +821,13 @@ def upgrade() -> None:
     op.execute(f'GRANT SELECT, INSERT ON {", ".join(EVIDENCE_TABLES)} TO "{worker}"')
     op.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON {", ".join(WORKING_TABLES)} TO "{worker}"')
     op.execute(f'GRANT SELECT, INSERT, UPDATE ON {", ".join(LOCK_TABLES)} TO "{worker}"')
+    op.execute(f'GRANT SELECT, INSERT, UPDATE ON {HEARTBEAT_TABLE} TO "{worker}"')
     op.execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "{worker}"')
-    # The API reads all of it (but the lock tables) and writes only triage: status updates and
-    # operator events. Owner triggers write the pages triage causes.
+    # The API reads all of it (but the lock tables) and writes only triage requests; owner
+    # triggers apply them and write the events and pages they cause. No UPDATE anywhere here.
     op.execute(f'GRANT SELECT ON {", ".join(EVIDENCE_TABLES + WORKING_TABLES)} TO "{app}"')
+    op.execute(f'GRANT SELECT ON {HEARTBEAT_TABLE} TO "{app}"')
     op.execute(f'GRANT INSERT ON {", ".join(API_INSERT)} TO "{app}"')
-    op.execute(f'GRANT UPDATE ({", ".join(FINDING_TRIAGE_COLUMNS)}) ON findings TO "{app}"')
-    op.execute(f'GRANT UPDATE ({", ".join(INCIDENT_TRIAGE_COLUMNS)}) ON incidents TO "{app}"')
     op.execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "{app}"')
 
 
@@ -762,7 +838,8 @@ def downgrade() -> None:
     op.execute("DROP INDEX detection_evidence_observation_id_idx")
     op.execute("DROP INDEX detection_evidence_detection_ref_id_idx")
     op.execute(
-        "DROP TABLE worker_locks, group_locks, evaluation_attempts, evaluation_dead_letter_rules, "
+        "DROP TABLE triage_requests, worker_heartbeats, worker_locks, group_locks, "
+        "evaluation_attempts, evaluation_dead_letter_rules, "
         "notification_deliveries, "
         "notifications, rule_firings, incident_findings, "
         "incident_events, finding_overflow_groups, finding_detections, finding_events, findings, "
@@ -771,6 +848,6 @@ def downgrade() -> None:
     op.execute(
         "DROP FUNCTION tuisku_force_event_time(), tuisku_check_firing_identity(), "
         "tuisku_events_operator_only(), "
-        "tuisku_findings_triage_guard(), tuisku_incidents_triage_guard(), "
+        "tuisku_apply_triage(), "
         "tuisku_page_lifted_thresholds(), tuisku_page_reopened_incident(), tuisku_page_backlog()"
     )

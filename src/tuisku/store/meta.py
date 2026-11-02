@@ -37,6 +37,7 @@ INVALID_ENVELOPE = "tuisku.meta.invalid_envelope"
 EVALUATION_FAILED = "tuisku.meta.evaluation_failed"
 NOTIFICATION_UNDELIVERABLE = "tuisku.meta.notification_undeliverable"
 BACKLOG = "tuisku.meta.backlog"
+INGEST_KINDS = frozenset({LIMIT_EXCEEDED, RATE_LIMITED, INVALID_ENVELOPE})
 
 _TITLES = {
     LIMIT_EXCEEDED: ("Source exceeded an ingest limit", Severity.MEDIUM),
@@ -159,20 +160,25 @@ async def _record(
     got = await db.fetch_one(conn, "SELECT tuisku_current_bucket() AS bucket")
     assert got is not None
     bucket: datetime = got["bucket"]
-    await conn.execute(
-        "INSERT INTO meta_counters (source_id, kind, subject, bucket_start, count) "
-        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT ON CONSTRAINT meta_counters_key "
-        "DO UPDATE SET count = meta_counters.count + EXCLUDED.count",
-        (source_id, kind, subject, bucket, n),
-    )
+    counted = kind in INGEST_KINDS
+    if counted:
+        # Only the API's ingest breaches are counted: meta_counters is the API's own table, which
+        # the worker never writes (ADR 0011). A worker meta-detection is one per bucket, uncounted.
+        await conn.execute(
+            "INSERT INTO meta_counters (source_id, kind, subject, bucket_start, count) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT ON CONSTRAINT meta_counters_key "
+            "DO UPDATE SET count = meta_counters.count + EXCLUDED.count",
+            (source_id, kind, subject, bucket, n),
+        )
     title, severity = _TITLES[kind]
     explanation = {
         "bucket_start": bucket.isoformat(),
         "bucket_seconds": int(BUCKET.total_seconds()),
         "subject": subject,
-        "counter": "meta_counters",  # repeats in this bucket are counted there
         **details,
     }
+    if counted:
+        explanation["counter"] = "meta_counters"  # repeats in this bucket are counted there
     row = await db.fetch_one(
         conn,
         "INSERT INTO detections (source_id, evaluator, authorship, kind, identity, title, "

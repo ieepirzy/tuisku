@@ -677,9 +677,12 @@ def test_a_step_stuck_on_a_lock_is_skipped_and_the_pass_goes_on(fresh_database_u
     ingest(url, "h", "harava", lines((T, "agents")))
     hold = psycopg.connect(url)
     try:
+        # The backlog's meta-detection slot for this bucket, taken by an open transaction.
         hold.execute(
-            "INSERT INTO meta_counters (source_id, kind, subject, bucket_start, count) "
-            "VALUES (NULL, 'tuisku.meta.backlog', 'queue', tuisku_current_bucket(), 0)"
+            "INSERT INTO detections (evaluator, authorship, kind, identity, title, severity_id, "
+            "received_at, eval_time, ocsf_version, rule_ref, subject, bucket_start) VALUES "
+            "('tuisku', 'tuisku', 'tuisku.meta.backlog', 'tuisku.meta.backlog', 't', 4, now(), "
+            "now(), '1.9.0', '{}', 'queue', tuisku_current_bucket())"
         )
         notifier = RecordingNotifier()
         worker = Worker(
@@ -689,7 +692,7 @@ def test_a_step_stuck_on_a_lock_is_skipped_and_the_pass_goes_on(fresh_database_u
             config=WorkerConfig(lock_timeout_ms=200, backlog_after=timedelta(minutes=5)),
         )
         stats = run_async(url, worker.run_once)
-        assert stats.backlog == 0  # skipped: its counter row is held
+        assert stats.backlog == 0  # skipped: its slot is held
         assert stats.claimed >= 1 and "finding_opened" in notifier.kinds()
     finally:
         hold.rollback()

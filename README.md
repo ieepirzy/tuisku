@@ -175,13 +175,13 @@ run on any table but its own, and PUBLIC has no `TEMP` on the database, so no ro
 Tuisku's trigger functions to a table of its own. The migrating role must therefore own the
 database, or the migration stops and asks for the `REVOKE TEMP` to be run by its owner. Operator
 tokens can be created without a person (read, triage, admin) and only revoked afterwards. For
-triage the API role gets `SELECT` on findings, incidents and their tables. On `findings` it may
-update only the status and suppression columns, and on `incidents` only status and
-disposition. A trigger requires each such change to come with its operator event in the same
-transaction, and caps a suppression at 30 days from the finding's first suppression. It may
-also insert `finding_events` and `incident_events` with an operator actor (a live, unexpired
-token with the triage role) and a triage kind. It cannot write notifications at all: the pages
-triage causes are written by owner-defined triggers. ADR 0011 lists exactly what each role can
+triage the API role gets `SELECT` on findings, incidents and their tables, and `INSERT` on the
+append-only `triage_requests`, nothing more: no `UPDATE` on findings or incidents and no
+events. An owner trigger applies each request with the triage rules (a live, unexpired operator
+token with the triage role; a suppression at most 30 days from the finding's first suppression;
+the incident transition table) and writes its event, or refuses it, and the API answers 404 or
+409 as before. It cannot write notifications at all: the pages triage causes are written by
+owner-defined triggers. ADR 0011 lists exactly what each role can
 write.
 
 Tuisku expects a database of its own. `REVOKE TEMP ON DATABASE ... FROM PUBLIC` applies to the
@@ -198,9 +198,12 @@ can override those timeouts, so they bound mistakes, not attacks. On Postgres 16
 reserve slots for the worker so an exhausted pool cannot lock it out: set
 `reserved_connections` (for example 3) and `GRANT pg_use_reserved_connections TO
 tuisku_worker`. Give the database a disk quota, or at least disk alerts, sized to the retention
-policy. The
-worker's backlog check (`tuisku.meta.backlog`) pages when the queue or the notification outbox
-falls behind.
+policy. The worker's backlog check (`tuisku.meta.backlog`) pages when the queue or the
+notification outbox falls behind. A stalled worker cannot page about itself, so poll the
+unauthenticated `GET /v1/worker/health` from a monitor outside Tuisku: it answers 503 when no
+worker heartbeat is newer than `TUISKU_WORKER_HEARTBEAT_STALE_SECONDS` (120) or the oldest
+undelivered notification is older than `TUISKU_WORKER_BACKLOG_SECONDS`, and reports the age of
+the oldest queued row and undelivered notification (ADR 0011, "Availability limits").
 
 Only the worker role writes rule output: `tuisku`-evaluated detections and their links,
 `detection_evidence`, `rule_firings`, `findings`, `incidents`, `finding_detections`,

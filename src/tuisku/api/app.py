@@ -59,6 +59,50 @@ def create_app(settings: Settings | None = None, *, clock: Clock | None = None) 
         """Liveness: the process is up. Never touches the database."""
         return {"status": "ok", "revision": settings.build_revision}
 
+    @app.get("/v1/worker/health")
+    async def worker_health(request: Request) -> JSONResponse:
+        """Unauthenticated, for an external monitor that does not depend on the worker (ADR
+        0011 "Availability limits"): 503 when no worker heartbeat is fresh, or when the oldest
+        undelivered notification is older than the backlog limit."""
+        pool: AsyncConnectionPool = request.app.state.pool
+        try:
+            async with pool.connection(timeout=settings.ready_timeout_seconds) as conn:
+                row = await db.fetch_one(
+                    conn,
+                    "SELECT extract(epoch FROM now() - max(beat_at)) AS heartbeat_age, "
+                    "extract(epoch FROM now() - min(oldest_queued_at)) AS queued_age, "
+                    "coalesce(sum(queued), 0) AS queued, "
+                    "(SELECT extract(epoch FROM now() - min(n.created_at)) FROM notifications n "
+                    " WHERE NOT EXISTS (SELECT 1 FROM notification_deliveries d "
+                    " WHERE d.notification_id = n.id AND d.status = 'delivered')) "
+                    "AS undelivered_age FROM worker_heartbeats "
+                    "WHERE beat_at > now() - interval '1 day'",
+                )
+        except Exception as exc:
+            log.warning("worker health check failed: %s", type(exc).__name__)
+            return JSONResponse(status_code=503, content={"status": "unavailable"})
+        assert row is not None
+        age = None if row["heartbeat_age"] is None else float(row["heartbeat_age"])
+        undelivered = None if row["undelivered_age"] is None else float(row["undelivered_age"])
+        if age is None or age > settings.worker_heartbeat_stale_seconds:
+            status = "no_worker"
+        elif undelivered is not None and undelivered > settings.worker_backlog_seconds:
+            status = "backlog"
+        else:
+            status = "ok"
+        return JSONResponse(
+            status_code=200 if status == "ok" else 503,
+            content={
+                "status": status,
+                "heartbeat_age_seconds": age,
+                "oldest_undelivered_seconds": undelivered,
+                "oldest_queued_seconds": (
+                    None if row["queued_age"] is None else float(row["queued_age"])
+                ),
+                "queued": int(row["queued"]),
+            },
+        )
+
     @app.get("/v1/ready")
     async def ready(request: Request) -> JSONResponse:
         """Readiness: the database answers `SELECT 1`; 503 otherwise."""

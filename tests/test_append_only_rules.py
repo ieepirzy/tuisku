@@ -129,11 +129,11 @@ def test_event_timestamps_come_from_the_database(worked: AppDatabase) -> None:
         [(now,)] = conn.execute("SELECT now()").fetchall()
         conn.rollback()
     assert at == now
-    with psycopg.connect(worked.app_url) as conn:  # an operator event, from the API
+    with psycopg.connect(worked.worker_url) as conn:
         [(at,)] = conn.execute(
             "INSERT INTO incident_events (incident_id, actor, kind, at) "
-            "SELECT id, 'operator:00000000-0000-4000-8000-000000000000', 'note', "
-            "'2000-01-01T00:00:00Z' FROM incidents LIMIT 1 RETURNING at"
+            "SELECT id, 'system', 'note', '2000-01-01T00:00:00Z' FROM incidents LIMIT 1 "
+            "RETURNING at"
         ).fetchall()
         conn.rollback()
     assert at.year != 2000
@@ -143,8 +143,6 @@ def test_api_role_triages_but_cannot_write_rule_output(worked: AppDatabase) -> N
     """ADR 0011: the API role updates findings and incidents and writes operator events; it
     cannot create rule output, firing keys, links, findings or incidents."""
     for statement in [
-        "INSERT INTO finding_events (finding_id, actor, kind) SELECT id, "
-        "'operator:00000000-0000-4000-8000-000000000000', 'status_changed' FROM findings LIMIT 1",
         # The API's own ingest meta-detection: its kind, a source, the current bucket.
         "INSERT INTO detections (source_id, evaluator, authorship, kind, identity, title, "
         "severity_id, received_at, eval_time, ocsf_version, rule_ref, subject, bucket_start) "
@@ -154,10 +152,11 @@ def test_api_role_triages_but_cannot_write_rule_output(worked: AppDatabase) -> N
     ]:
         assert _attempt(worked.app_url, statement) is None, statement
     for statement in [
-        # Triage changes need their operator event in the same transaction (see
-        # test_api_role_bypasses.py for the full set).
+        # Round nine: triage is a request (triage_requests); no UPDATE and no event of its own.
         "UPDATE findings SET updated_at = updated_at",
         "UPDATE incidents SET updated_at = updated_at",
+        "INSERT INTO finding_events (finding_id, actor, kind) SELECT id, "
+        "'operator:00000000-0000-4000-8000-000000000000', 'status_changed' FROM findings LIMIT 1",
         "INSERT INTO findings (fingerprint, rule_id, rule_rev, title, severity_id, first_seen, "
         "last_seen, group_values, rule_ref, window_seconds, max_lifetime_seconds, notify, "
         "created_at, updated_at) SELECT fingerprint, rule_id, 99, title, severity_id, now(), "

@@ -53,7 +53,9 @@ def _refused(url: str, statement: str, params: Any = None) -> Exception:
             _run_all(conn, statement, params)
         except psycopg.Error as exc:
             conn.rollback()
-            assert isinstance(exc, errors.InsufficientPrivilege), exc
+            assert isinstance(exc, (errors.InsufficientPrivilege, errors.CheckViolation)) or (
+                exc.diag.sqlstate in ("TK404", "TK409")
+            ), exc
             return exc
         conn.rollback()
     raise AssertionError(f"not refused: {statement}")
@@ -134,35 +136,62 @@ def _agent_finding(db: AppDatabase, tmp_path: Path) -> tuple[str, str, RuleSet, 
     return uid, caller, rules, source
 
 
-_OPERATOR_EVENT = (
-    "INSERT INTO finding_events (finding_id, actor, kind, new_value) SELECT id, "
-    "'operator:00000000-0000-4000-8000-000000000000', 'suppressed', "
-    '\'{"status": "suppressed"}\' FROM findings WHERE uid = %(uid)s; '
+OPERATOR = "operator:00000000-0000-4000-8000-000000000000"
+
+_INCIDENT_OF = (
+    "(SELECT i.uid FROM incidents i JOIN findings f ON f.incident_id = i.id WHERE f.uid = %(uid)s)"
 )
+
+
+def _request(
+    target: str = "finding",
+    status: str = "acknowledged",
+    *,
+    until: str = "NULL",
+    reason: str = "NULL",
+    disposition: str = "NULL",
+    actor: str = f"'{OPERATOR}'",
+    extra: str = "",
+) -> str:
+    """A triage request as SQL, for the finding ``%(uid)s`` (or its incident)."""
+    target_uid = "%(uid)s" if target == "finding" else _INCIDENT_OF
+    columns = "target, target_uid, status, suppressed_until, reason, disposition, actor"
+    values = f"'{target}', {target_uid}, '{status}', {until}, {reason}, {disposition}, {actor}"
+    if extra:
+        name, value = extra.split("=", 1)
+        columns += f", {name}"
+        values += f", {value}"
+    return f"INSERT INTO triage_requests ({columns}) VALUES ({values})"
 
 
 @pytest.mark.parametrize(
     ("statement", "message"),
     [
-        # Suppressed with no operator event: silent.
+        # Suppressed directly, with or without an event: the API role has no UPDATE at all.
         (
             "UPDATE findings SET status = 'suppressed', suppressed_until = now() + interval "
             "'1 day', suppression_reason = 'x' WHERE uid = %(uid)s",
-            "operator event",
+            "permission denied for table findings",
         ),
-        # With an event, but for longer than 30 days (the probe's 9999-01-01).
         (
-            _OPERATOR_EVENT + "UPDATE findings SET status = 'suppressed', suppressed_until = "
-            "'9999-01-01', suppression_reason = 'x' WHERE uid = %(uid)s",
+            "INSERT INTO finding_events (finding_id, actor, kind, new_value) SELECT id, "
+            f"'{OPERATOR}', 'suppressed', '{{}}' FROM findings WHERE uid = %(uid)s",
+            "permission denied for table finding_events",
+        ),
+        # Requested for longer than 30 days (the probe's 9999-01-01).
+        (_request(status="suppressed", until="'9999-01-01'", reason="'x'"), "30 days"),
+        # Back-dating the request to stretch the 30 days: the database stamps it now().
+        (
+            _request(
+                status="suppressed",
+                until="now() + interval '40 days'",
+                reason="'x'",
+                extra="requested_at=now() - interval '20 days'",
+            ),
             "30 days",
         ),
-        # Back-dating the start of the suppression to stretch the 30 days.
-        (
-            _OPERATOR_EVENT + "UPDATE findings SET status = 'suppressed', suppressed_until = "
-            "now() + interval '40 days', suppressed_at = now() + interval '20 days', "
-            "suppression_reason = 'x' WHERE uid = %(uid)s",
-            "30 days",
-        ),
+        (_request(status="suppressed", reason="'x'"), "needs an expiry and a reason"),
+        (_request(status="suppressed", until="now() + interval '1 day'", reason="' '"), "blank"),
         # Rewriting what triage does not own.
         ("UPDATE findings SET window_seconds = 2000000000 WHERE uid = %(uid)s", "permission"),
         ("UPDATE findings SET max_lifetime_seconds = 2000000000 WHERE uid = %(uid)s", "permission"),
@@ -171,8 +200,11 @@ _OPERATOR_EVENT = (
         ("UPDATE incidents SET severity_id = 0", "permission"),
         (
             "UPDATE incidents SET status = 'closed', disposition = 'false_positive'",
-            "operator event",
+            "permission denied for table incidents",
         ),
+        (_request("incident", "closed"), "closing needs a disposition"),
+        (_request("incident", "bogus"), "unknown incident state"),
+        (_request("incident", "triaged", disposition="'duplicate'"), "only when closing"),
     ],
 )
 def test_findings_cannot_be_silenced_or_rewritten(
@@ -190,21 +222,26 @@ def test_findings_cannot_be_silenced_or_rewritten(
     ]
 
 
-def test_triage_with_its_event_is_still_allowed(app_db: AppDatabase, tmp_path: Path) -> None:
+def test_a_triage_request_applies_with_its_event(app_db: AppDatabase, tmp_path: Path) -> None:
     uid, *_ = _agent_finding(app_db, tmp_path)
     with psycopg.connect(app_db.app_url) as conn:
-        _run_all(
-            conn,
-            _OPERATOR_EVENT + "UPDATE findings SET status = 'suppressed', suppressed_until = "
-            "now() + interval '1 day', suppression_reason = 'maintenance' WHERE uid = %(uid)s",
+        conn.execute(
+            _request(status="suppressed", until="now() + interval '1 day'", reason="'maint'"),
             {"uid": uid},
         )
-        [(began, count_then)] = conn.execute(
-            "SELECT suppressed_at = now(), count_at_suppression FROM findings WHERE uid = %s",
+        [(began, count_then, status)] = conn.execute(
+            "SELECT suppressed_at = now(), count_at_suppression, status FROM findings "
+            "WHERE uid = %s",
+            (uid,),
+        ).fetchall()
+        [(actor, kind)] = conn.execute(
+            "SELECT e.actor, e.kind FROM finding_events e JOIN findings f ON f.id = e.finding_id "
+            "WHERE f.uid = %s AND e.actor LIKE 'operator:%%'",
             (uid,),
         ).fetchall()
         conn.rollback()
-    assert began and count_then == 1  # set by the database, not the caller
+    assert began and count_then == 1 and status == "suppressed"  # set by the database
+    assert (actor, kind) == (OPERATOR, "suppressed")
 
 
 # --- notification keys --------------------------------------------------------------------------
@@ -290,43 +327,6 @@ def test_worker_meta_buckets_cannot_be_preclaimed(app_db: AppDatabase, kind: str
     assert metas == 1
 
 
-@pytest.mark.parametrize(
-    ("table", "change", "event"),
-    [
-        (
-            "findings",
-            "SET status = 'acknowledged', window_seconds = 2000000000 WHERE uid = %(uid)s",
-            "INSERT INTO finding_events (finding_id, actor, kind, new_value) SELECT id, "
-            "'operator:00000000-0000-4000-8000-000000000000', 'status_changed', "
-            '\'{"status": "acknowledged"}\' FROM findings WHERE uid = %(uid)s',
-        ),
-        (
-            "incidents",
-            "SET status = 'triaged', severity_id = 0 WHERE id = (SELECT incident_id FROM "
-            "findings WHERE uid = %(uid)s)",
-            "INSERT INTO incident_events (incident_id, actor, kind, payload) SELECT incident_id, "
-            "'operator:00000000-0000-4000-8000-000000000000', 'status_changed', "
-            '\'{"to": "triaged"}\' FROM findings WHERE uid = %(uid)s',
-        ),
-    ],
-)
-def test_the_trigger_refuses_non_triage_changes_even_with_a_wider_grant(
-    app_db: AppDatabase, tmp_path: Path, table: str, change: str, event: str
-) -> None:
-    """Behind the column grants: should a grant ever widen, the trigger still holds. Run in a
-    transaction that is rolled back, so the wider grant never persists."""
-    uid, *_ = _agent_finding(app_db, tmp_path)
-    role = app_db.app_role
-    with psycopg.connect(app_db.owner_url) as conn:
-        conn.execute(f'GRANT "{role}" TO CURRENT_USER')  # type: ignore[arg-type]
-        conn.execute(f'GRANT UPDATE ON {table} TO "{role}"')  # type: ignore[arg-type]
-        conn.execute(f'SET LOCAL ROLE "{role}"')  # type: ignore[arg-type]
-        conn.execute(event, {"uid": uid})  # type: ignore[arg-type]
-        with pytest.raises(errors.InsufficientPrivilege, match="triage may change only"):
-            conn.execute(f"UPDATE {table} " + change, {"uid": uid})  # type: ignore[arg-type]
-        conn.rollback()
-
-
 # --- round five: superseding a record's derivation ------------------------------------------
 
 
@@ -349,33 +349,11 @@ def test_a_victims_derivation_cannot_be_superseded(app_db: AppDatabase) -> None:
 
 
 def _suppress(conn: psycopg.Connection, uid: str, until: str) -> None:
-    _run_all(
-        conn,
-        _OPERATOR_EVENT
-        + "UPDATE findings SET status = 'suppressed', suppressed_until = "
-        + until
-        + ", suppression_reason = 'x' WHERE uid = %(uid)s",
-        {"uid": uid},
-    )
+    conn.execute(_request(status="suppressed", until=until, reason="'x'"), {"uid": uid})
 
 
-_LIFT = (
-    "INSERT INTO finding_events (finding_id, actor, kind, new_value) SELECT id, "
-    "'operator:00000000-0000-4000-8000-000000000000', 'status_changed', "
-    '\'{"status": "open"}\' FROM findings WHERE uid = %(uid)s; '
-    "UPDATE findings SET status = 'open', suppressed_until = NULL, suppression_reason = NULL, "
-    "suppressed_at = NULL, count_at_suppression = NULL WHERE uid = %(uid)s"
-)
-
-
-_RESOLVE = (
-    "INSERT INTO finding_events (finding_id, actor, kind, new_value) SELECT id, "
-    "'operator:00000000-0000-4000-8000-000000000000', 'status_changed', "
-    '\'{"status": "resolved"}\' FROM findings WHERE uid = %(uid)s; '
-    "UPDATE findings SET status = 'resolved', suppressed_until = NULL, "
-    "suppression_reason = NULL, suppressed_at = NULL, count_at_suppression = NULL "
-    "WHERE uid = %(uid)s"
-)
+_LIFT = _request(status="open")
+_RESOLVE = _request(status="resolved")
 
 
 @pytest.mark.parametrize("leave", ["open", "resolved"])
@@ -419,8 +397,7 @@ def test_a_bounce_does_not_restart_the_thirty_days(app_db: AppDatabase, tmp_path
     # first suppression, so it is refused; 29 days fits.
     exc = _refused(
         app_db.app_url,
-        _OPERATOR_EVENT + "UPDATE findings SET status = 'suppressed', suppressed_until = now() + "
-        "interval '30 days', suppression_reason = 'y' WHERE uid = %(uid)s",
+        _request(status="suppressed", until="now() + interval '30 days'", reason="'y'"),
         {"uid": uid},
     )
     assert "30 days" in str(exc)
@@ -437,56 +414,58 @@ def test_triage_cannot_expire_or_retouch_the_suppression_count(
     app_db: AppDatabase, tmp_path: Path
 ) -> None:
     uid, *_ = _agent_finding(app_db, tmp_path)
+    exc = _refused(app_db.app_url, _request(status="expired"), {"uid": uid})
+    assert "cannot set a finding to expired" in str(exc)
     exc = _refused(
         app_db.app_url,
-        "INSERT INTO finding_events (finding_id, actor, kind, new_value) SELECT id, "
-        "'operator:00000000-0000-4000-8000-000000000000', 'status_changed', "
-        '\'{"status": "expired"}\' FROM findings WHERE uid = %(uid)s; '
-        "UPDATE findings SET status = 'expired' WHERE uid = %(uid)s",
+        "UPDATE findings SET count_at_suppression = 0 WHERE uid = %(uid)s",
         {"uid": uid},
     )
-    assert "cannot set a finding to expired" in str(exc)
-    with psycopg.connect(app_db.app_url) as conn:  # the probe: zero the count after suppressing
+    assert "permission denied" in str(exc)
+    with psycopg.connect(app_db.app_url) as conn:  # re-suppressing keeps the recorded count
         _suppress(conn, uid, "now() + interval '1 day'")
-        _run_all(
-            conn,
-            _OPERATOR_EVENT + "UPDATE findings SET count_at_suppression = 0 WHERE uid = %(uid)s",
-            {"uid": uid},
-        )
+        _suppress(conn, uid, "now() + interval '2 days'")
         [(count_then, count)] = conn.execute(
             "SELECT count_at_suppression, count FROM findings WHERE uid = %s", (uid,)
         ).fetchall()
         conn.rollback()
-    assert count_then == count  # the database keeps the count it recorded
+    assert count_then == count
 
 
 # --- round six: operator events --------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("actor", "kind", "message"),
+    ("actor", "message"),
     [
-        ("operator:11111111-1111-4111-8111-111111111111", "status_changed", "no live operator"),
-        ("operator:not-a-uuid", "status_changed", "no live operator"),
-        ("operator:00000000-0000-4000-8000-000000000000", "opened", "only triage events"),
-        ("operator:00000000-0000-4000-8000-000000000000", "detection_attached", "only triage"),
-        ("operator:00000000-0000-4000-8000-000000000000", "severity_changed", "only triage"),
+        ("operator:11111111-1111-4111-8111-111111111111", "no live operator"),
+        ("operator:not-a-uuid", "triage_requests_actor_check"),
+        ("system", "triage_requests_actor_check"),
     ],
 )
-def test_operator_events_need_a_live_token_and_a_triage_kind(
-    app_db: AppDatabase, tmp_path: Path, actor: str, kind: str, message: str
+def test_triage_requests_need_a_live_operator(
+    app_db: AppDatabase, tmp_path: Path, actor: str, message: str
 ) -> None:
     uid, *_ = _agent_finding(app_db, tmp_path)
-    exc = _refused(
-        app_db.app_url,
-        "INSERT INTO finding_events (finding_id, actor, kind) SELECT id, %(actor)s, %(kind)s "
-        "FROM findings WHERE uid = %(uid)s",
-        {"actor": actor, "kind": kind, "uid": uid},
-    )
+    exc = _refused(app_db.app_url, _request(actor=f"'{actor}'"), {"uid": uid})
     assert message in str(exc)
 
 
-def test_a_revoked_operator_cannot_write_events(app_db: AppDatabase, tmp_path: Path) -> None:
+@pytest.mark.parametrize("kind", ["status_changed", "opened", "detection_attached"])
+def test_the_api_role_writes_no_events(app_db: AppDatabase, tmp_path: Path, kind: str) -> None:
+    """Events are written only by the worker and the owner's triage trigger (ADR 0011)."""
+    uid, *_ = _agent_finding(app_db, tmp_path)
+    for statement in [
+        "INSERT INTO finding_events (finding_id, actor, kind) SELECT id, %(actor)s, %(kind)s "
+        "FROM findings WHERE uid = %(uid)s",
+        "INSERT INTO incident_events (incident_id, actor, kind) SELECT incident_id, %(actor)s, "
+        "%(kind)s FROM findings WHERE uid = %(uid)s",
+    ]:
+        exc = _refused(app_db.app_url, statement, {"actor": OPERATOR, "kind": kind, "uid": uid})
+        assert "permission denied" in str(exc)
+
+
+def test_a_revoked_operator_cannot_triage(app_db: AppDatabase, tmp_path: Path) -> None:
     uid, *_ = _agent_finding(app_db, tmp_path)
     token = str(uuid.uuid4())
     with psycopg.connect(app_db.owner_url) as conn:
@@ -495,12 +474,7 @@ def test_a_revoked_operator_cannot_write_events(app_db: AppDatabase, tmp_path: P
             "VALUES (%s, 'gone', '{triage}', sha256(%s::bytea), now())",
             (token, token.encode()),
         )
-    exc = _refused(
-        app_db.app_url,
-        "INSERT INTO finding_events (finding_id, actor, kind) SELECT id, %(actor)s, "
-        "'status_changed' FROM findings WHERE uid = %(uid)s",
-        {"actor": f"operator:{token}", "uid": uid},
-    )
+    exc = _refused(app_db.app_url, _request(actor=f"'operator:{token}'"), {"uid": uid})
     assert "no live operator" in str(exc)
 
 
@@ -622,7 +596,7 @@ def test_a_pager_refuses_to_run_on_any_other_table(
         ("NULL", "{read}", "no live operator token"),
     ],
 )
-def test_operator_events_need_an_unexpired_triage_token(
+def test_triage_requests_need_an_unexpired_triage_token(
     app_db: AppDatabase, tmp_path: Path, expires: str, roles: str, message: str
 ) -> None:
     uid, *_ = _agent_finding(app_db, tmp_path)
@@ -633,12 +607,7 @@ def test_operator_events_need_an_unexpired_triage_token(
             f"VALUES (%s, 'x', %s, sha256(%s::bytea), {expires})",
             (token, roles, token.encode()),
         )
-    exc = _refused(
-        app_db.app_url,
-        "INSERT INTO finding_events (finding_id, actor, kind) SELECT id, %(actor)s, "
-        "'status_changed' FROM findings WHERE uid = %(uid)s",
-        {"actor": f"operator:{token}", "uid": uid},
-    )
+    exc = _refused(app_db.app_url, _request(actor=f"'operator:{token}'"), {"uid": uid})
     assert message in str(exc)
 
 
@@ -648,8 +617,7 @@ def test_operator_events_need_an_unexpired_triage_token(
         ("tuisku_force_event_time", "BEFORE INSERT"),
         ("tuisku_check_firing_identity", "BEFORE INSERT"),
         ("tuisku_events_operator_only", "BEFORE INSERT"),
-        ("tuisku_findings_triage_guard", "BEFORE UPDATE"),
-        ("tuisku_incidents_triage_guard", "BEFORE UPDATE"),
+        ("tuisku_apply_triage", "AFTER INSERT"),
     ],
 )
 def test_revision_0002_trigger_functions_refuse_other_tables(
@@ -745,16 +713,21 @@ def test_the_worker_ignores_every_advisory_lock_the_api_role_holds(app_db: AppDa
 def test_the_worker_progresses_while_the_api_role_holds_rows(
     app_db: AppDatabase, tmp_path: Path
 ) -> None:
-    """The API role (it may update triage columns) holds a finding's row lock in an open
-    transaction. Rows for other groups still page; the blocked one waits within its lock
-    timeout, is retried, and the backlog check pages that the queue is behind. Once released,
-    the blocked row pages too."""
+    """Round nine: the API role can no longer lock a finding itself (no UPDATE), but an open,
+    uncommitted triage request holds the finding's row through the owner's trigger. Rows for
+    other groups still page; the held-up firing pages at once as `evaluation_delayed` (its own
+    transaction, worker-only tables), the backlog check pages, and once released the finding's
+    own page follows."""
     uid, caller, rules, source = _agent_finding(app_db, tmp_path)
+    exc = _refused(
+        app_db.app_url, "SELECT 1 FROM findings WHERE uid = %(uid)s FOR UPDATE", {"uid": uid}
+    )
+    assert "permission denied" in str(exc)
     victim, victim_uid = _falco_victim(app_db)
     ingest(app_db.app_url, source, "harava", [_refusal(AT + timedelta(minutes=2), caller)])
     hold = psycopg.connect(app_db.app_url)  # an open transaction
     try:
-        hold.execute("SELECT 1 FROM findings WHERE uid = %s FOR UPDATE", (uid,)).fetchall()
+        hold.execute(_request(status="acknowledged"), {"uid": uid})
         from tuisku.worker.engine import Worker, WorkerConfig
 
         notifier = RecordingNotifier()
@@ -773,8 +746,11 @@ def test_the_worker_progresses_while_the_api_role_holds_rows(
         # API role keeps its transaction open.
         assert time.monotonic() - started < 8
         assert _paged_for(app_db, notifier, victim_uid)  # progress elsewhere
-        blocked = [n for n in notifier.sent if n.get("finding_uid") == uid]
-        assert blocked == []  # still waiting on the held row
+        assert [n for n in notifier.sent if n.get("finding_uid") == uid] == []
+        delayed = [n for n in notifier.sent if n["kind"] == "evaluation_delayed"]
+        assert [n["rule_name"] for n in delayed] == [
+            "harava.agent_outbound_refused"
+        ]  # paged once, not per retry
         assert "tuisku_backlog" in notifier.kinds()  # and the queue's lag pages
     finally:
         hold.rollback()
@@ -784,3 +760,150 @@ def test_the_worker_progresses_while_the_api_role_holds_rows(
     assert [n["kind"] for n in notifier.sent if n.get("finding_uid") == uid] == [
         "finding_occurrence"
     ]
+
+
+def _readable_tables(url: str) -> list[tuple[str, bool, bool]]:
+    """(table, may update, may insert) for every public table the API role may read."""
+    return [
+        (name, bool(upd), bool(ins))
+        for name, upd, ins in query(
+            url,
+            "SELECT c.relname, has_table_privilege(c.oid, 'UPDATE') "
+            "OR has_any_column_privilege(c.oid, 'UPDATE'), has_table_privilege(c.oid, 'INSERT') "
+            "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') "
+            "AND has_table_privilege(c.oid, 'SELECT') ORDER BY c.relname",
+        )
+    ]
+
+
+def test_every_lock_the_api_role_can_take_leaves_pages_flowing(app_db: AppDatabase) -> None:
+    """Round nine, per table: the API role takes FOR UPDATE and FOR SHARE on every row it may,
+    and the strongest table lock its grants allow, on every table it can read, all in one open
+    transaction. A critical row still pages, and a dead-lettered row's page still goes out."""
+    tables = _readable_tables(app_db.app_url)
+    assert {t for t, upd, _ in tables if upd} == {
+        "meta_counters",
+        "operator_tokens",
+        "source_token_usage",
+    }
+    critical, critical_uid = _falco_victim(app_db)
+    doomed, doomed_uid = _falco_victim(app_db)
+    hold = psycopg.connect(app_db.app_url)
+    try:
+        for table, may_update, may_insert in tables:
+            if may_update:
+                hold.execute(f"SELECT 1 FROM {table} FOR UPDATE").fetchall()  # type: ignore[arg-type]
+                hold.execute(f"SELECT 1 FROM {table} FOR SHARE").fetchall()  # type: ignore[arg-type]
+            else:
+                with pytest.raises(errors.InsufficientPrivilege):
+                    with hold.transaction():
+                        hold.execute(f"SELECT 1 FROM {table} FOR SHARE")  # type: ignore[arg-type]
+            mode = "ROW EXCLUSIVE" if may_insert or may_update else "ACCESS SHARE"
+            hold.execute(f"LOCK TABLE {table} IN {mode} MODE")  # type: ignore[arg-type]
+
+        def fail_on_doomed(rule: Any, env: Any) -> None:
+            if rule.id == FALCO_CRITICAL and env["id"] == doomed:
+                raise RuntimeError("boom")
+
+        clock = Clock(AT + timedelta(minutes=1))
+        notifier = RecordingNotifier()
+        for _ in range(7):
+            run_worker(
+                app_db.worker_url,
+                builtin_rules(),
+                clock,
+                notifier,
+                before_pair=fail_on_doomed,
+                lock_timeout_ms=200,
+            )
+            clock.advance(minutes=1)
+        assert _paged_for(app_db, notifier, critical_uid)
+        dead = [n for n in notifier.sent if n["kind"] == "evaluation_dead_lettered"]
+        assert any(n["row"]["uid"] == doomed_uid for n in dead)
+    finally:
+        hold.rollback()
+        hold.close()
+
+
+# --- round nine: the worker's heartbeat and the health endpoint -------------------------------
+
+
+def test_the_health_endpoint_tells_an_outside_monitor_whether_the_worker_runs(
+    app_db: AppDatabase,
+) -> None:
+    from tests.support import client
+
+    with psycopg.connect(app_db.owner_url) as conn:
+        conn.execute("DELETE FROM worker_heartbeats")
+    with client(app_db.app_url, worker_backlog_seconds=1e9) as c:
+        r = c.get("/v1/worker/health")  # unauthenticated
+        assert (r.status_code, r.json()["status"]) == (503, "no_worker")
+        run_worker(app_db.worker_url, builtin_rules(), Clock(AT))
+        [(beats,)] = query(app_db.worker_url, "SELECT count(*) FROM worker_heartbeats")
+        assert beats == 1
+        r = c.get("/v1/worker/health")
+        assert (r.status_code, r.json()["status"]) == (200, "ok"), r.text
+        assert r.json()["heartbeat_age_seconds"] < 60
+    # The API role reads the heartbeat; it cannot forge one.
+    for statement in [
+        "INSERT INTO worker_heartbeats (worker, beat_at) VALUES ('forged', now())",
+        "UPDATE worker_heartbeats SET beat_at = now()",
+    ]:
+        assert "permission denied" in str(_refused(app_db.app_url, statement))
+    with psycopg.connect(app_db.owner_url) as conn:  # a stale heartbeat
+        conn.execute("UPDATE worker_heartbeats SET beat_at = now() - interval '1 hour'")
+    with client(app_db.app_url, worker_backlog_seconds=1e9) as c:
+        r = c.get("/v1/worker/health")
+        assert (r.status_code, r.json()["status"]) == (503, "no_worker")
+
+
+def test_the_health_endpoint_pages_an_undelivered_backlog(app_db: AppDatabase) -> None:
+    from tests.support import client
+
+    run_worker(app_db.worker_url, builtin_rules(), Clock(AT))
+    with psycopg.connect(app_db.worker_url) as conn:  # one notification never delivered
+        conn.execute(
+            "INSERT INTO notifications (dedupe_key, kind, severity_id, payload) "
+            "VALUES (%s, 'test', 0, '{}')",
+            (f"health:{uuid.uuid4()}",),
+        )
+    with client(app_db.app_url, worker_backlog_seconds=0.001) as c:
+        r = c.get("/v1/worker/health")
+    assert (r.status_code, r.json()["status"]) == (503, "backlog"), r.text
+    assert r.json()["oldest_undelivered_seconds"] > 0
+
+
+@pytest.mark.parametrize("step", ["_finish", "_dead_letter"])
+def test_one_stuck_row_never_cancels_the_drain(
+    app_db: AppDatabase, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    """Round nine: a lock or statement timeout while finishing or dead-lettering one row is
+    retried later; the pass goes on to the other rows and to the drain."""
+    from tuisku.worker.engine import Worker
+
+    stuck, _ = _falco_victim(app_db)
+    critical, critical_uid = _falco_victim(app_db)
+    original = getattr(Worker, step)
+
+    async def held_up(self: Any, conn: Any, queue_row: Any, *args: Any) -> Any:
+        if queue_row["detection_id"] == stuck:
+            raise errors.QueryCanceled("canceling statement due to statement timeout")
+        return await original(self, conn, queue_row, *args)
+
+    monkeypatch.setattr(Worker, step, held_up)
+
+    def fail_on_stuck(rule: Any, env: Any) -> None:
+        if step == "_dead_letter" and env["id"] == stuck:
+            raise RuntimeError("boom")
+
+    clock = Clock(AT + timedelta(minutes=1))
+    notifier = RecordingNotifier()
+    for _ in range(7):
+        run_worker(app_db.worker_url, builtin_rules(), clock, notifier, before_pair=fail_on_stuck)
+        clock.advance(minutes=1)
+    assert _paged_for(app_db, notifier, critical_uid)
+    [(left,)] = query(
+        app_db.owner_url, "SELECT count(*) FROM evaluation_queue WHERE detection_id = %s", (stuck,)
+    )
+    assert left == 1  # still queued, retried later

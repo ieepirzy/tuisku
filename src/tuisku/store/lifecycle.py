@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
+import psycopg
 from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
@@ -207,6 +208,35 @@ async def lock_finding(conn: AsyncConnection[Any], uid: Any) -> dict[str, Any] |
     return await db.fetch_one(conn, "SELECT * FROM findings WHERE uid = %s FOR UPDATE", (uid,))
 
 
+async def _request_triage(
+    conn: AsyncConnection[Any],
+    *,
+    target: str,
+    uid: Any,
+    status: str,
+    actor: str,
+    disposition: str | None = None,
+    reason: str | None = None,
+    suppressed_until: datetime | None = None,
+) -> bool:
+    """Insert a triage request; the database validates and applies it (tuisku_apply_triage,
+    ADR 0011). False when the target does not exist; TransitionError when it is not allowed."""
+    try:
+        async with conn.transaction():
+            await conn.execute(
+                "INSERT INTO triage_requests (target, target_uid, status, disposition, reason, "
+                "suppressed_until, actor) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (target, uid, status, disposition, reason, suppressed_until, actor),
+            )
+    except psycopg.Error as exc:
+        if exc.diag.sqlstate == "TK404":
+            return False
+        if exc.diag.sqlstate == "TK409":
+            raise TransitionError(exc.diag.message_primary or "not allowed") from None
+        raise
+    return True
+
+
 async def operator_finding_status(
     conn: AsyncConnection[Any],
     uid: Any,
@@ -221,8 +251,12 @@ async def operator_finding_status(
 
     Only attachable findings can change; resolved and expired are final (a later match opens a
     new finding). An overflow finding cannot be suppressed, only resolved (ADR 0006).
+
+    The API role updates no finding (ADR 0011): this checks the request against the finding as
+    read (without a lock), for clear answers and for an expiry in the future of the caller's
+    clock, then inserts a triage request that the database checks again and applies.
     """
-    finding = await lock_finding(conn, uid)
+    finding = await db.fetch_one(conn, "SELECT * FROM findings WHERE uid = %s", (uid,))
     if finding is None:
         return None
     if finding["status"] not in ATTACHABLE:
@@ -241,7 +275,7 @@ async def operator_finding_status(
         if suppressed_until.tzinfo is None:
             raise TransitionError("suppression expiry needs a UTC offset")
         # Never past 30 days from the finding's first suppression, even after a lift and a
-        # re-suppression: the database enforces the same (ADR 0011).
+        # re-suppression: the database enforces the same, by its own clock (ADR 0011).
         first = await db.fetch_one(
             conn,
             "SELECT min(at) AS at FROM finding_events "
@@ -259,33 +293,18 @@ async def operator_finding_status(
                 "suppression expiry must be in the future and within 30 days of when the "
                 "suppression began"
             )
-    await set_finding_status(
+    applied = await _request_triage(
         conn,
-        finding,
-        new_status,
+        target="finding",
+        uid=uid,
+        status=new_status,
         actor=actor,
         reason=reason,
-        now=now,
-        suppressed_until=suppressed_until,
+        suppressed_until=suppressed_until if new_status == "suppressed" else None,
     )
-    return finding
-
-
-async def resolve_incident_findings(
-    conn: AsyncConnection[Any], incident_id: int, *, actor: str, reason: str, now: datetime
-) -> int:
-    """ADR 0007: closing or resolving an incident resolves every finding of it that is still
-    attachable, so later activity opens a new finding instead of being absorbed silently."""
-    rows = await db.fetch_all(
-        conn,
-        "SELECT f.* FROM findings f JOIN incident_findings l ON l.finding_id = f.id "
-        "WHERE l.incident_id = %s AND f.status IN ('open', 'acknowledged', 'suppressed') "
-        "ORDER BY f.id FOR UPDATE OF f",
-        (incident_id,),
-    )
-    for finding in rows:
-        await set_finding_status(conn, finding, "resolved", actor=actor, reason=reason, now=now)
-    return len(rows)
+    if not applied:
+        return None
+    return {"uid": finding["uid"], "status": new_status}
 
 
 async def operator_incident_status(
@@ -298,21 +317,13 @@ async def operator_incident_status(
     reason: str | None,
     now: datetime,
 ) -> dict[str, Any] | None:
+    """Move an incident along its states (ADR 0007), as a triage request the database checks
+    and applies, together with the events, the findings it resolves and the pages (ADR 0011)."""
     if reason is not None and not reason.strip():
         raise TransitionError("a reason must not be blank")
-    found = await db.fetch_one(conn, "SELECT id FROM incidents WHERE uid = %s", (uid,))
-    if found is None:
+    incident = await db.fetch_one(conn, "SELECT uid, status FROM incidents WHERE uid = %s", (uid,))
+    if incident is None:
         return None
-    # The worker's lock order: findings first, then the incident, so the two cannot deadlock.
-    await conn.execute(
-        "SELECT f.id FROM findings f JOIN incident_findings l ON l.finding_id = f.id "
-        "WHERE l.incident_id = %s ORDER BY f.id FOR UPDATE OF f",
-        (found["id"],),
-    )
-    incident = await db.fetch_one(
-        conn, "SELECT * FROM incidents WHERE id = %s FOR UPDATE", (found["id"],)
-    )
-    assert incident is not None
     old = incident["status"]
     if new_status not in INCIDENT_STATES:
         raise TransitionError(f"unknown incident state {new_status!r}")
@@ -323,22 +334,15 @@ async def operator_incident_status(
             raise TransitionError(f"closing needs a disposition: {', '.join(DISPOSITIONS)}")
     elif disposition is not None:
         raise TransitionError("a disposition is given only when closing")
-    kind = "reopened" if old in REOPENABLE and new_status == "investigating" else "status_changed"
-    payload: dict[str, Any] = {"from": old, "to": new_status}
-    if disposition is not None:
-        payload["disposition"] = disposition
-    if reason:
-        payload["reason"] = reason
-    # The event first: the database accepts the API role's update only with it (ADR 0011).
-    await incident_event(conn, incident["id"], actor, kind, payload)
-    await conn.execute(
-        "UPDATE incidents SET status = %s, disposition = %s, updated_at = %s WHERE id = %s",
-        (new_status, disposition, now, incident["id"]),
+    applied = await _request_triage(
+        conn,
+        target="incident",
+        uid=uid,
+        status=new_status,
+        actor=actor,
+        disposition=disposition,
+        reason=reason,
     )
-    if new_status in ("resolved", "closed"):
-        payload["findings_resolved"] = await resolve_incident_findings(
-            conn, incident["id"], actor=actor, reason=f"incident {new_status}", now=now
-        )
-    # A reopen pages an escalation: the database writes it (tuisku_page_reopened_incident).
-    incident.update(status=new_status, disposition=disposition)
-    return incident
+    if not applied:
+        return None
+    return {"uid": incident["uid"], "status": new_status, "disposition": disposition}
