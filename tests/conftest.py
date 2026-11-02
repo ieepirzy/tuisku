@@ -87,6 +87,24 @@ def admin_database_url() -> str:
     return url
 
 
+def _drop_database(admin_database_url: str, name: str, attempts: int = 20) -> None:
+    """DROP ... WITH (FORCE), retried: it cannot terminate a backend the test login does not
+    own, such as an autovacuum worker that has just started on the database. Those finish fast."""
+    import time
+
+    for attempt in range(attempts):
+        try:
+            with psycopg.connect(admin_database_url, autocommit=True) as admin:
+                admin.execute(
+                    sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
+                )
+            return
+        except (psycopg.errors.InsufficientPrivilege, psycopg.errors.ObjectInUse):
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.25)
+
+
 @contextmanager
 def _temporary_database(admin_database_url: str) -> Iterator[str]:
     """Create a uniquely named empty database; drop it on exit."""
@@ -96,10 +114,7 @@ def _temporary_database(admin_database_url: str) -> Iterator[str]:
     try:
         yield _with_dbname(admin_database_url, name)
     finally:
-        with psycopg.connect(admin_database_url, autocommit=True) as admin:
-            admin.execute(
-                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
-            )
+        _drop_database(admin_database_url, name)
 
 
 @pytest.fixture(scope="session")
@@ -163,3 +178,28 @@ def app_db(admin_database_url: str) -> Iterator[AppDatabase]:
         with psycopg.connect(admin_database_url, autocommit=True) as admin:
             for name in (role, worker):
                 admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(name)))
+
+
+@pytest.fixture(scope="session")
+def template_database_url(admin_database_url: str) -> Iterator[str]:
+    """A migrated database used only as a template: never connected to after migrating."""
+    with _temporary_database(admin_database_url) as url:
+        run_migrations(make_settings(url))
+        yield url
+
+
+@pytest.fixture
+def fresh_database_url(admin_database_url: str, template_database_url: str) -> Iterator[str]:
+    """A fresh, migrated database for one test, cloned from the template (fast)."""
+    template = urlsplit(template_database_url).path.lstrip("/")
+    name = f"tuisku_test_{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(admin_database_url, autocommit=True) as admin:
+        admin.execute(
+            sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(
+                sql.Identifier(name), sql.Identifier(template)
+            )
+        )
+    try:
+        yield _with_dbname(admin_database_url, name)
+    finally:
+        _drop_database(admin_database_url, name)
