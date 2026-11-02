@@ -29,7 +29,8 @@ able to forge rule output or firing keys.
   stay expand-only.
 - **What the API role can write**, and nothing else:
   - `raw_records`, `raw_duplicates`: `INSERT`. Each raw record stores the source name it
-    arrived with (`source_name`), and rules match on that name.
+    arrived with (`source_name`), set by a trigger from `sources` whatever the writer supplies,
+    and rules match on that name.
   - `parse_attempts`, `observations`: `INSERT` only together with their record (a trigger):
     an attempt only for a raw record inserted in the same transaction, and an observation only
     for an attempt of the same raw record from the same transaction. So the API role cannot
@@ -41,7 +42,8 @@ able to forge rule output or firing keys.
     bucket by the database clock (a trigger).
   - `detection_observations`: `INSERT` only of links between a sensor detection and an
     observation of the same parse attempt, both from the same transaction (a trigger).
-  - `evaluation_queue`: `INSERT` of `observation_id`, `detection_id` and `enqueued_at` only.
+  - `evaluation_queue`: `INSERT` of `observation_id`, `detection_id` and `enqueued_at` only,
+    and only for an observation or detection inserted in the same transaction (a trigger).
   - `meta_counters`: `SELECT`, `INSERT`, `UPDATE` (the breach-count upsert).
   - `sources`: `SELECT`, `INSERT`, `UPDATE (disabled_at)`. `source_tokens`: `SELECT`,
     `INSERT`, `UPDATE (revoked_at, last_used_at)`. Neither can be deleted, and sources are
@@ -56,24 +58,29 @@ able to forge rule output or firing keys.
     may set a finding only to `open`, `acknowledged`, `resolved` or `suppressed`, never
     `expired`. The trigger sets a suppression's count itself. It caps every suppression at
     30 days from the finding's first suppression, so a lift and re-suppress does not restart the
-    clock. Lifting a suppression requires that its threshold pages (`triage_threshold:`) were
-    inserted in the same transaction.
-  - `finding_events`, `incident_events`: `INSERT` with an `operator:` actor only (a trigger).
-  - `notifications`: `INSERT` with the dedupe-key prefixes triage emits only
-    (`operator_escalation:` and `triage_threshold:`) (a trigger).
+    clock.
+  - `finding_events`, `incident_events`: `INSERT` only with an `operator:<uid>` actor naming a
+    live (unrevoked) operator token, and only triage kinds (`status_changed` and `suppressed`
+    for findings; `status_changed`, `reopened` and `note` for incidents) (a trigger).
+  - `notifications`: nothing. The pages triage causes are written by owner triggers running as
+    `SECURITY DEFINER`, whoever made the change: a finding leaving `suppressed` (to `open`,
+    `acknowledged` or `resolved`, directly or through its incident being closed or resolved)
+    pages every threshold crossed meanwhile, and an incident reopened pages an escalation.
+    `notifications.created_at` is the database clock for every role.
 - **What the API role cannot write**, at all: `detection_evidence`, `rule_firings`,
   `finding_detections`, `incident_findings`, `finding_overflow_groups`, `pack_loads`,
   `notification_deliveries`, `evaluation_dead_letter`, `evaluation_dead_letter_rules`,
-  `evaluation_attempts`, new findings or incidents, rule detections, queue claims, updates or
-  deletes, events with `system`, `rule:` or `investigator:` actors, worker notification keys
-  (`finding_opened:`, `finding_threshold:`, `finding_occurrence`'s `finding_detection:` and
-  `finding_link:`, `escalation:`, `incident_opened:`, `overflow_group:`, `dead_letter:` and the
-  rest), and the worker's meta kinds (`evaluation_failed`, `notification_undeliverable`) in any
-  bucket.
+  `evaluation_attempts`, `notifications`, new findings or incidents, rule detections, queue
+  claims, updates or deletes, events with `system`, `rule:` or `investigator:` actors or
+  non-triage kinds, and the worker's meta kinds (`evaluation_failed`,
+  `notification_undeliverable`, `backlog`) in any bucket.
 - **The worker role** writes all of the above that the API cannot. A queued row whose parse
   attempt was superseded is never dropped as stale: no reprocessing run exists yet, so the
   worker raises a `tuisku.meta.evaluation_failed` (subject `superseded_derivation`) and
-  evaluates the row anyway. Its name is fixed in the
+  evaluates the row anyway. On every pass the worker also checks its own health: a queued row
+  or an undelivered notification older than `TUISKU_WORKER_BACKLOG_SECONDS` (5 minutes) raises
+  a `tuisku.meta.backlog`. That backlog pages at once, through a notification an owner trigger
+  writes, and through the `tuisku-meta` pack. Its name is fixed in the
   trigger functions at migration time, like the grants.
 - **Second line of defence.** A firing key of any kind is accepted only when its detection is
   rule output of the key's rule, and is linked to the key's row by a link inserted in the same

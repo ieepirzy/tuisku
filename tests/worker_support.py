@@ -20,6 +20,24 @@ from tuisku.store.ingest import IngestContext, Transport, ingest_record
 from tuisku.worker.engine import Stats, Worker, WorkerConfig
 
 PACKS = REPO_ROOT / "packs"
+# Tests move injected clocks far and fast; the backlog health check (5 minutes by default) is
+# exercised by its own tests and the tuisku-meta fixtures, which set it explicitly.
+QUIET_BACKLOG = WorkerConfig(backlog_after=timedelta(days=3650))
+TEST_OPERATOR_UID = "00000000-0000-4000-8000-000000000000"
+
+
+def ensure_test_operator(owner_url: str) -> str:
+    """A live operator token whose uid tests use as an `operator:` actor (the database accepts
+    operator events only from live tokens)."""
+    import psycopg
+
+    with psycopg.connect(owner_url) as conn:
+        conn.execute(
+            "INSERT INTO operator_tokens (uid, name, roles, token_sha256) VALUES (%s, "
+            "'test-operator', '{triage}', sha256(%s::bytea)) ON CONFLICT (uid) DO NOTHING",
+            (TEST_OPERATOR_UID, TEST_OPERATOR_UID.encode()),
+        )
+    return TEST_OPERATOR_UID
 
 
 def builtin_rules(params_file: Path | None = None) -> RuleSet:
@@ -157,6 +175,7 @@ def run_worker(
     before_pair: Callable[[Any, Any], None] | None = None,
     **config: Any,
 ) -> Stats:
+    config.setdefault("backlog_after", QUIET_BACKLOG.backlog_after)
     worker = Worker(
         rule_set=rule_set,
         clock=clock,

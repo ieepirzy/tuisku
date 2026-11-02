@@ -13,6 +13,7 @@ from psycopg import AsyncConnection, errors
 
 from tests.support import auth, client, operator_token, query
 from tests.worker_support import (
+    QUIET_BACKLOG,
     Clock,
     RecordingNotifier,
     builtin_rules,
@@ -137,7 +138,9 @@ def test_expired_lease_is_claimed_again(fresh_database_url: str) -> None:
     url = fresh_database_url
     ingest(url, "h", "harava", lines((T, "agents")))
     clock = Clock(T)
-    worker = Worker(rule_set=builtin_rules(), clock=clock, notifier=RecordingNotifier())
+    worker = Worker(
+        rule_set=builtin_rules(), clock=clock, notifier=RecordingNotifier(), config=QUIET_BACKLOG
+    )
     claimed = run_async(url, worker.claim)  # a worker claims, then crashes
     assert len(claimed) == 2  # the observation and the sensor detection
     assert run_worker(url, builtin_rules(), clock).claimed == 0  # leased
@@ -165,7 +168,11 @@ def test_failing_rule_is_dead_lettered_without_hurting_other_rules(
     clock = Clock(T)
     for attempt in range(1, 6):
         worker = Worker(
-            rule_set=rules, clock=clock, notifier=RecordingNotifier(), before_pair=explode
+            rule_set=rules,
+            clock=clock,
+            notifier=RecordingNotifier(),
+            before_pair=explode,
+            config=QUIET_BACKLOG,
         )
         stats = run_async(url, worker.run_until_idle)
         assert stats.failed_pairs == 1, attempt
@@ -198,6 +205,7 @@ def test_deadlocks_are_retried_without_counting(fresh_database_url: str) -> None
         clock=Clock(T),
         notifier=RecordingNotifier(),
         before_pair=deadlock_twice,
+        config=QUIET_BACKLOG,
     )
     stats = run_async(url, worker.run_until_idle)
     assert stats.failed_pairs == 0 and calls["n"] == 3
@@ -213,7 +221,11 @@ def test_lock_conflicts_are_uncounted_until_the_cap(fresh_database_url: str) -> 
     ingest(url, "h", "harava", lines((T, "agents")))
     clock = Clock(T)
     worker = Worker(
-        rule_set=builtin_rules(), clock=clock, notifier=RecordingNotifier(), before_pair=always
+        rule_set=builtin_rules(),
+        clock=clock,
+        notifier=RecordingNotifier(),
+        before_pair=always,
+        config=QUIET_BACKLOG,
     )
     stats = run_async(url, worker.run_once)
     assert stats.failed_pairs == 1 and stats.dead_lettered == 0
@@ -229,7 +241,9 @@ def test_lease_expiries_never_burn_attempts(fresh_database_url: str) -> None:
     url = fresh_database_url
     ingest(url, "h", "harava", lines((T, "agents")))
     clock = Clock(T)
-    worker = Worker(rule_set=builtin_rules(), clock=clock, notifier=RecordingNotifier())
+    worker = Worker(
+        rule_set=builtin_rules(), clock=clock, notifier=RecordingNotifier(), config=QUIET_BACKLOG
+    )
     for _ in range(engine.MAX_ATTEMPTS + 2):  # claimed and lost (crash) again and again
         assert len(run_async(url, worker.claim)) == 2
         clock.advance(seconds=121)

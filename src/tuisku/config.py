@@ -92,6 +92,8 @@ class Settings(BaseSettings):
     # interval of the source's first receipt (ADR 0006 "Metric samples").
     worker_export_interval_seconds: float = Field(default=60.0, gt=0)
     worker_allowed_lateness_seconds: float = Field(default=86400.0, ge=0)
+    # Queued rows or undelivered notifications older than this page as tuisku.meta.backlog.
+    worker_backlog_seconds: float = Field(default=300.0, gt=0)
 
     @field_validator("database_url")
     @classmethod

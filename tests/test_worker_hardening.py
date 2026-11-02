@@ -31,7 +31,7 @@ from tuisku.store import lifecycle
 from tuisku.store.ingest import Transport, enqueue
 from tuisku.store.tokens import Role
 from tuisku.worker import notify, run
-from tuisku.worker.engine import Stats, Worker
+from tuisku.worker.engine import Stats, Worker, WorkerConfig
 
 T = datetime(2026, 11, 1, 10, 0, tzinfo=UTC)
 TREND = "harava.destination_refused_trend"
@@ -556,3 +556,71 @@ def test_rules_match_the_source_name_a_record_arrived_with(
         conn.execute("UPDATE sources SET name = 'edge-b' WHERE name = 'edge-a'")
     run_worker(url, rules, Clock(T + timedelta(minutes=5)))
     assert fired(url) == ["testpack.named"]
+
+
+# --- round six: a backed-up pipeline pages ---------------------------------------------------
+
+
+def test_an_old_queue_raises_a_backlog_that_pages_by_itself(fresh_database_url: str) -> None:
+    url = fresh_database_url
+    ingest(url, "h", "harava", lines((T, "svc")))
+    notifier = RecordingNotifier()
+    worker = Worker(
+        rule_set=builtin_rules(),
+        clock=Clock(T + timedelta(minutes=10)),  # the row has waited 10 minutes
+        notifier=notifier,
+        config=WorkerConfig(backlog_after=timedelta(minutes=5)),
+    )
+    stats = run_async(url, worker.run_once)
+    assert stats.backlog == 1
+    [(subject,)] = query(url, "SELECT subject FROM detections WHERE kind = 'tuisku.meta.backlog'")
+    assert subject == "queue"
+    # Paged directly, in the same pass, by the database's own notification.
+    assert "tuisku_backlog" in notifier.kinds()
+    run_async(url, worker.run_until_idle)
+    assert "tuisku-meta.backlog" in fired(url)
+
+
+def test_a_fresh_queue_raises_no_backlog(fresh_database_url: str) -> None:
+    url = fresh_database_url
+    ingest(url, "h", "harava", lines((T, "svc")))
+    worker = Worker(
+        rule_set=builtin_rules(),
+        clock=Clock(T + timedelta(minutes=4)),
+        notifier=RecordingNotifier(),
+        config=WorkerConfig(backlog_after=timedelta(minutes=5)),
+    )
+    assert run_async(url, worker.run_once).backlog == 0
+
+
+def test_undelivered_notifications_raise_a_backlog(fresh_database_url: str) -> None:
+    url = fresh_database_url
+    ingest(url, "h", "harava", lines((T, "svc")))
+    run_worker(url, builtin_rules(), Clock(T + timedelta(minutes=1)), FlakyNotifier())
+    with psycopg.connect(url) as conn:  # an outbox row left undelivered for an hour
+        conn.execute(
+            "INSERT INTO notifications (dedupe_key, kind, severity_id, payload, created_at) "
+            "VALUES ('stuck', 'x', 1, '{}', now())"
+        )
+    worker = Worker(
+        rule_set=builtin_rules(),
+        clock=Clock(T + timedelta(minutes=2)),
+        notifier=FlakyNotifier(),
+        config=WorkerConfig(backlog_after=timedelta(milliseconds=1)),
+    )
+    import time
+
+    time.sleep(0.05)
+    run_async(url, worker.check_backlog)
+    subjects = query(url, "SELECT subject FROM detections WHERE kind = 'tuisku.meta.backlog'")
+    assert ("notifications",) in subjects
+
+
+def test_notification_created_at_is_the_database_clock(fresh_database_url: str) -> None:
+    with psycopg.connect(fresh_database_url) as conn:
+        [(created, now)] = conn.execute(
+            "INSERT INTO notifications (dedupe_key, kind, severity_id, payload, created_at) "
+            "VALUES ('t', 'x', 1, '{}', '2000-01-01') RETURNING created_at, now()"
+        ).fetchall()
+        conn.rollback()
+    assert created == now

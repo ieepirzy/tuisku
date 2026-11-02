@@ -36,6 +36,7 @@ RATE_LIMITED = "tuisku.meta.source_rate_limited"
 INVALID_ENVELOPE = "tuisku.meta.invalid_envelope"
 EVALUATION_FAILED = "tuisku.meta.evaluation_failed"
 NOTIFICATION_UNDELIVERABLE = "tuisku.meta.notification_undeliverable"
+BACKLOG = "tuisku.meta.backlog"
 
 _TITLES = {
     LIMIT_EXCEEDED: ("Source exceeded an ingest limit", Severity.MEDIUM),
@@ -43,6 +44,7 @@ _TITLES = {
     INVALID_ENVELOPE: ("Source sent malformed ingest envelopes", Severity.LOW),
     EVALUATION_FAILED: ("A rule failed to evaluate a row", Severity.MEDIUM),
     NOTIFICATION_UNDELIVERABLE: ("A notification keeps failing to deliver", Severity.HIGH),
+    BACKLOG: ("Evaluation or notification is falling behind", Severity.HIGH),
 }
 
 
@@ -118,6 +120,25 @@ async def record_notification_undeliverable(
         details=details,
         now=now,
         rule_name="notifications",
+    )
+
+
+async def record_backlog(
+    conn: AsyncConnection[Any], *, subject: str, details: dict[str, Any], now: datetime
+) -> bool:
+    """The queue or the notification outbox holds work older than the backlog limit. The
+    subject is ``queue`` or ``notifications``; the database pages it directly
+    (tuisku_page_backlog), without waiting for the backed-up queue (ADR 0011)."""
+    return await _record(
+        conn,
+        None,
+        None,
+        BACKLOG,
+        subject,
+        n=1,
+        details=details,
+        now=now,
+        rule_name="health",
     )
 
 

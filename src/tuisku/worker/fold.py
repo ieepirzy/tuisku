@@ -281,7 +281,7 @@ async def _new_evidence_on_incident(
         "UPDATE incidents SET status = 'investigating', updated_at = %s WHERE id = %s",
         (now, incident["id"]),
     )
-    event_uid = await incident_event(
+    await incident_event(
         conn,
         incident["id"],
         rule.actor,
@@ -289,19 +289,8 @@ async def _new_evidence_on_incident(
         {"from": old, "to": "investigating", "reason": "new evidence"},
     )
     incident["status"] = "investigating"
-    await _notify(
-        conn,
-        f"escalation:{event_uid}",
-        "incident_escalated",
-        incident["severity_id"],
-        {
-            "incident_uid": str(incident["uid"]),
-            "title": incident["title"],
-            "reason": "reopened",
-            "entity_keys": list(incident["entity_keys"])[:32],
-        },
-        now,
-    )
+    # The escalation page is written by the database on the status change
+    # (tuisku_page_reopened_incident), the same for the worker and for triage (ADR 0011).
 
 
 async def evidence_reached_finding(

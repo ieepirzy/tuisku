@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from tests.worker_support import PACKS
+from tests.worker_support import PACKS, QUIET_BACKLOG
 from tuisku.rules.fingerprint import finding_fingerprint, group_value, overflow_fingerprint
 from tuisku.rules.match import match
 from tuisku.rules.packs import PackError, load_rule_set
@@ -468,7 +468,11 @@ def test_advisory_locks_are_taken_in_sorted_order() -> None:
         async def execute(self, query: str, params: tuple[int]) -> None:
             calls.append(params[0])
 
-    worker = Worker(rule_set=load_rule_set([], builtin=[PACKS]), clock=lambda: datetime.now(UTC))
+    worker = Worker(
+        rule_set=load_rule_set([], builtin=[PACKS]),
+        clock=lambda: datetime.now(UTC),
+        config=QUIET_BACKLOG,
+    )
     asyncio.run(worker._lock(FakeConn(), [9, -4, 3, 1]))  # type: ignore[arg-type]
     assert calls == [-4, 1, 3, 9]
 

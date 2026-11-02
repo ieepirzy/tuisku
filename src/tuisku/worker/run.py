@@ -43,6 +43,7 @@ def worker_config(settings: Settings) -> WorkerConfig:
         max_live_incidents=settings.worker_max_live_incidents,
         export_interval=timedelta(seconds=settings.worker_export_interval_seconds),
         allowed_lateness=timedelta(seconds=settings.worker_allowed_lateness_seconds),
+        backlog_after=timedelta(seconds=settings.worker_backlog_seconds),
     )
 
 

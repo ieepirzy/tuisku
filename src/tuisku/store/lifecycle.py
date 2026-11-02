@@ -70,23 +70,14 @@ def finding_payload(finding: dict[str, Any], **extra: Any) -> dict[str, Any]:
 
 
 async def notify_thresholds(
-    conn: AsyncConnection[Any],
-    finding: dict[str, Any],
-    old_count: int,
-    now: datetime,
-    *,
-    prefix: str = "finding_threshold",
+    conn: AsyncConnection[Any], finding: dict[str, Any], old_count: int, now: datetime
 ) -> None:
-    """One notification per threshold in (old_count, count] (ADR 0007: 10, 100, 1000).
-
-    ``prefix`` keeps the keys apart by writer: the worker's ``finding_threshold`` keys are not
-    writable by the API role, which uses ``triage_threshold`` when lifting a suppression, so it
-    can never pre-claim and swallow a worker page (ADR 0011)."""
+    """One notification per threshold in (old_count, count] (ADR 0007: 10, 100, 1000)."""
     for threshold in THRESHOLDS:
         if old_count < threshold <= finding["count"]:
             await notify.emit(
                 conn,
-                dedupe_key=f"{prefix}:{finding['uid']}:{threshold}",
+                dedupe_key=f"finding_threshold:{finding['uid']}:{threshold}",
                 kind="finding_threshold",
                 severity_id=finding["severity_id"],
                 payload=finding_payload(finding, threshold=threshold),
@@ -172,7 +163,6 @@ async def set_finding_status(
     old = finding["status"]
     suppressing = new_status == "suppressed"
     was_suppressed = old == "suppressed"
-    lifted_from = finding.get("count_at_suppression") if was_suppressed else None
     suppressed_at = count_then = None
     if suppressing:
         suppressed_at = finding["suppressed_at"] if was_suppressed else now
@@ -191,10 +181,8 @@ async def set_finding_status(
         new=new_value,
         reason=reason,
     )
-    if lifted_from is not None and new_status in ("open", "acknowledged"):
-        # Before the update: the database refuses the API role's lift without these pages.
-        prefix = "triage_threshold" if actor.startswith("operator:") else "finding_threshold"
-        await notify_thresholds(conn, finding, lifted_from, now, prefix=prefix)
+    # Leaving a suppression pages the thresholds crossed while it held: the database writes
+    # those pages itself (tuisku_page_lifted_thresholds, ADR 0011), for every role.
     row = await db.fetch_one(
         conn,
         "UPDATE findings SET status = %s, suppressed_until = %s, suppression_reason = %s, "
@@ -351,20 +339,6 @@ async def operator_incident_status(
         payload["findings_resolved"] = await resolve_incident_findings(
             conn, incident["id"], actor=actor, reason=f"incident {new_status}", now=now
         )
-    if kind == "reopened":
-        await notify.emit(
-            conn,
-            # A triage key: the worker's escalation: keys are not writable by the API role.
-            dedupe_key=f"operator_escalation:{incident['uid']}:reopened:{now.isoformat()}",
-            kind="incident_escalated",
-            severity_id=incident["severity_id"],
-            payload={
-                "incident_uid": str(incident["uid"]),
-                "title": incident["title"],
-                "reason": "reopened",
-                "entity_keys": incident["entity_keys"],
-            },
-            now=now,
-        )
+    # A reopen pages an escalation: the database writes it (tuisku_page_reopened_incident).
     incident.update(status=new_status, disposition=disposition)
     return incident

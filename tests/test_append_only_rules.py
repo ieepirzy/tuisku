@@ -16,6 +16,15 @@ from tests.support import query
 from tests.worker_support import Clock, builtin_rules, ingest, run_worker
 from tuisku.store.ingest import Transport
 
+
+@pytest.fixture(autouse=True)
+def _live_operator(app_db: AppDatabase) -> None:
+    """Operator events need a live operator token (ADR 0011)."""
+    from tests.worker_support import ensure_test_operator
+
+    ensure_test_operator(app_db.owner_url)
+
+
 NEW_EVIDENCE_TABLES = [
     "finding_events",
     "finding_detections",

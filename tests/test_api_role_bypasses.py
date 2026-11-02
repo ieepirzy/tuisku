@@ -21,6 +21,15 @@ from tests.worker_support import Clock, RecordingNotifier, builtin_rules, ingest
 from tuisku.rules.packs import RuleSet
 from tuisku.store.ingest import Transport
 
+
+@pytest.fixture(autouse=True)
+def _live_operator(app_db: AppDatabase) -> None:
+    """Operator events need a live operator token (ADR 0011)."""
+    from tests.worker_support import ensure_test_operator
+
+    ensure_test_operator(app_db.owner_url)
+
+
 AT = datetime(2026, 10, 30, 12, 0, 1, tzinfo=UTC)
 AGENT_RULE = "f542db3a-6926-4df9-9183-449491345d3c"
 
@@ -194,35 +203,30 @@ def test_triage_with_its_event_is_still_allowed(app_db: AppDatabase, tmp_path: P
 # --- notification keys --------------------------------------------------------------------------
 
 
-def test_worker_notification_keys_cannot_be_preclaimed(app_db: AppDatabase, tmp_path: Path) -> None:
+def test_the_api_role_writes_no_notifications(app_db: AppDatabase, tmp_path: Path) -> None:
+    """Round six: no INSERT on notifications at all, so no key can be pre-claimed (the dummy
+    `triage_threshold` probe) and the outbox cannot be flooded (the 200k-junk probe)."""
     uid, caller, rules, source = _agent_finding(app_db, tmp_path)
-    [(incident_uid,)] = query(
-        app_db.owner_url,
-        "SELECT i.uid::text FROM incidents i JOIN findings f "
-        "ON f.incident_id = i.id WHERE f.uid = %s",
-        (uid,),
-    )
     insert = (
         "INSERT INTO notifications (dedupe_key, kind, severity_id, payload, created_at) "
-        "VALUES (%s, 'x', 0, '{}', now())"
+        "VALUES (%s, 'noop', 0, '{}', '2000-01-01')"
     )
     for key in [
         f"finding_threshold:{uid}:10",
-        f"finding_opened:{uuid.uuid4()}",
-        f"finding_detection:{uuid.uuid4()}",
-        f"finding_link:{uuid.uuid4()}",
-        f"escalation:{incident_uid}:severity:5",
-        f"incident_opened:{uuid.uuid4()}",
-        f"overflow_group:{uid}:{'0' * 64}",
+        f"triage_threshold:{uid}:10",
+        f"operator_escalation:{uuid.uuid4()}",
+        f"escalation:{uuid.uuid4()}:reopened:1",
         f"dead_letter:1:{AGENT_RULE}",
     ]:
         exc = _refused(app_db.app_url, insert, (key,))
-        assert "belongs to the worker" in str(exc)
-    with psycopg.connect(app_db.app_url) as conn:  # what triage itself emits
-        conn.execute(insert, (f"operator_escalation:{incident_uid}:reopened:x",))
-        conn.execute(insert, (f"triage_threshold:{uid}:10",))
-        conn.rollback()
-    # Nine more refusals: the count reaches 10 and the threshold pages.
+        assert "permission denied for table notifications" in str(exc)
+    exc = _refused(
+        app_db.app_url,
+        "INSERT INTO notifications (dedupe_key, kind, severity_id, payload, created_at) "
+        "SELECT 'junk:' || g, 'noop', 0, '{}', now() FROM generate_series(1, 200000) g",
+    )
+    assert "permission denied" in str(exc)
+    # Nine more refusals: the count reaches 10 and the threshold pages as usual.
     ingest(
         app_db.app_url,
         source,
@@ -357,9 +361,22 @@ _LIFT = (
 )
 
 
-def test_a_lift_must_page_the_thresholds_crossed_while_suppressed(
-    app_db: AppDatabase, tmp_path: Path
+_RESOLVE = (
+    "INSERT INTO finding_events (finding_id, actor, kind, new_value) SELECT id, "
+    "'operator:00000000-0000-4000-8000-000000000000', 'status_changed', "
+    '\'{"status": "resolved"}\' FROM findings WHERE uid = %(uid)s; '
+    "UPDATE findings SET status = 'resolved', suppressed_until = NULL, "
+    "suppression_reason = NULL, suppressed_at = NULL, count_at_suppression = NULL "
+    "WHERE uid = %(uid)s"
+)
+
+
+@pytest.mark.parametrize("leave", ["open", "resolved"])
+def test_leaving_a_suppression_pages_the_thresholds_crossed(
+    app_db: AppDatabase, tmp_path: Path, leave: str
 ) -> None:
+    """Round six: suppressed -> resolved (or open) paged nothing. The database now pages every
+    threshold crossed while suppressed, whoever lifts it and however."""
     uid, caller, rules, source = _agent_finding(app_db, tmp_path)
     with psycopg.connect(app_db.app_url) as conn:
         _suppress(conn, uid, "now() + interval '1 day'")
@@ -370,41 +387,18 @@ def test_a_lift_must_page_the_thresholds_crossed_while_suppressed(
         "harava",
         [_refusal(AT + timedelta(minutes=2 + i), caller) for i in range(10)],
     )
-    run_worker(app_db.worker_url, rules, Clock(AT + timedelta(minutes=20)))
-    [(count,)] = query(app_db.owner_url, "SELECT count FROM findings WHERE uid = %s", (uid,))
-    assert count == 11  # crossed 10 while suppressed, silently
-    exc = _refused(app_db.app_url, _LIFT, {"uid": uid})  # the probe's bounce: no page
-    assert "threshold 10" in str(exc)
-    # A page written in an earlier transaction does not count: it must come with the lift.
-    with psycopg.connect(app_db.owner_url) as conn:
-        conn.execute(
-            "INSERT INTO notifications (dedupe_key, kind, severity_id, payload, created_at) "
-            "VALUES (%s, 'finding_threshold', 4, '{}', now())",
-            (f"triage_threshold:{uid}:10",),
-        )
-    exc = _refused(app_db.app_url, _LIFT, {"uid": uid})
-    assert "threshold 10" in str(exc)
-    # With its page in the same transaction, the lift is accepted (another finding, as this
-    # one's key is now taken).
-    uid2, caller2, rules2, source2 = _agent_finding(app_db, tmp_path / "second")
-    with psycopg.connect(app_db.app_url) as conn:
-        _suppress(conn, uid2, "now() + interval '1 day'")
+    quiet = RecordingNotifier()
+    run_worker(app_db.worker_url, rules, Clock(AT + timedelta(minutes=20)), quiet)
+    assert not [n for n in quiet.sent if n.get("finding_uid") == uid]  # crossed 10 silently
+    with psycopg.connect(app_db.app_url) as conn:  # the probe: no page of its own
+        _run_all(conn, _LIFT if leave == "open" else _RESOLVE, {"uid": uid})
         conn.commit()
-    ingest(
-        app_db.app_url,
-        source2,
-        "harava",
-        [_refusal(AT + timedelta(minutes=2 + i), caller2) for i in range(10)],
-    )
-    run_worker(app_db.worker_url, rules2, Clock(AT + timedelta(minutes=20)))
-    with psycopg.connect(app_db.app_url) as conn:
-        conn.execute(
-            "INSERT INTO notifications (dedupe_key, kind, severity_id, payload, created_at) "
-            "VALUES (%s, 'finding_threshold', 4, '{}', now())",
-            (f"triage_threshold:{uid2}:10",),
-        )
-        _run_all(conn, _LIFT, {"uid": uid2})
-        conn.rollback()
+    notifier = RecordingNotifier()
+    run_worker(app_db.worker_url, rules, Clock(AT + timedelta(minutes=21)), notifier)
+    pages = [n for n in notifier.sent if n.get("finding_uid") == uid]
+    assert [(n["kind"], n["threshold"], n["count"]) for n in pages] == [
+        ("finding_threshold", 10, 11)
+    ]
 
 
 def test_a_bounce_does_not_restart_the_thirty_days(app_db: AppDatabase, tmp_path: Path) -> None:
@@ -457,3 +451,84 @@ def test_triage_cannot_expire_or_retouch_the_suppression_count(
         ).fetchall()
         conn.rollback()
     assert count_then == count  # the database keeps the count it recorded
+
+
+# --- round six: operator events --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("actor", "kind", "message"),
+    [
+        ("operator:11111111-1111-4111-8111-111111111111", "status_changed", "no live operator"),
+        ("operator:not-a-uuid", "status_changed", "no live operator"),
+        ("operator:00000000-0000-4000-8000-000000000000", "opened", "only triage events"),
+        ("operator:00000000-0000-4000-8000-000000000000", "detection_attached", "only triage"),
+        ("operator:00000000-0000-4000-8000-000000000000", "severity_changed", "only triage"),
+    ],
+)
+def test_operator_events_need_a_live_token_and_a_triage_kind(
+    app_db: AppDatabase, tmp_path: Path, actor: str, kind: str, message: str
+) -> None:
+    uid, *_ = _agent_finding(app_db, tmp_path)
+    exc = _refused(
+        app_db.app_url,
+        "INSERT INTO finding_events (finding_id, actor, kind) SELECT id, %(actor)s, %(kind)s "
+        "FROM findings WHERE uid = %(uid)s",
+        {"actor": actor, "kind": kind, "uid": uid},
+    )
+    assert message in str(exc)
+
+
+def test_a_revoked_operator_cannot_write_events(app_db: AppDatabase, tmp_path: Path) -> None:
+    uid, *_ = _agent_finding(app_db, tmp_path)
+    token = str(uuid.uuid4())
+    with psycopg.connect(app_db.owner_url) as conn:
+        conn.execute(
+            "INSERT INTO operator_tokens (uid, name, roles, token_sha256, revoked_at) "
+            "VALUES (%s, 'gone', '{triage}', sha256(%s::bytea), now())",
+            (token, token.encode()),
+        )
+    exc = _refused(
+        app_db.app_url,
+        "INSERT INTO finding_events (finding_id, actor, kind) SELECT id, %(actor)s, "
+        "'status_changed' FROM findings WHERE uid = %(uid)s",
+        {"actor": f"operator:{token}", "uid": uid},
+    )
+    assert "no live operator" in str(exc)
+
+
+def test_closing_the_incident_of_a_suppressed_finding_pages_its_thresholds(
+    app_db: AppDatabase, tmp_path: Path
+) -> None:
+    from tests.support import auth, client, operator_token
+    from tuisku.store.tokens import Role
+
+    uid, caller, rules, source = _agent_finding(app_db, tmp_path)
+    with psycopg.connect(app_db.app_url) as conn:
+        _suppress(conn, uid, "now() + interval '1 day'")
+        conn.commit()
+    ingest(
+        app_db.app_url,
+        source,
+        "harava",
+        [_refusal(AT + timedelta(minutes=2 + i), caller) for i in range(10)],
+    )
+    run_worker(app_db.worker_url, rules, Clock(AT + timedelta(minutes=20)))
+    [(incident,)] = query(
+        app_db.owner_url,
+        "SELECT i.uid::text FROM incidents i JOIN findings f ON f.incident_id = i.id "
+        "WHERE f.uid = %s",
+        (uid,),
+    )
+    triager = operator_token(app_db.app_url, Role.TRIAGE)
+    with client(app_db.app_url) as c:
+        r = c.post(
+            f"/v1/incidents/{incident}/status",
+            json={"status": "closed", "disposition": "benign_true_positive"},
+            headers=auth(triager),
+        )
+    assert r.status_code == 200, r.text
+    notifier = RecordingNotifier()
+    run_worker(app_db.worker_url, rules, Clock(AT + timedelta(minutes=21)), notifier)
+    pages = [n for n in notifier.sent if n.get("finding_uid") == uid]
+    assert [(n["kind"], n["threshold"]) for n in pages] == [("finding_threshold", 10)]

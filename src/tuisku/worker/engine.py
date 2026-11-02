@@ -74,6 +74,8 @@ class WorkerConfig:
     max_window_rows: int = 50_000
     retry_backoff: timedelta = timedelta(seconds=30)
     notify_backoff: notify.Backoff = field(default_factory=notify.Backoff)
+    # Health: queued rows or undelivered notifications older than this raise tuisku.meta.backlog.
+    backlog_after: timedelta = timedelta(minutes=5)
 
 
 @dataclass(slots=True)
@@ -87,6 +89,7 @@ class Stats:
     dead_lettered: int = 0
     retried_later: int = 0
     expired_findings: int = 0
+    backlog: int = 0
     delivered: int = 0
 
 
@@ -371,6 +374,7 @@ class Worker:
         """Sweep, claim one batch, evaluate it and deliver notifications. ``conn`` must be in
         autocommit mode; every step manages its own transaction."""
         stats = Stats()
+        stats.backlog = await self.check_backlog(conn)
         stats.expired_findings = await self.sweep(conn)
         for queue_row in await self.claim(conn):
             stats.claimed += 1
@@ -389,6 +393,53 @@ class Worker:
             if stats.claimed == 0:
                 break
         return total
+
+    async def check_backlog(self, conn: AsyncConnection[Any]) -> int:
+        """Raise ``tuisku.meta.backlog`` when the oldest queued row (by the worker's clock, the
+        clock that set ``enqueued_at``) or the oldest undelivered notification (by the database
+        clock, which sets ``created_at``) is older than ``backlog_after``. Returns how many
+        backlogs were raised. A flooded or stuck pipeline therefore pages, by its own
+        notification, instead of silently delaying every other page."""
+        now = self.clock()
+        limit = self.config.backlog_after
+        raised = 0
+        async with conn.transaction():
+            queue = await db.fetch_one(
+                conn, "SELECT min(enqueued_at) AS oldest, count(*) AS n FROM evaluation_queue"
+            )
+            assert queue is not None
+            if queue["oldest"] is not None and now - queue["oldest"] > limit:
+                raised += await meta.record_backlog(
+                    conn,
+                    subject="queue",
+                    details={
+                        "oldest_enqueued_at": queue["oldest"].isoformat(),
+                        "queued": queue["n"],
+                        "limit_seconds": int(limit.total_seconds()),
+                    },
+                    now=now,
+                )
+            outbox = await db.fetch_one(
+                conn,
+                "SELECT min(n.created_at) AS oldest, count(*) AS n, "
+                "now() - min(n.created_at) > %s AS late FROM notifications n "
+                "WHERE NOT EXISTS (SELECT 1 FROM notification_deliveries d "
+                "WHERE d.notification_id = n.id AND d.status = 'delivered')",
+                (limit,),
+            )
+            assert outbox is not None
+            if outbox["late"]:
+                raised += await meta.record_backlog(
+                    conn,
+                    subject="notifications",
+                    details={
+                        "oldest_created_at": outbox["oldest"].isoformat(),
+                        "undelivered": outbox["n"],
+                        "limit_seconds": int(limit.total_seconds()),
+                    },
+                    now=now,
+                )
+        return raised
 
     async def sweep(self, conn: AsyncConnection[Any]) -> int:
         now = self.clock()

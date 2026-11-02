@@ -49,7 +49,9 @@ WORKING_TABLES = (
     "evaluation_attempts",
 )
 # What the API role (ingest and triage) may write here; it reads everything (ADR 0011).
-API_INSERT = ("finding_events", "incident_events", "notifications")
+# The API role writes no notifications at all: the pages triage causes are written by owner
+# triggers (SECURITY DEFINER) below.
+API_INSERT = ("finding_events", "incident_events")
 # Triage changes only these columns (column-level grants; a trigger checks the rest).
 FINDING_TRIAGE_COLUMNS = (
     "status",
@@ -60,8 +62,9 @@ FINDING_TRIAGE_COLUMNS = (
     "updated_at",
 )
 INCIDENT_TRIAGE_COLUMNS = ("status", "disposition", "updated_at")
-# The dedupe-key prefixes triage emits; every other prefix is the worker's (ADR 0011).
-API_NOTIFICATION_PREFIXES = ("operator_escalation:", "triage_threshold:")
+# Operator (triage) event kinds; every other kind is the worker's (ADR 0011).
+OPERATOR_FINDING_EVENT_KINDS = ("status_changed", "suppressed")
+OPERATOR_INCIDENT_EVENT_KINDS = ("status_changed", "reopened", "note")
 # Timestamp columns the trigger forces to the database's now(), so the app role cannot supply
 # them: the histories, the links that build evidence closures, the firing keys and pack loads.
 FORCED_TIME_COLUMNS = (
@@ -73,6 +76,7 @@ FORCED_TIME_COLUMNS = (
     ("rule_firings", "created_at"),
     ("pack_loads", "loaded_at"),
     ("notification_deliveries", "at"),
+    ("notifications", "created_at"),
 )
 
 _ROLE_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
@@ -379,14 +383,38 @@ CREATE TRIGGER rule_firings_identity BEFORE INSERT ON rule_firings
 
 # ADR 0011: events with a system or rule actor are the worker's alone; the API writes only
 # operator events. tuisku_is_worker() comes from revision 0001.
-EVENT_ACTOR_SQL = """
+def _sql_array(values: tuple[str, ...]) -> str:
+    return "ARRAY[" + ", ".join(f"'{v}'" for v in values) + "]::text[]"
+
+
+EVENT_ACTOR_SQL = f"""
 CREATE FUNCTION tuisku_events_operator_only() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
+DECLARE
+    kinds text[];
 BEGIN
-    IF NEW.actor NOT LIKE 'operator:%' AND NOT public.tuisku_is_worker() THEN
+    IF public.tuisku_is_worker() THEN
+        RETURN NEW;
+    END IF;
+    IF NEW.actor NOT LIKE 'operator:%' THEN
         RAISE EXCEPTION 'only the worker role writes % events (ADR 0011)', NEW.actor
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    -- The operator must be a live operator token: the API cannot invent one.
+    IF NEW.actor !~ '^operator:[0-9a-f-]{{36}}$' OR NOT EXISTS (
+        SELECT 1 FROM public.operator_tokens t
+        WHERE t.uid = substring(NEW.actor FROM 10)::uuid AND t.revoked_at IS NULL
+    ) THEN
+        RAISE EXCEPTION 'no live operator token %', NEW.actor
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    kinds := CASE TG_TABLE_NAME
+        WHEN 'finding_events' THEN {_sql_array(OPERATOR_FINDING_EVENT_KINDS)}
+        ELSE {_sql_array(OPERATOR_INCIDENT_EVENT_KINDS)} END;
+    IF NOT (NEW.kind = ANY (kinds)) THEN
+        RAISE EXCEPTION 'operators write only triage events, not % (ADR 0011)', NEW.kind
             USING ERRCODE = 'insufficient_privilege';
     END IF;
     RETURN NEW;
@@ -397,10 +425,6 @@ CREATE TRIGGER finding_events_actor BEFORE INSERT ON finding_events
 CREATE TRIGGER incident_events_actor BEFORE INSERT ON incident_events
     FOR EACH ROW EXECUTE FUNCTION tuisku_events_operator_only();
 """
-
-
-def _sql_array(values: tuple[str, ...]) -> str:
-    return "ARRAY[" + ", ".join(f"'{v}'" for v in values) + "]::text[]"
 
 
 # ADR 0011: what the API role may do to findings, incidents and notifications. The worker (and
@@ -419,8 +443,7 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
 DECLARE
-    began     timestamptz;
-    threshold integer;
+    began timestamptz;
 BEGIN
     IF public.tuisku_is_worker() THEN
         RETURN NEW;
@@ -456,23 +479,6 @@ BEGIN
             RAISE EXCEPTION 'a suppression ends within 30 days of when it began (ADR 0007)'
                 USING ERRCODE = 'insufficient_privilege';
         END IF;
-    END IF;
-    -- Lifting a suppression pages for every threshold crossed while it held (ADR 0007): those
-    -- notifications must be in this transaction already, so a lift (or a lift and
-    -- re-suppress) can never swallow them.
-    IF OLD.status = 'suppressed' AND NEW.status IN ('open', 'acknowledged') THEN
-        FOREACH threshold IN ARRAY ARRAY[10, 100, 1000] LOOP
-            IF OLD.count_at_suppression < threshold AND threshold <= OLD.count
-               AND NOT EXISTS (
-                   SELECT 1 FROM public.notifications n
-                   WHERE n.dedupe_key = 'triage_threshold:' || NEW.uid || ':' || threshold
-                     AND public.tuisku_xmin_is_current(n.xmin)
-               )
-            THEN
-                RAISE EXCEPTION 'lifting a suppression pages threshold % first (ADR 0007)',
-                    threshold USING ERRCODE = 'insufficient_privilege';
-            END IF;
-        END LOOP;
     END IF;
     IF NOT EXISTS (
         SELECT 1 FROM public.finding_events e
@@ -521,22 +527,106 @@ $$;
 CREATE TRIGGER incidents_triage_guard BEFORE UPDATE ON incidents
     FOR EACH ROW EXECUTE FUNCTION tuisku_incidents_triage_guard();
 
-CREATE FUNCTION tuisku_notifications_prefix_guard() RETURNS trigger
+-- Pages triage causes, written by the owner (SECURITY DEFINER) whoever made the change, so the
+-- API role needs no notification privilege at all (ADR 0011):
+-- - a finding leaving `suppressed` (to open, acknowledged or resolved, also through an incident
+--   being closed or resolved) pages every threshold crossed while it was suppressed (ADR 0007);
+-- - an incident reopened (contained or resolved back to investigating) pages an escalation.
+CREATE FUNCTION tuisku_page_lifted_thresholds() RETURNS trigger
 LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    threshold integer;
+BEGIN
+    IF OLD.status = 'suppressed' AND NEW.status IN ('open', 'acknowledged', 'resolved') THEN
+        FOREACH threshold IN ARRAY ARRAY[10, 100, 1000] LOOP
+            IF coalesce(OLD.count_at_suppression, NEW.count) < threshold
+               AND threshold <= NEW.count THEN
+                INSERT INTO public.notifications (dedupe_key, kind, severity_id, payload,
+                                                  created_at)
+                VALUES (
+                    'finding_threshold:' || NEW.uid || ':' || threshold,
+                    'finding_threshold',
+                    NEW.severity_id,
+                    jsonb_build_object(
+                        'finding_uid', NEW.uid::text,
+                        'rule', NEW.rule_id::text || '@' || NEW.rule_rev,
+                        'title', NEW.title,
+                        'entity_keys', to_jsonb(NEW.entity_keys[1:32]),
+                        'count', NEW.count,
+                        'threshold', threshold,
+                        'reason', 'crossed while suppressed'
+                    ),
+                    now()
+                )
+                ON CONFLICT (dedupe_key) DO NOTHING;
+            END IF;
+        END LOOP;
+    END IF;
+    RETURN NULL;
+END
+$$;
+CREATE TRIGGER findings_page_lifted_thresholds AFTER UPDATE OF status ON findings
+    FOR EACH ROW EXECUTE FUNCTION tuisku_page_lifted_thresholds();
+
+CREATE FUNCTION tuisku_page_reopened_incident() RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
 SET search_path = pg_catalog
 AS $$
 BEGIN
-    IF NOT public.tuisku_is_worker()
-       AND NOT (NEW.dedupe_key LIKE ANY ({_sql_array(tuple(p + "%" for p in API_NOTIFICATION_PREFIXES))}))
-    THEN
-        RAISE EXCEPTION 'notification key % belongs to the worker (ADR 0011)', NEW.dedupe_key
-            USING ERRCODE = 'insufficient_privilege';
+    IF OLD.status IN ('contained', 'resolved') AND NEW.status = 'investigating' THEN
+        INSERT INTO public.notifications (dedupe_key, kind, severity_id, payload, created_at)
+        VALUES (
+            'escalation:' || NEW.uid || ':reopened:' || pg_current_xact_id()::text,
+            'incident_escalated',
+            NEW.severity_id,
+            jsonb_build_object(
+                'incident_uid', NEW.uid::text,
+                'title', NEW.title,
+                'reason', 'reopened',
+                'entity_keys', to_jsonb(NEW.entity_keys[1:32])
+            ),
+            now()
+        )
+        ON CONFLICT (dedupe_key) DO NOTHING;
     END IF;
-    RETURN NEW;
+    RETURN NULL;
 END
 $$;
-CREATE TRIGGER notifications_prefix_guard BEFORE INSERT ON notifications
-    FOR EACH ROW EXECUTE FUNCTION tuisku_notifications_prefix_guard();
+CREATE TRIGGER incidents_page_reopened AFTER UPDATE OF status ON incidents
+    FOR EACH ROW EXECUTE FUNCTION tuisku_page_reopened_incident();
+
+-- A backlog meta-detection pages at once, by its own notification, rather than waiting for the
+-- (backed-up) queue to bring it to the tuisku-meta rule.
+CREATE FUNCTION tuisku_page_backlog() RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    INSERT INTO public.notifications (dedupe_key, kind, severity_id, payload, created_at)
+    VALUES (
+        'backlog:' || NEW.uid,
+        'tuisku_backlog',
+        NEW.severity_id,
+        jsonb_build_object(
+            'detection_uid', NEW.uid::text,
+            'title', NEW.title,
+            'subject', NEW.subject,
+            'entity_keys', to_jsonb(NEW.entity_keys)
+        ),
+        now()
+    )
+    ON CONFLICT (dedupe_key) DO NOTHING;
+    RETURN NULL;
+END
+$$;
+CREATE TRIGGER detections_page_backlog AFTER INSERT ON detections
+    FOR EACH ROW WHEN (NEW.kind = 'tuisku.meta.backlog')
+    EXECUTE FUNCTION tuisku_page_backlog();
 """
 
 
@@ -590,6 +680,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("DROP TRIGGER detections_page_backlog ON detections")
     op.execute("DROP INDEX evaluation_queue_claim_idx")
     op.execute("DROP INDEX observations_metric_eval_time_idx")
     op.execute("DROP INDEX detection_evidence_observation_id_idx")
@@ -604,5 +695,5 @@ def downgrade() -> None:
         "DROP FUNCTION tuisku_force_event_time(), tuisku_check_firing_identity(), "
         "tuisku_events_operator_only(), "
         "tuisku_findings_triage_guard(), tuisku_incidents_triage_guard(), "
-        "tuisku_notifications_prefix_guard()"
+        "tuisku_page_lifted_thresholds(), tuisku_page_reopened_incident(), tuisku_page_backlog()"
     )

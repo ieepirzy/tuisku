@@ -8,7 +8,7 @@ across every loaded pack. A rule without fixtures fails here.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -88,7 +88,13 @@ def test_pack_fixture(
         fresh_database_url, "fixture", source["adapter"], records, source.get("options")
     )
     assert all(o == "accepted/ok" for o in outcomes), outcomes
-    clock = Clock(max(at for at, _, _ in records))
+    worker = case.get("worker", {})
+    clock = Clock(
+        max(at for at, _, _ in records) + timedelta(minutes=worker.get("clock_offset_minutes", 0))
+    )
+    extra: dict[str, Any] = {}
+    if "backlog_seconds" in worker:
+        extra["backlog_after"] = timedelta(seconds=worker["backlog_seconds"])
     failing = case.get("fail_rule")
     refused = case.get("notifier_fails")
     if refused is not None:
@@ -103,7 +109,7 @@ def test_pack_fixture(
         for _ in range(notify.ALERT_AFTER_FAILURES + 2):
             run_worker(fresh_database_url, rules, clock, notifier, notify_backoff=backoff)
     elif failing is None:
-        run_worker(fresh_database_url, rules, clock)
+        run_worker(fresh_database_url, rules, clock, **extra)
     else:
 
         def explode(rule: Any, env: Any) -> None:
