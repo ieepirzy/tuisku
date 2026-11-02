@@ -72,10 +72,12 @@ sensor sees.
   - evaluator `tuisku`, authorship `tuisku`, and no raw record
   - the source as an entity key
 
-  At most one meta-detection is written per source, kind and 5-minute bucket. A unique key on
-  `(source_id, kind, bucket)` with `ON CONFLICT DO NOTHING` enforces this, so it also holds
-  across API replicas. Repeats are counted in a mutable working table, `meta_counters`, never by
-  updating the detection. Rules can select meta-detections by kind.
+  At most one meta-detection is written per source, kind, *subject* and 5-minute bucket. The
+  subject is the limit name for limit breaches and the rule id for `evaluation_failed`. A unique
+  key on `(source_id, kind, subject, bucket)` with `ON CONFLICT DO NOTHING` enforces this, so it
+  also holds across API replicas, and one failing rule cannot hide another. Repeats are counted
+  in a mutable working table, `meta_counters`, never by updating the detection. Rules can select
+  meta-detections by kind.
 
 ### Sources, tokens and roles
 

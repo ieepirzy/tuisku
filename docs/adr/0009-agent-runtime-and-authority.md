@@ -69,7 +69,14 @@ login or rate limits for their products, including agents built on the Claude Ag
      proposals from a session they started.
    - **The tool surface is a separate process** (`tuisku investigate`). It connects to Postgres
      as a separate `tuisku_investigator` role, which has no `tuisku_app` credentials.
-     - **Reads:** the role can `SELECT` only what its tier allows.
+     - **Reads:** row-level security policies, keyed on the session id that the surface
+       sets per request from the verified token, limit reads to the session's incident. Column
+       access by tier, such as unredacted L0, goes through `SECURITY DEFINER` views. Tier
+       limits are therefore enforced in the database as well as in the process.
+     - **Known limit:** session binding inside the shared role relies on the surface process
+       mapping token → session correctly. A compromised surface could misattribute rows between
+       live sessions *of the same incident*. Per-session database credentials are the stronger
+       option if that ever matters.
      - **Writes:** it can `INSERT` into `hypotheses`, `tool_calls`, `proposed_actions` and
        `evidence_requests`, and nothing else. It cannot write `investigator_sessions`, and it
        cannot write L0–L3.

@@ -101,8 +101,10 @@ Grouping keys are built from attacker-controlled values, so the grouping itself 
   with the same fingerprint opens a new incident that links to the old one.
 - **Timeline.** Every change appends an `incident_events` row with an `actor`, a `kind` and a
   JSON payload.
-  - `actor` is one of `system`, `rule:<id>@<rev>` or `operator:<token id>`. The server always
-    sets it; it never comes from request content.
+  - `actor` is one of `system`, `rule:<id>@<rev>`, `operator:<token id>` or
+    `investigator:<session id>` (written only by the L4 trigger, ADR 0009). The server always
+    sets it; it never comes from request content. Incident ↔ finding and finding ↔ detection
+    links live in append-only link tables ([0004](0004-storage.md)).
   - `kind` is one of `opened`, `finding_attached`, `status_changed`, `reopened`, `note`,
     `session_started`, `session_ended`, `hypothesis_added`, `hypothesis_confirmed`,
     `evidence_requested`, `evidence_decided`, `action_proposed`, `action_decided` or

@@ -71,6 +71,10 @@ are mutable working objects that keep a history.
    - `raw_records`, `parse_attempts` and `raw_duplicates`
    - `observations`, `detections`, and the link tables between them (including
      `detection_evidence`)
+   - the links that build evidence closures: `finding_detections` (finding → detection) and
+     `incident_findings` (incident → finding). These are append-only, so even a compromised
+     app process cannot shrink an incident's evidence closure. Retention computes holds over
+     these links only.
    - the histories: `finding_events` and `incident_events`
    - later, the L4 tables (`hypotheses`, `investigator_sessions`, `investigator_session_events`, `tool_calls`, `proposed_actions`, `evidence_requests`)
 
@@ -81,7 +85,7 @@ are mutable working objects that keep a history.
    digest of the request body bytes. It does not cover the envelope
    itself, because `collector` metadata such as path or offset changes when a shipper re-reads a
    rotated file. A re-delivery inserts nothing and is reported as a duplicate. Each duplicate
-   receipt is recorded in `raw_duplicates (raw_record_id, received_at)`, so a burst of
+   receipt is recorded in `raw_duplicates (raw_record_id, received_at, token_id)`, so a burst of
    byte-identical lines is visible as a count rather than lost. Sensors we target include a
    timestamp in every line (Harava logs carry millisecond time), so real events rarely collide.
 6. **Two clocks on every derived row.**
