@@ -156,8 +156,12 @@ With `TUISKU_APP_ROLE` set, migrations grant the app role `SELECT` on evidence t
 `operator_tokens` and `meta_counters`, `INSERT` only on `evaluation_queue`, and `USAGE` on
 sequences. Only the worker role claims, updates or deletes queue rows, or touches
 `evaluation_dead_letter`. For triage the API role gets `SELECT` on findings, incidents and
-their tables, `UPDATE` on `findings` and `incidents`, and `INSERT` on `finding_events`,
-`incident_events` (operator actors only) and `notifications`.
+their tables. On `findings` it may update only the status and suppression columns, and on
+`incidents` only status and disposition. A trigger requires each such change to come with its
+operator event in the same transaction, and caps a suppression at 30 days from its start. It
+may also insert `finding_events` and `incident_events` with operator actors, and
+`notifications` with the triage key prefixes (`operator_escalation:`, `triage_threshold:`).
+ADR 0011 lists exactly what each role can write.
 
 Only the worker role writes rule output: `tuisku`-evaluated detections and their links,
 `detection_evidence`, `rule_firings`, `findings`, `incidents`, `finding_detections`,

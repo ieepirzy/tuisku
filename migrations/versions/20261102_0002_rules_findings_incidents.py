@@ -50,7 +50,18 @@ WORKING_TABLES = (
 )
 # What the API role (ingest and triage) may write here; it reads everything (ADR 0011).
 API_INSERT = ("finding_events", "incident_events", "notifications")
-API_UPDATE = ("findings", "incidents")
+# Triage changes only these columns (column-level grants; a trigger checks the rest).
+FINDING_TRIAGE_COLUMNS = (
+    "status",
+    "suppressed_until",
+    "suppression_reason",
+    "suppressed_at",
+    "count_at_suppression",
+    "updated_at",
+)
+INCIDENT_TRIAGE_COLUMNS = ("status", "disposition", "updated_at")
+# The dedupe-key prefixes triage emits; every other prefix is the worker's (ADR 0011).
+API_NOTIFICATION_PREFIXES = ("operator_escalation:", "triage_threshold:")
 # Timestamp columns the trigger forces to the database's now(), so the app role cannot supply
 # them: the histories, the links that build evidence closures, the firing keys and pack loads.
 FORCED_TIME_COLUMNS = (
@@ -405,6 +416,120 @@ CREATE TRIGGER incident_events_actor BEFORE INSERT ON incident_events
 """
 
 
+def _sql_array(values: tuple[str, ...]) -> str:
+    return "ARRAY[" + ", ".join(f"'{v}'" for v in values) + "]::text[]"
+
+
+# ADR 0011: what the API role may do to findings, incidents and notifications. The worker (and
+# the owner) are not restricted here. For the API role:
+# - only triage columns may change; window, lifetime, counts, severity and every other column
+#   are refused (the column grants refuse them too);
+# - a suppression starts now, by the database clock, records the count then, and never runs
+#   past 30 days from when it began, however often it is renewed;
+# - every change needs a matching operator event inserted in the same transaction (the same
+#   xmin check as firing keys), so no triage change is silent;
+# - only the notification dedupe-key prefixes triage emits are accepted, so the API cannot
+#   pre-claim a key the worker will use and swallow that page.
+TRIAGE_GUARD_SQL = f"""
+CREATE FUNCTION tuisku_findings_triage_guard() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    began timestamptz;
+BEGIN
+    IF public.tuisku_is_worker() THEN
+        RETURN NEW;
+    END IF;
+    IF (to_jsonb(NEW) - {_sql_array(FINDING_TRIAGE_COLUMNS)})
+       IS DISTINCT FROM (to_jsonb(OLD) - {_sql_array(FINDING_TRIAGE_COLUMNS)}) THEN
+        RAISE EXCEPTION 'triage may change only a finding''s status and suppression (ADR 0011)'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF OLD.status NOT IN ('open', 'acknowledged', 'suppressed') THEN
+        RAISE EXCEPTION 'a % finding can no longer change', OLD.status
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF NEW.status = 'suppressed' THEN
+        IF OLD.status = 'suppressed' THEN
+            NEW.suppressed_at := OLD.suppressed_at;
+            NEW.count_at_suppression := OLD.count_at_suppression;
+        ELSE
+            NEW.suppressed_at := now();
+            NEW.count_at_suppression := OLD.count;
+        END IF;
+        began := NEW.suppressed_at;
+        IF NEW.suppressed_until IS NULL OR NEW.suppressed_until > began + interval '30 days' THEN
+            RAISE EXCEPTION 'a suppression ends within 30 days of when it began (ADR 0007)'
+                USING ERRCODE = 'insufficient_privilege';
+        END IF;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM public.finding_events e
+        WHERE e.finding_id = NEW.id AND e.actor LIKE 'operator:%'
+          AND e.new_value ->> 'status' = NEW.status
+          AND public.tuisku_xmin_is_current(e.xmin)
+    ) THEN
+        RAISE EXCEPTION 'a triage change needs its operator event in the same transaction'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER findings_triage_guard BEFORE UPDATE ON findings
+    FOR EACH ROW EXECUTE FUNCTION tuisku_findings_triage_guard();
+
+CREATE FUNCTION tuisku_incidents_triage_guard() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF public.tuisku_is_worker() THEN
+        RETURN NEW;
+    END IF;
+    IF (to_jsonb(NEW) - {_sql_array(INCIDENT_TRIAGE_COLUMNS)})
+       IS DISTINCT FROM (to_jsonb(OLD) - {_sql_array(INCIDENT_TRIAGE_COLUMNS)}) THEN
+        RAISE EXCEPTION 'triage may change only an incident''s status and disposition (ADR 0011)'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF OLD.status = 'closed' THEN
+        RAISE EXCEPTION 'a closed incident can no longer change'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM public.incident_events e
+        WHERE e.incident_id = NEW.id AND e.actor LIKE 'operator:%'
+          AND e.kind IN ('status_changed', 'reopened') AND e.payload ->> 'to' = NEW.status
+          AND public.tuisku_xmin_is_current(e.xmin)
+    ) THEN
+        RAISE EXCEPTION 'a triage change needs its operator event in the same transaction'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER incidents_triage_guard BEFORE UPDATE ON incidents
+    FOR EACH ROW EXECUTE FUNCTION tuisku_incidents_triage_guard();
+
+CREATE FUNCTION tuisku_notifications_prefix_guard() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF NOT public.tuisku_is_worker()
+       AND NOT (NEW.dedupe_key LIKE ANY ({_sql_array(tuple(p + "%" for p in API_NOTIFICATION_PREFIXES))}))
+    THEN
+        RAISE EXCEPTION 'notification key % belongs to the worker (ADR 0011)', NEW.dedupe_key
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER notifications_prefix_guard BEFORE INSERT ON notifications
+    FOR EACH ROW EXECUTE FUNCTION tuisku_notifications_prefix_guard();
+"""
+
+
 def _role(name: str) -> str | None:
     role = context.config.attributes.get(name)
     if not role:
@@ -424,6 +549,7 @@ def upgrade() -> None:
         )
     op.execute(FIRING_IDENTITY_FUNCTION_SQL)
     op.execute(EVENT_ACTOR_SQL)
+    op.execute(TRIAGE_GUARD_SQL)
     # The evidence trigger function comes from revision 0001.
     for table in EVIDENCE_TABLES:
         op.execute(
@@ -448,7 +574,8 @@ def upgrade() -> None:
     # escalation notifications.
     op.execute(f'GRANT SELECT ON {", ".join(EVIDENCE_TABLES + WORKING_TABLES)} TO "{app}"')
     op.execute(f'GRANT INSERT ON {", ".join(API_INSERT)} TO "{app}"')
-    op.execute(f'GRANT UPDATE ON {", ".join(API_UPDATE)} TO "{app}"')
+    op.execute(f'GRANT UPDATE ({", ".join(FINDING_TRIAGE_COLUMNS)}) ON findings TO "{app}"')
+    op.execute(f'GRANT UPDATE ({", ".join(INCIDENT_TRIAGE_COLUMNS)}) ON incidents TO "{app}"')
     op.execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "{app}"')
 
 
@@ -465,5 +592,7 @@ def downgrade() -> None:
     )
     op.execute(
         "DROP FUNCTION tuisku_force_event_time(), tuisku_check_firing_identity(), "
-        "tuisku_xmin_is_current(xid), tuisku_events_operator_only()"
+        "tuisku_xmin_is_current(xid), tuisku_events_operator_only(), "
+        "tuisku_findings_triage_guard(), tuisku_incidents_triage_guard(), "
+        "tuisku_notifications_prefix_guard()"
     )

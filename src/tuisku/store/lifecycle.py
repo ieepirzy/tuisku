@@ -70,14 +70,23 @@ def finding_payload(finding: dict[str, Any], **extra: Any) -> dict[str, Any]:
 
 
 async def notify_thresholds(
-    conn: AsyncConnection[Any], finding: dict[str, Any], old_count: int, now: datetime
+    conn: AsyncConnection[Any],
+    finding: dict[str, Any],
+    old_count: int,
+    now: datetime,
+    *,
+    prefix: str = "finding_threshold",
 ) -> None:
-    """One notification per threshold in (old_count, count] (ADR 0007: 10, 100, 1000)."""
+    """One notification per threshold in (old_count, count] (ADR 0007: 10, 100, 1000).
+
+    ``prefix`` keeps the keys apart by writer: the worker's ``finding_threshold`` keys are not
+    writable by the API role, which uses ``triage_threshold`` when lifting a suppression, so it
+    can never pre-claim and swallow a worker page (ADR 0011)."""
     for threshold in THRESHOLDS:
         if old_count < threshold <= finding["count"]:
             await notify.emit(
                 conn,
-                dedupe_key=f"finding_threshold:{finding['uid']}:{threshold}",
+                dedupe_key=f"{prefix}:{finding['uid']}:{threshold}",
                 kind="finding_threshold",
                 severity_id=finding["severity_id"],
                 payload=finding_payload(finding, threshold=threshold),
@@ -168,9 +177,25 @@ async def set_finding_status(
     if suppressing:
         suppressed_at = finding["suppressed_at"] if was_suppressed else now
         count_then = finding["count_at_suppression"] if was_suppressed else finding["count"]
-    await conn.execute(
+    new_value: dict[str, Any] = {"status": new_status}
+    if suppressing:
+        new_value["suppressed_until"] = suppressed_until.isoformat() if suppressed_until else None
+    # The event first: for the API role the database accepts the update only with its operator
+    # event already written in this transaction (ADR 0011).
+    await finding_event(
+        conn,
+        finding["id"],
+        actor,
+        "suppressed" if suppressing else event_kind,
+        old={"status": old},
+        new=new_value,
+        reason=reason,
+    )
+    row = await db.fetch_one(
+        conn,
         "UPDATE findings SET status = %s, suppressed_until = %s, suppression_reason = %s, "
-        "suppressed_at = %s, count_at_suppression = %s, updated_at = %s WHERE id = %s",
+        "suppressed_at = %s, count_at_suppression = %s, updated_at = %s WHERE id = %s "
+        "RETURNING suppressed_at, count_at_suppression",
         (
             new_status,
             suppressed_until if suppressing else None,
@@ -181,22 +206,12 @@ async def set_finding_status(
             finding["id"],
         ),
     )
-    finding.update(suppressed_at=suppressed_at, count_at_suppression=count_then)
-    new_value: dict[str, Any] = {"status": new_status}
-    if suppressing:
-        new_value["suppressed_until"] = suppressed_until.isoformat() if suppressed_until else None
-    await finding_event(
-        conn,
-        finding["id"],
-        actor,
-        "suppressed" if suppressing else event_kind,
-        old={"status": old},
-        new=new_value,
-        reason=reason,
-    )
+    assert row is not None
+    finding.update(row)  # the database may set when the suppression began (ADR 0011)
     finding["status"] = new_status
     if lifted_from is not None and new_status in ("open", "acknowledged"):
-        await notify_thresholds(conn, finding, lifted_from, now)
+        prefix = "triage_threshold" if actor.startswith("operator:") else "finding_threshold"
+        await notify_thresholds(conn, finding, lifted_from, now, prefix=prefix)
 
 
 async def lock_finding(conn: AsyncConnection[Any], uid: Any) -> dict[str, Any] | None:
@@ -307,17 +322,18 @@ async def operator_incident_status(
             raise TransitionError(f"closing needs a disposition: {', '.join(DISPOSITIONS)}")
     elif disposition is not None:
         raise TransitionError("a disposition is given only when closing")
-    await conn.execute(
-        "UPDATE incidents SET status = %s, disposition = %s, updated_at = %s WHERE id = %s",
-        (new_status, disposition, now, incident["id"]),
-    )
     kind = "reopened" if old in REOPENABLE and new_status == "investigating" else "status_changed"
     payload: dict[str, Any] = {"from": old, "to": new_status}
     if disposition is not None:
         payload["disposition"] = disposition
     if reason:
         payload["reason"] = reason
+    # The event first: the database accepts the API role's update only with it (ADR 0011).
     await incident_event(conn, incident["id"], actor, kind, payload)
+    await conn.execute(
+        "UPDATE incidents SET status = %s, disposition = %s, updated_at = %s WHERE id = %s",
+        (new_status, disposition, now, incident["id"]),
+    )
     if new_status in ("resolved", "closed"):
         payload["findings_resolved"] = await resolve_incident_findings(
             conn, incident["id"], actor=actor, reason=f"incident {new_status}", now=now
@@ -325,7 +341,8 @@ async def operator_incident_status(
     if kind == "reopened":
         await notify.emit(
             conn,
-            dedupe_key=f"escalation:{incident['uid']}:reopened:{now.isoformat()}",
+            # A triage key: the worker's escalation: keys are not writable by the API role.
+            dedupe_key=f"operator_escalation:{incident['uid']}:reopened:{now.isoformat()}",
             kind="incident_escalated",
             severity_id=incident["severity_id"],
             payload={

@@ -134,8 +134,6 @@ def test_api_role_triages_but_cannot_write_rule_output(worked: AppDatabase) -> N
     """ADR 0011: the API role updates findings and incidents and writes operator events; it
     cannot create rule output, firing keys, links, findings or incidents."""
     for statement in [
-        "UPDATE findings SET updated_at = updated_at",
-        "UPDATE incidents SET updated_at = updated_at",
         "INSERT INTO finding_events (finding_id, actor, kind) SELECT id, "
         "'operator:00000000-0000-4000-8000-000000000000', 'status_changed' FROM findings LIMIT 1",
         # The API's own ingest meta-detection: its kind, a source, the current bucket.
@@ -147,6 +145,10 @@ def test_api_role_triages_but_cannot_write_rule_output(worked: AppDatabase) -> N
     ]:
         assert _attempt(worked.app_url, statement) is None, statement
     for statement in [
+        # Triage changes need their operator event in the same transaction (see
+        # test_api_role_bypasses.py for the full set).
+        "UPDATE findings SET updated_at = updated_at",
+        "UPDATE incidents SET updated_at = updated_at",
         "INSERT INTO findings (fingerprint, rule_id, rule_rev, title, severity_id, first_seen, "
         "last_seen, group_values, rule_ref, window_seconds, max_lifetime_seconds, notify, "
         "created_at, updated_at) SELECT fingerprint, rule_id, 99, title, severity_id, now(), "
