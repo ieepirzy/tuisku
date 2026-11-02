@@ -65,9 +65,12 @@ incident: open               # open | none
 The field reference is built up from the following pieces.
 
 - **Predicates** are a closed set: `eq`, `neq`, `in`, `not_in`, `gt`, `gte`, `lt`, `lte`,
-  `exists`, `contains`, `startswith`, `cidr`. A predicate whose field is missing or has the
-  wrong type evaluates to **false**; it never raises an error. One hostile field therefore
-  cannot make a row fail evaluation for every rule.
+  `exists`, `contains`, `startswith`, `cidr`. A predicate never raises an error, so one hostile
+  field cannot make a row fail evaluation for every rule. When the field is missing or has the
+  wrong type:
+  - positive predicates are **false**;
+  - the negative predicates `neq` and `not_in` are **true**. A value that is absent is not in
+    the allowlist, so a record cannot dodge an allowlist rule by omitting the field.
 - **Field paths** address either the row envelope or `attributes.*`. The envelope fields are:
   - `kind`
   - `source` (the source's *name*; the stored column is `source_id`)
@@ -104,8 +107,10 @@ These are checked when a pack loads, and a pack that breaks them is rejected:
 detecting:
 
 - Further firings for new groups fold into one **overflow finding** for that rule. Its
-  fingerprint is JCS `["overflow", <rule id>, <rule rev>]`, it has high severity, it records the
-  `group_by` values in its evidence, and it sends a notification.
+  fingerprint is JCS `["overflow", <rule id>, <rule rev>]`. It has high severity, records the
+  `group_by` values in its evidence, and sends a notification for **every new group** folded
+  into it. An overflow finding cannot be suppressed; it can only be resolved, which re-arms the
+  rule.
 - At the live-incident cap, findings that would open new incidents attach instead to one
   overflow incident for the rule, keyed the same way, so nothing is left without an incident.
 - Cap checks run under a per-rule advisory lock, so concurrent workers cannot overshoot.

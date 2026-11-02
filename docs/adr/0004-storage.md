@@ -62,10 +62,12 @@ are mutable working objects that keep a history.
        columns: hypothesis `statement`, tool-call `arguments`/`result`, proposal `parameters`)
        to NULL or empty, and the
        trigger checks that every other column is unchanged (`OLD` equals `NEW`).
-     - **Retention periods:** the worker refuses to load a pack whose longest baseline lookback
-       (`windows × timespan`) is longer than the configured L1/L2 retention period. It also
-       refuses a retention policy shorter than the lookback of any pack already loaded. Either
-       way, retention cannot quietly break baselines.
+     - **Retention periods:** `tuisku_apply_retention()` itself never redacts an L1/L2 row
+       younger than the floor. The floor is the larger of the configured period and the longest
+       baseline lookback (`windows × timespan`) ever recorded in the append-only `pack_loads`
+       table. The worker appends one row there per pack it loads. Because the function takes the
+       maximum over the whole history, a later row cannot lower the floor, so retention cannot
+       quietly break a baseline.
 
    Row and statement triggers that reject `UPDATE`, `DELETE` and `TRUNCATE` on evidence tables
    stay as a second line of defence. `tuisku_app` is never a member of `tuisku_owner`.
