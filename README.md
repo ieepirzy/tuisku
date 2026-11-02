@@ -180,13 +180,28 @@ token with the triage role) and a triage kind. It cannot write notifications at 
 triage causes are written by owner-defined triggers. ADR 0011 lists exactly what each role can
 write.
 
+Tuisku expects a database of its own. `REVOKE TEMP ON DATABASE ... FROM PUBLIC` applies to the
+whole database, so any other application sharing it would lose temporary tables too. Two things
+no grant can stop remain open to any role that can log in:
+
+- **Large objects:** any role can call `lo_create()` and write large objects.
+- **Unbounded writes:** a compromised API process can still insert evidence, and with it
+  queue rows, as fast as Postgres accepts them.
+
+Give the database a disk quota, or at least disk alerts, sized to the retention policy. The
+worker's backlog check (`tuisku.meta.backlog`) pages when the queue or the notification outbox
+falls behind.
+
 Only the worker role writes rule output: `tuisku`-evaluated detections and their links,
 `detection_evidence`, `rule_firings`, `findings`, `incidents`, `finding_detections`,
 `incident_findings`, `finding_overflow_groups`, `pack_loads`, `notification_deliveries`,
 `evaluation_attempts` and `evaluation_dead_letter_rules`, and events with `system` or `rule:`
 actors. Triggers enforce the parts that share a table with ingest. A compromised API process
 therefore cannot forge rule output or firing keys (ADR 0011). A firing key is also accepted
-only for a row linked to its detection in the same transaction.
+only for a row linked to its detection in the same transaction. The worker serializes itself
+with row locks on the worker-only tables `worker_locks` and `group_locks`, never with advisory
+locks, which any role could take. Its connection runs with `lock_timeout` and
+`statement_timeout`, so a lock held elsewhere delays one step and never stalls a pass.
 
 Triggers set the timestamps of the histories, link tables, firing keys, pack loads and
 deliveries to the database clock. Grants for both roles are made by the revision that creates
