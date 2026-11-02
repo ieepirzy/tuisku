@@ -34,13 +34,28 @@ are mutable working objects that keep a history.
        it clears raw bodies and redacts L1/L2 payloads (`attributes`, `unmapped`,
        `explanation`) instead of deleting rows. Each time, it writes an append-only tombstone:
        row id, sha256, actor and time.
-     - **Holds:** it touches nothing in the transitive evidence closure of an incident that
-       is not `closed`, or that closed less than the configured hold period ago. It also leaves
-       alone anything in the closure of a finding that is neither `resolved` nor `expired`.
-     - **What it redacts:** besides L0 bodies and L1/L2 payloads, it also redacts
-       `entity_keys`, the payloads of closed findings and incidents, and the payloads of their
-       `finding_events` and `incident_events` (notes, old and new values) once they pass the hold
-       period. The ids, hashes, kinds, times and statuses stay.
+     - **Holds:** it touches nothing in the transitive evidence closure of an incident or
+       finding that is still held. Whether something is held comes **only** from the
+       append-only `incident_events` and `finding_events`, never from the mutable status
+       columns.
+       - An incident is released only when its latest status event is `closed` and that event
+         is older than the hold period.
+       - A finding is released only when its latest status event is `resolved` or `expired` and
+         that event is older than the hold period.
+       - A trigger sets event timestamps to the database's `now()`, and the app role cannot
+         supply them.
+
+       A compromised API process can still close an incident early, but the evidence stays
+       for the full hold period after that recorded close. That leaves time to notice.
+     - **What it redacts:** besides L0 bodies and L1/L2 payloads, it also redacts:
+       - `entity_keys`
+       - the payloads of closed findings and incidents
+       - the payloads of their `finding_events` and `incident_events` (notes, old and new
+         values)
+       - L4 text: hypothesis statements, tool-call arguments and results, proposal parameters
+
+       It does this once they pass the hold period. The ids, hashes, kinds, times and statuses
+       stay.
      - **Trigger exception:** the evidence-table triggers allow exactly one change, and only
        when `current_user = 'tuisku_owner'`. That change sets the payload columns (`body`,
        `attributes`, `unmapped`, `explanation`, `entity_keys`, event `payload`) to NULL or empty, and the

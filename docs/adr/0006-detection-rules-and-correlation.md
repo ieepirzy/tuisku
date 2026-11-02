@@ -140,14 +140,16 @@ content produced it.
   - **Claiming** is its own short transaction, which commits. A worker selects a batch with
     `FOR UPDATE SKIP LOCKED`, increments each row's `attempts`, and sets a lease
     (`claimed_until`). Expired leases are claimable again, so a crashed worker loses nothing.
-  - **Evaluation** happens in a second transaction. Each row is evaluated under its own
-    `SAVEPOINT`, and its queue row is deleted together with its results.
-  - **Failures:** a row that fails alone is rolled back to its savepoint, with the error
-    recorded. Other rows in the batch are unaffected. Deadlocks (SQLSTATE 40P01), serialization
-    failures and lock timeouts are retried without counting as attempts.
-  - **Dead letter:** after 5 counted attempts, a row moves to `evaluation_dead_letter` and
-    raises a `tuisku.meta.evaluation_failed` meta-detection. A poison row can neither block the
-    queue nor drag innocent rows with it.
+  - **Evaluation** happens in a second transaction. Each *(row, rule)* pair is evaluated
+    under its own `SAVEPOINT`. The queue row is deleted once every rule has either succeeded or
+    been dead-lettered for it.
+  - **Failures:** a pair that fails is rolled back to its savepoint and the error is recorded.
+    Other rules for the same row, and other rows, are unaffected. Deadlocks (SQLSTATE 40P01),
+    serialization failures and lock timeouts are retried without counting as attempts.
+  - **Dead letter:** after 5 counted attempts, that *(row, rule)* pair moves to
+    `evaluation_dead_letter`. It raises a `tuisku.meta.evaluation_failed` meta-detection that
+    names the rule. One slow or failing rule cannot drop the other rules' detections for the
+    row, and a poison row cannot block the queue.
   - **Serialized per group.** Before deciding whether a correlation fires, and before deciding
     whether a finding attaches or opens, a worker takes
     `pg_advisory_xact_lock(<64-bit hash of the key>)` for every key the row touches. It takes

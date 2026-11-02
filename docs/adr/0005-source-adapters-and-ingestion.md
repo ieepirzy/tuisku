@@ -51,8 +51,11 @@ sensor sees.
 
 - **Request size**
   - Body size: 5 MiB. Larger bodies get 413 and are not truncated. OTLP exporters and log
-    shippers usually do not retry a 413, so a deployment must keep its shipper batch sizes below
-    these limits.
+    shippers usually do not retry a 413. Losslessness therefore depends on shipper settings,
+    which the deployment guide states per shipper. For Vector:
+    - the sink batch `max_bytes` must be below the body limit;
+    - the file source's `max_line_bytes` must be at least the line limit, because Vector
+      otherwise drops long lines before they reach Tuisku.
   - Lines per request: 5,000.
   - Line length: 256 KiB.
   - `collector` object: 4 KiB.

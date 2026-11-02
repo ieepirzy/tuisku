@@ -54,7 +54,8 @@ login or rate limits for their products, including agents built on the Claude Ag
 3. **The harness's own tools count too.** A harness may mount other tools beside Tuisku's: other
    MCP servers, shell, web fetch. An injected instruction could use those tools to exfiltrate data
    or act. The runtime contract therefore works like this:
-   - The harness declares its complete tool list and network egress policy at `start`.
+   - The harness answers `start` with its complete tool list and network egress policy. That
+     answer is the declaration.
    - Tuisku compares the declaration with a deployment allowlist for the tier, and **refuses**
      the session if it includes anything beyond Tuisku's tools and that allowlist.
    - The declaration is stored in the session's L4 record (`investigator_sessions`). The
@@ -88,12 +89,19 @@ login or rate limits for their products, including agents built on the Claude Ag
    runtime with no tools other than Tuisku's MCP server, and deny network egress except to the
    model provider and Tuisku.
 4. **The runtime contract** is a small interface that **Tuisku calls on the harness**:
-   - `start(incident, budget, declaration)`
+   - `start(incident, budget) -> declaration`: the harness describes itself. No token is
+     issued yet.
+   - `begin(session, token)`: called only after the declaration passed the check. It hands
+     over the session's `tsk_inv_` token.
    - `continue(session, new_evidence)`
    - `cancel(session)`
 
    A person-bound operator action triggers the call. The harness never holds operator tokens;
    it gets only its session's `tsk_inv_` token.
+
+   **Session lifecycle.** The session's end, its outcome and its token usage are recorded in an
+   append-only `investigator_session_events` table. Only `tuisku_app` writes to it, from the
+   calls above and from token expiry. The L4 trigger's "has not ended" check reads this table.
 
    The caller does not pick the session's **tier**. It comes from deployment policy, optionally
    raised for one incident by an `approve`-role operator, and is recorded at session start.
