@@ -1,6 +1,6 @@
 [
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [
       {
         "attack": [],
@@ -61,7 +61,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [
       {
         "attack": [],
@@ -132,7 +132,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [
       {
         "attack": [],
@@ -193,7 +193,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [
       {
         "attack": [],
@@ -263,7 +263,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [
       {
         "attack": [],
@@ -320,7 +320,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [
       {
         "attack": [],
@@ -379,7 +379,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [
       {
         "attack": [],
@@ -441,7 +441,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {
@@ -465,7 +465,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {
@@ -489,7 +489,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {
@@ -513,11 +513,11 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "error": "malformed outbound refusal line"
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {
@@ -540,7 +540,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {
@@ -562,15 +562,15 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "error": "log asctime is not a valid date"
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "error": "unknown log level"
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [
       {
         "attack": [],
@@ -623,7 +623,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {
@@ -645,7 +645,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {
