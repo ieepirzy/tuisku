@@ -18,6 +18,7 @@ import yaml
 from tests.worker_support import (
     PACKS,
     Clock,
+    RecordingNotifier,
     builtin_rules,
     fired,
     ingest,
@@ -25,6 +26,8 @@ from tests.worker_support import (
     run_worker,
 )
 from tuisku.store.ingest import Transport
+from tuisku.worker import notify
+from tuisku.worker.notify import Backoff
 
 
 def _fixture_files() -> list[Path]:
@@ -87,7 +90,19 @@ def test_pack_fixture(
     assert all(o == "accepted/ok" for o in outcomes), outcomes
     clock = Clock(max(at for at, _, _ in records))
     failing = case.get("fail_rule")
-    if failing is None:
+    refused = case.get("notifier_fails")
+    if refused is not None:
+
+        class Refusing(RecordingNotifier):
+            def deliver(self, notification: dict[str, Any]) -> None:
+                if notification["kind"] == refused:
+                    raise ConnectionError("fixture: notifier down")
+                super().deliver(notification)
+
+        notifier, backoff = Refusing(), Backoff(base_seconds=0, cap_seconds=0)
+        for _ in range(notify.ALERT_AFTER_FAILURES + 2):
+            run_worker(fresh_database_url, rules, clock, notifier, notify_backoff=backoff)
+    elif failing is None:
         run_worker(fresh_database_url, rules, clock)
     else:
 

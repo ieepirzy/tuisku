@@ -43,7 +43,7 @@ from tuisku.adapters import OCSF_VERSION
 from tuisku.rules.fingerprint import lock_key
 from tuisku.rules.match import Match, match
 from tuisku.rules.packs import Correlation, Rule, RuleSet
-from tuisku.rules.predicates import MISSING, FieldPath
+from tuisku.rules.predicates import MISSING, NULL, FieldPath
 from tuisku.store import meta
 from tuisku.store.ingest import enqueue
 from tuisku.store.lifecycle import set_finding_status
@@ -73,6 +73,7 @@ class WorkerConfig:
     allowed_lateness: timedelta = timedelta(hours=24)
     max_window_rows: int = 50_000
     retry_backoff: timedelta = timedelta(seconds=30)
+    notify_backoff: notify.Backoff = field(default_factory=notify.Backoff)
 
 
 @dataclass(slots=True)
@@ -202,7 +203,7 @@ def window_filters(rule: Rule, env: Mapping[str, Any]) -> list[sql.Composable]:
         if expr is None:
             continue
         raw = path.resolve(env)
-        if raw is MISSING:
+        if raw is MISSING or raw is NULL:
             out.append(sql.SQL("{} IS NULL").format(expr))
         else:
             text = _sql_text(raw, path)
@@ -366,7 +367,9 @@ class Worker:
         for queue_row in await self.claim(conn):
             stats.claimed += 1
             await self._process(conn, queue_row, stats)
-        stats.delivered = await notify.drain(conn, self.notifier, self.clock())
+        stats.delivered = await notify.drain(
+            conn, self.notifier, self.clock(), backoff=self.config.notify_backoff
+        )
         return stats
 
     async def run_until_idle(self, conn: AsyncConnection[Any], max_passes: int = 100) -> Stats:
@@ -730,7 +733,8 @@ class Worker:
             elif c.field is not None:
                 raw = c.field.resolve(row)
                 if c.type == "value_count":
-                    value = None if raw is None else repr(raw)
+                    # Missing and null fields are not values to count.
+                    value = None if raw is MISSING or raw is NULL else repr(raw)
                 else:
                     ok = isinstance(raw, int | float) and not isinstance(raw, bool)
                     value = float(raw) if ok else 0.0

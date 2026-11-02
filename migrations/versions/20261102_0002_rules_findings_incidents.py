@@ -317,22 +317,60 @@ END
 $$;
 """
 
-# A firing key must point at a detection of its own rule, so a forged key (for example a
-# 'member' row naming another rule) cannot make the worker skip a row for a rule.
+# A firing key must be consistent with what the worker wrote, so a forged key cannot make the
+# worker skip a row for a rule:
+# - every key points at a tuisku detection whose identity is the key's rule;
+# - a 'member' or 'link' key's row is already linked to that detection, through
+#   detection_observations or detection_evidence;
+# - a 'row' or 'correlation' key's detection was inserted by this very transaction. A row whose
+#   inserting transaction is still in progress and that we can see can only be our own (another
+#   session's uncommitted rows are invisible), so pg_xact_status() of its xmin, widened to 64
+#   bits with the current epoch, must be 'in progress'.
 FIRING_IDENTITY_FUNCTION_SQL = """
 CREATE FUNCTION tuisku_check_firing_identity() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
+DECLARE
+    det_xmin bigint;
+    cur      bigint;
+    full_xid bigint;
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM public.detections d
-        WHERE d.id = NEW.firing_detection_id AND d.evaluator = 'tuisku'
-          AND d.identity = NEW.rule_id::text
-    ) THEN
+    SELECT d.xmin::text::bigint INTO det_xmin FROM public.detections d
+    WHERE d.id = NEW.firing_detection_id AND d.evaluator = 'tuisku'
+      AND d.identity = NEW.rule_id::text;
+    IF NOT FOUND THEN
         RAISE EXCEPTION 'rule_firings: detection % is not output of rule %',
             NEW.firing_detection_id, NEW.rule_id
             USING ERRCODE = 'check_violation';
+    END IF;
+    IF NEW.kind IN ('member', 'link') THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM public.detection_observations l
+            WHERE l.detection_id = NEW.firing_detection_id
+              AND l.observation_id = NEW.observation_id
+        ) AND NOT EXISTS (
+            SELECT 1 FROM public.detection_evidence e
+            WHERE e.detection_id = NEW.firing_detection_id
+              AND (e.observation_id = NEW.observation_id
+                   OR e.detection_ref_id = NEW.detection_id)
+        ) THEN
+            RAISE EXCEPTION 'rule_firings: % key for a row not linked to detection %',
+                NEW.kind, NEW.firing_detection_id
+                USING ERRCODE = 'check_violation';
+        END IF;
+    ELSE
+        cur := pg_current_xact_id()::text::bigint;
+        full_xid := ((cur >> 32) << 32) + det_xmin;
+        IF full_xid - cur > 2147483648 THEN
+            full_xid := full_xid - 4294967296;  -- the xid is from the previous epoch
+        END IF;
+        IF full_xid < 3 OR pg_xact_status(full_xid::text::xid8) IS DISTINCT FROM 'in progress'
+        THEN
+            RAISE EXCEPTION 'rule_firings: % key for detection % not written by this transaction',
+                NEW.kind, NEW.firing_detection_id
+                USING ERRCODE = 'check_violation';
+        END IF;
     END IF;
     RETURN NEW;
 END

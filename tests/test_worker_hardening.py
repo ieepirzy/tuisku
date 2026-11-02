@@ -156,14 +156,82 @@ def test_one_bad_notification_does_not_block_the_rest(fresh_database_url: str) -
     rows = dict(query(url, "SELECT status, count(*) FROM notification_deliveries GROUP BY status"))
     assert rows["delivered"] == 2 and rows["failed"] >= 1
 
-    async def drain_until_given_up(conn: Any) -> int:
-        for _ in range(notify.MAX_DELIVERY_FAILURES + 2):
-            await notify.drain(conn, notifier, T)
-        return 0
 
-    run_async(url, drain_until_given_up)
+def test_undeliverable_notification_alerts_and_keeps_retrying(fresh_database_url: str) -> None:
+    url = fresh_database_url
+    ingest(url, "h", "harava", lines((T, "agents")))
+    notifier = FlakyNotifier()  # incident_opened never delivers
+    backoff = notify.Backoff(base_seconds=0, cap_seconds=0)
+    clock = Clock(T + timedelta(minutes=5))
+    for _ in range(notify.ALERT_AFTER_FAILURES + 5):
+        run_worker(url, builtin_rules(), clock, notifier, notify_backoff=backoff)
     [(failed,)] = query(url, "SELECT count(*) FROM notification_deliveries WHERE status = 'failed'")
-    assert failed == notify.MAX_DELIVERY_FAILURES  # retried, then left for an operator
+    assert failed > notify.ALERT_AFTER_FAILURES  # never given up
+    metas = query(
+        url,
+        "SELECT subject FROM detections WHERE kind = 'tuisku.meta.notification_undeliverable'",
+    )
+    assert metas == [("incident_opened",)]  # raised once
+    assert "tuisku-meta.notification_undeliverable" in fired(url)
+
+
+def test_failed_delivery_waits_for_its_backoff(fresh_database_url: str) -> None:
+    url = fresh_database_url
+    ingest(url, "h", "harava", lines((T, "agents")))
+    notifier = FlakyNotifier()
+    backoff = notify.Backoff(base_seconds=3600, cap_seconds=3600)
+    clock = Clock(T + timedelta(minutes=5))
+    for _ in range(5):  # many passes, one failure: the retry is an hour away
+        run_worker(url, builtin_rules(), clock, notifier, notify_backoff=backoff)
+    [(failed,)] = query(url, "SELECT count(*) FROM notification_deliveries WHERE status = 'failed'")
+    assert failed == 1
+
+
+def test_short_outage_on_a_busy_queue_loses_nothing(fresh_database_url: str) -> None:
+    """Many notifications, a notifier that is down for a moment, and a worker draining in a
+    tight loop: every notification arrives exactly once and nothing is escalated."""
+    import time
+
+    url = fresh_database_url
+    callers = [f"svc-{i}" for i in range(30)]
+    ingest(
+        url, "h", "harava", lines(*[(T + timedelta(seconds=i), c) for i, c in enumerate(callers)])
+    )
+    down_until = time.monotonic() + 1.5
+
+    class Outage(RecordingNotifier):
+        def deliver(self, notification: dict[str, Any]) -> None:
+            if time.monotonic() < down_until:
+                raise ConnectionError("pager restarting")
+            super().deliver(notification)
+
+    notifier = Outage()
+    backoff = notify.Backoff(base_seconds=0.05, cap_seconds=0.5)
+    clock = Clock(T + timedelta(minutes=5))
+    deadline = time.monotonic() + 15
+    run_worker(url, builtin_rules(), clock, notifier, notify_backoff=backoff)
+    while time.monotonic() < deadline:
+        [(pending,)] = query(
+            url,
+            "SELECT count(*) FROM notifications n WHERE NOT EXISTS (SELECT 1 FROM "
+            "notification_deliveries d WHERE d.notification_id = n.id AND d.status = 'delivered')",
+        )
+        if pending == 0 and time.monotonic() > down_until:
+            break
+        run_async(url, lambda conn: notify.drain(conn, notifier, T, backoff=backoff))
+    [(total,)] = query(url, "SELECT count(*) FROM notifications")
+    assert total == 30  # one finding_opened per caller (service-caller rule)
+    uids = [n["uid"] for n in notifier.sent]
+    assert len(uids) == total and len(set(uids)) == total
+    [(max_failures,)] = query(
+        url,
+        "SELECT coalesce(max(c), 0) FROM (SELECT count(*) AS c FROM notification_deliveries "
+        "WHERE status = 'failed' GROUP BY notification_id) x",
+    )
+    # Waits of 0.05, 0.1, 0.2, 0.4, 0.5 s... fit at most 6 failures into a 1.5 s outage, however
+    # often the worker drains; without backoff a tight loop burns the whole retry budget.
+    assert max_failures <= 7
+    assert query(url, "SELECT count(*) FROM detections WHERE kind LIKE 'tuisku.meta.%'") == [(0,)]
 
 
 def test_worker_loop_survives_a_failing_pass(
@@ -362,3 +430,64 @@ def test_only_new_rows_are_enqueued() -> None:
                     if "INSERT INTO evaluation_queue" in node.value and func.name != "enqueue":
                         found.add((path.relative_to(src).as_posix(), func.name))
     assert found == allowed
+
+
+# --- round 2: late rows never expire a live finding; value_count skips missing fields ---------
+
+
+def test_late_row_attaches_without_expiring_or_unsuppressing(fresh_database_url: str) -> None:
+    url = fresh_database_url
+    clock = Clock(T)
+    uid = _one_finding(url, clock)  # agents, first_seen 10:00, window 1h
+    triager = operator_token(url, Role.TRIAGE)
+    with client(url, clock=lambda: clock.now) as c:
+        body = {
+            "status": "suppressed",
+            "reason": "maintenance",
+            "suppressed_until": (T + timedelta(minutes=50)).isoformat(),
+        }
+        assert (
+            c.post(f"/v1/findings/{uid}/status", json=body, headers=auth(triager)).status_code
+            == 200
+        )
+    # A refusal stamped 08:30 arrives at 10:05: older than first_seen by more than the window.
+    late = T - timedelta(minutes=90)
+    ingest(
+        url,
+        "h",
+        "harava",
+        [(T + timedelta(minutes=5), lines((late, "agents"))[0][1], Transport.NDJSON)],
+    )
+    clock.advance(minutes=6)
+    notifier = RecordingNotifier()
+    run_worker(url, builtin_rules(), clock, notifier)
+    rows = query(url, "SELECT status, count, first_seen, last_seen FROM findings")
+    assert rows == [("suppressed", 2, T, T)]  # still live, still suppressed, first_seen kept
+    assert notifier.sent == []
+    assert query(
+        url, "SELECT count(*) FROM finding_events WHERE new_value->>'status' = 'expired'"
+    ) == [(0,)]
+    [(payload,)] = query(
+        url, "SELECT payload FROM finding_events WHERE kind = 'detection_attached'"
+    )
+    assert payload["late"] is True
+
+
+def test_value_count_ignores_missing_values(fresh_database_url: str, tmp_path: Path) -> None:
+    url = fresh_database_url
+    doc = _count_rule(R1, gte=2, timespan="1h")
+    doc["correlation"] = {
+        "type": "value_count",
+        "field": "attributes.caller",
+        "timespan": "1h",
+        "condition": {"gte": 2},
+    }
+    doc["finding"]["group_by"] = []
+    rules = load_rule_set([write_pack(tmp_path, [doc])])
+    # One plain caller, one Harava did not name plainly (no caller attribute): one value.
+    ingest(url, "h", "harava", lines((T, "x"), (T + timedelta(minutes=1), "two words")))
+    run_worker(url, rules, Clock(T + timedelta(minutes=5)))
+    assert fired(url) == []
+    ingest(url, "h", "harava", lines((T + timedelta(minutes=2), "y")))
+    run_worker(url, rules, Clock(T + timedelta(minutes=6)))
+    assert fired(url) == ["testpack.burst"]

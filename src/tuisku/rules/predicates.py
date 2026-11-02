@@ -36,6 +36,18 @@ class _Missing:
 MISSING: Final = _Missing()
 
 
+class _Null:
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "NULL"
+
+
+# An explicit JSON null (or SQL NULL): grouping keeps it apart from a missing field, while
+# predicates treat it exactly like a missing one.
+NULL: Final = _Null()
+
+
 class PathError(ValueError):
     """A field path that is not well formed (raised at pack load, never at evaluation)."""
 
@@ -67,7 +79,8 @@ class FieldPath:
         return cls(text, tuple(segments))
 
     def resolve(self, envelope: Mapping[str, Any]) -> Any:
-        """The value at this path in ``envelope``, or :data:`MISSING`. Never raises."""
+        """The value at this path in ``envelope``: :data:`NULL` for an explicit null,
+        :data:`MISSING` when the path does not exist. Never raises."""
         current: Any = envelope.get(str(self.segments[0]), MISSING) if self.segments else MISSING
         for seg in self.segments[1:]:
             if current is MISSING or current is None:
@@ -83,7 +96,7 @@ class FieldPath:
                 current = current.get(seg, MISSING)
             else:
                 return MISSING
-        return MISSING if current is None else current
+        return NULL if current is None else current
 
 
 def _is_number(value: Any) -> bool:
@@ -169,6 +182,8 @@ def evaluate(op: str, field: Any, value: Any) -> bool:
     ``value`` must already be validated for ``op`` (lists for ``in``/``not_in``, parsed networks
     for ``cidr``); see :func:`prepare_value`.
     """
+    if field is NULL:
+        field = MISSING  # for predicates, null counts as missing
     try:
         if op == "neq":
             return not _positive("eq", field, value)

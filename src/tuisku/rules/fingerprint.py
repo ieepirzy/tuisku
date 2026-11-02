@@ -14,7 +14,7 @@ from typing import Any
 
 import rfc8785
 
-from tuisku.rules.predicates import MISSING
+from tuisku.rules.predicates import MISSING, NULL
 
 MAX_GROUP_VALUE_CHARS = 256  # ADR 0006 hard limit: longer values group by prefix and hash
 _JS_SAFE = 2**53 - 1  # JCS numbers are IEEE doubles; larger integers are grouped as text
@@ -37,6 +37,8 @@ def group_value(value: Any) -> Any:
     """
     if value is MISSING:
         return {"missing": True}
+    if value is NULL:
+        return None
     if value is None or isinstance(value, bool | float):
         return value
     if isinstance(value, int):

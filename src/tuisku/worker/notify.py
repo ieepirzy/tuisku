@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -21,6 +22,7 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
 from tuisku import db
+from tuisku.store import meta
 
 log = logging.getLogger("tuisku.notify")
 
@@ -55,20 +57,41 @@ async def emit(
     return row is not None
 
 
-MAX_DELIVERY_FAILURES = 10
+ALERT_AFTER_FAILURES = 10
 _DRAIN_LOCK = 0x7475_6973_6B75_6E6F  # one drainer at a time; rows are never locked or updated
 
 
+@dataclass(frozen=True, slots=True)
+class Backoff:
+    """Retry spacing for failed deliveries, measured on the database clock from the last
+    failed attempt: ``base * 2**(failures - 1)`` seconds, capped at ``cap``."""
+
+    base_seconds: float = 5.0
+    cap_seconds: float = 300.0
+    alert_after: int = ALERT_AFTER_FAILURES
+
+
+DEFAULT_BACKOFF = Backoff()
+
+
 async def drain(
-    conn: AsyncConnection[Any], notifier: Notifier, now: datetime, limit: int = 500
+    conn: AsyncConnection[Any],
+    notifier: Notifier,
+    now: datetime,
+    limit: int = 500,
+    backoff: Backoff = DEFAULT_BACKOFF,
 ) -> int:
-    """Deliver pending notifications in id order; returns how many were delivered.
+    """Deliver the notifications that are due, in id order; returns how many were delivered.
 
     The outbox and the delivery log are append-only: delivery appends a ``delivered`` row, and
     a notifier error appends a ``failed`` row and moves on, so one bad notification never
-    blocks the others. A notification is retried until it has failed
-    ``MAX_DELIVERY_FAILURES`` times. Delivery is at-least-once: a crash after delivering and
-    before committing re-delivers.
+    blocks the others. A failed notification is due again after an exponential backoff from
+    its last failure, capped at ``backoff.cap_seconds``, so a short outage costs a few retries
+    however busy the queue is. Nothing is ever given up: at ``backoff.alert_after`` failures a
+    ``tuisku.meta.notification_undeliverable`` meta-detection is raised (the ``tuisku-meta``
+    pack pages on it, which a deployment routes to another channel) and retries continue at
+    the capped interval. Delivery is at-least-once: a crash after delivering and before
+    committing re-delivers.
     """
     delivered = 0
     async with conn.transaction():
@@ -77,12 +100,17 @@ async def drain(
             return 0  # another worker is draining
         rows = await db.fetch_all(
             conn,
-            "SELECT n.id, n.uid, n.kind, n.severity_id, n.payload, n.created_at "
-            "FROM notifications n WHERE NOT EXISTS (SELECT 1 FROM notification_deliveries d "
-            "  WHERE d.notification_id = n.id AND d.status = 'delivered') "
-            "AND (SELECT count(*) FROM notification_deliveries d WHERE d.notification_id = n.id "
-            "  AND d.status = 'failed') < %s ORDER BY n.id LIMIT %s",
-            (MAX_DELIVERY_FAILURES, limit),
+            "WITH pending AS (SELECT n.id, n.uid, n.kind, n.severity_id, n.payload, n.created_at, "
+            "  (SELECT count(*) FROM notification_deliveries d WHERE d.notification_id = n.id "
+            "   AND d.status = 'failed') AS failures, "
+            "  (SELECT max(d.at) FROM notification_deliveries d WHERE d.notification_id = n.id "
+            "   AND d.status = 'failed') AS last_failed "
+            "  FROM notifications n WHERE NOT EXISTS (SELECT 1 FROM notification_deliveries d "
+            "  WHERE d.notification_id = n.id AND d.status = 'delivered')) "
+            "SELECT * FROM pending WHERE failures = 0 OR last_failed + make_interval(secs => "
+            "  least(%s::float8, %s::float8 * power(2, least(failures - 1, 30)))) <= now() "
+            "ORDER BY id LIMIT %s",
+            (backoff.cap_seconds, backoff.base_seconds, limit),
         )
         for row in rows:
             message = {
@@ -105,4 +133,15 @@ async def drain(
                 "VALUES (%s, %s, %s)",
                 (row["id"], status, error),
             )
+            if status == "failed" and row["failures"] + 1 == backoff.alert_after:
+                await meta.record_notification_undeliverable(
+                    conn,
+                    kind=row["kind"],
+                    details={
+                        "notification_uid": str(row["uid"]),
+                        "failures": backoff.alert_after,
+                        "error": error,
+                    },
+                    now=now,
+                )
     return delivered

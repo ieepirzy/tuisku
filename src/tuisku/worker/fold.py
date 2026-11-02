@@ -409,6 +409,7 @@ async def _bump(
     entity_keys: list[str],
     latest: dict[str, Any] | None,
     now: datetime,
+    keep_first_seen: bool = False,
 ) -> tuple[int, int]:
     """Increment count, move last_seen (and first_seen for a late row). Returns the old and new
     counts; updates ``finding`` in place."""
@@ -421,10 +422,11 @@ async def _bump(
     row = await db.fetch_one(
         conn,
         "UPDATE findings SET count = count + 1, last_seen = greatest(last_seen, %s), "
-        "first_seen = least(first_seen, %s), severity_id = greatest(severity_id, %s), "
+        "first_seen = CASE WHEN %s THEN first_seen ELSE least(first_seen, %s) END, "
+        "severity_id = greatest(severity_id, %s), "
         "entity_keys = %s, explanation = explanation || %s, updated_at = %s WHERE id = %s "
         "RETURNING count, last_seen, first_seen, severity_id, entity_keys",
-        (t, t, severity_id, keys, Jsonb(extra), now, finding["id"]),
+        (t, keep_first_seen, t, severity_id, keys, Jsonb(extra), now, finding["id"]),
     )
     assert row is not None
     old = finding["count"]
@@ -484,6 +486,8 @@ async def _attach_detection(
     firing: Firing,
     limits: Limits,
     now: datetime,
+    *,
+    late: bool = False,
 ) -> None:
     rule = firing.rule
     await conn.execute(
@@ -498,6 +502,7 @@ async def _attach_detection(
         entity_keys=firing.entity_keys,
         latest=firing.explanation.get("correlation"),
         now=now,
+        keep_first_seen=late,
     )
     await finding_event(
         conn,
@@ -505,7 +510,7 @@ async def _attach_detection(
         rule.actor,
         "detection_attached",
         new={"count": finding["count"]},
-        payload={"detection_uid": firing.detection_uid},
+        payload={"detection_uid": firing.detection_uid, **({"late": True} if late else {})},
     )
     await _after_attach(
         conn,
@@ -520,6 +525,12 @@ async def _attach_detection(
     )
 
 
+def is_late_for(finding: dict[str, Any], t: datetime) -> bool:
+    """A row older than a live finding's first_seen, beyond its window. It attaches without
+    moving first_seen; it must never expire (or un-suppress) a finding that is still live."""
+    return finding["status"] in ATTACHABLE and t < finding["first_seen"]
+
+
 async def fold_firing(
     conn: AsyncConnection[Any], firing: Firing, limits: Limits, now: datetime
 ) -> dict[str, Any]:
@@ -530,6 +541,9 @@ async def fold_firing(
     if existing is not None:
         if attachable_at(existing, firing.eval_time):
             await _attach_detection(conn, existing, firing, limits, now)
+            return existing
+        if is_late_for(existing, firing.eval_time):
+            await _attach_detection(conn, existing, firing, limits, now, late=True)
             return existing
         await set_finding_status(
             conn,
@@ -555,6 +569,8 @@ async def fold_firing(
     overflow = await _lock_attachable(conn, ofp)
     if overflow is not None and attachable_at(overflow, firing.eval_time):
         await _attach_detection(conn, overflow, firing, limits, now)
+    elif overflow is not None and is_late_for(overflow, firing.eval_time):
+        await _attach_detection(conn, overflow, firing, limits, now, late=True)
     else:
         if overflow is not None:
             await set_finding_status(

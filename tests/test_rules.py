@@ -14,7 +14,14 @@ from tests.worker_support import PACKS
 from tuisku.rules.fingerprint import finding_fingerprint, group_value, overflow_fingerprint
 from tuisku.rules.match import match
 from tuisku.rules.packs import PackError, load_rule_set
-from tuisku.rules.predicates import MISSING, FieldPath, PathError, evaluate, prepare_value
+from tuisku.rules.predicates import (
+    MISSING,
+    NULL,
+    FieldPath,
+    PathError,
+    evaluate,
+    prepare_value,
+)
 from tuisku.store.lifecycle import INCIDENT_STATES, attachable_at, incident_transition_allowed
 from tuisku.worker.metrics import Sample, series_deltas
 
@@ -101,7 +108,8 @@ def test_field_paths() -> None:
     assert FieldPath.parse("attributes.labels.stage").resolve(env) == "hop"
     assert FieldPath.parse("attributes.findings.0.detector").resolve(env) == "email"
     assert FieldPath.parse("attributes.findings.5.detector").resolve(env) is MISSING
-    assert FieldPath.parse("attributes.nothing").resolve(env) is MISSING
+    assert FieldPath.parse("attributes.nothing").resolve(env) is NULL
+    assert FieldPath.parse("attributes.nothing.x").resolve(env) is MISSING
     assert FieldPath.parse("attributes.labels.stage.x").resolve(env) is MISSING
     assert FieldPath.parse("identity").resolve(env) is MISSING
     for bad in ["", "attributes", "unmapped.x", "a..b", "source_id", 3]:
@@ -485,3 +493,27 @@ def test_window_filters_push_static_predicates_and_group_values() -> None:
         "(t.attributes #>> '{labels,stage}') = 'hop'",
     ]
     assert isinstance(window_filters(trend, env)[0], sql.Composable)
+
+
+def test_null_counts_as_missing_for_predicates_but_not_for_grouping(tmp_path: Path) -> None:
+    for op, value, expected in [
+        ("exists", None, False),
+        ("eq", "a", False),
+        ("neq", "a", True),
+        ("not_in", ("a",), True),
+        ("in", ("a",), False),
+    ]:
+        assert evaluate(op, NULL, value) is expected
+    rule_doc = _rule(
+        select={"layer": "observation", "kind": "harava.refusal"},
+        finding={"group_by": ["attributes.caller"], "window": "1h", "max_lifetime": "1d"},
+    )
+    [rule] = load_rule_set([_pack(tmp_path, rule_doc)]).rules
+    base = {"layer": "observation", "kind": "harava.refusal"}
+    explicit = match(rule, base | {"attributes": {"caller": None}})
+    absent = match(rule, base | {"attributes": {}})
+    assert explicit is not None and absent is not None
+    assert explicit.group_values == (None,) and absent.group_values == ({"missing": True},)
+    assert finding_fingerprint(RID, 1, explicit.group_values) != finding_fingerprint(
+        RID, 1, absent.group_values
+    )

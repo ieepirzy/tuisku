@@ -31,12 +31,14 @@ LIMIT_EXCEEDED = "tuisku.meta.source_limit_exceeded"
 RATE_LIMITED = "tuisku.meta.source_rate_limited"
 INVALID_ENVELOPE = "tuisku.meta.invalid_envelope"
 EVALUATION_FAILED = "tuisku.meta.evaluation_failed"
+NOTIFICATION_UNDELIVERABLE = "tuisku.meta.notification_undeliverable"
 
 _TITLES = {
     LIMIT_EXCEEDED: ("Source exceeded an ingest limit", Severity.MEDIUM),
     RATE_LIMITED: ("Source was rate limited", Severity.LOW),
     INVALID_ENVELOPE: ("Source sent malformed ingest envelopes", Severity.LOW),
     EVALUATION_FAILED: ("A rule failed to evaluate a row", Severity.MEDIUM),
+    NOTIFICATION_UNDELIVERABLE: ("A notification keeps failing to deliver", Severity.HIGH),
 }
 
 
@@ -93,6 +95,25 @@ async def record_evaluation_failed(
         details=details,
         now=now,
         rule_name="evaluation",
+    )
+
+
+async def record_notification_undeliverable(
+    conn: AsyncConnection[Any], *, kind: str, details: dict[str, Any], now: datetime
+) -> bool:
+    """A notification failed ALERT_AFTER_FAILURES deliveries (ADR 0007). The subject is the
+    notification's kind, so the meta-detection (and the page it causes) is at most one per
+    kind per 5-minute bucket, even when the page about it fails in turn."""
+    return await _record(
+        conn,
+        None,
+        None,
+        NOTIFICATION_UNDELIVERABLE,
+        kind[:200],
+        n=1,
+        details=details,
+        now=now,
+        rule_name="notifications",
     )
 
 

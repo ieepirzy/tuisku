@@ -170,8 +170,9 @@ _FORGED_TIME_INSERTS = {
     ),
     "rule_firings.created_at": (
         "INSERT INTO rule_firings (rule_id, rule_rev, kind, observation_id, group_key, eval_time, "
-        "firing_detection_id, created_at) SELECT d.identity::uuid, 999, 'link', o.id, "
-        "sha256('x'), now(), d.id, '2000-01-01Z' FROM detections d, observations o "
+        "firing_detection_id, created_at) SELECT d.identity::uuid, 999, 'link', "
+        "l.observation_id, sha256('x'), now(), d.id, '2000-01-01Z' FROM detections d "
+        "JOIN detection_observations l ON l.detection_id = d.id "
         "WHERE d.evaluator = 'tuisku' AND d.kind NOT LIKE 'tuisku.meta.%%' LIMIT 1 "
         "RETURNING created_at"
     ),
@@ -196,3 +197,52 @@ def test_link_firing_and_load_timestamps_come_from_the_database(
         [(now,)] = conn.execute("SELECT now()").fetchall()
         conn.rollback()
     assert rows == [(now,)], column
+
+
+_FORGED_KEYS = {
+    # The review's forged member key: right rule, real detection, a row it never linked.
+    "member key for an unlinked row": (
+        "INSERT INTO rule_firings (rule_id, rule_rev, kind, observation_id, group_key, "
+        "eval_time, firing_detection_id) SELECT d.identity::uuid, 999, 'member', o.id, "
+        "sha256('x'), now(), d.id FROM detections d, observations o "
+        "WHERE d.evaluator = 'tuisku' AND d.kind NOT LIKE 'tuisku.meta.%' "
+        "AND NOT EXISTS (SELECT 1 FROM detection_observations l WHERE l.detection_id = d.id "
+        "  AND l.observation_id = o.id) LIMIT 1",
+        "not linked",
+    ),
+    "correlation key for a committed detection": (
+        "INSERT INTO rule_firings (rule_id, rule_rev, kind, observation_id, group_key, "
+        "window_start, eval_time, firing_detection_id) SELECT d.identity::uuid, 999, "
+        "'correlation', o.id, sha256('y'), now(), now(), d.id FROM detections d, observations o "
+        "WHERE d.evaluator = 'tuisku' AND d.kind NOT LIKE 'tuisku.meta.%' LIMIT 1",
+        "not written by this transaction",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_FORGED_KEYS))
+def test_forged_firing_keys_are_refused_for_the_app_role(worked: AppDatabase, case: str) -> None:
+    statement, message = _FORGED_KEYS[case]
+    exc = _attempt(worked.app_url, statement)
+    assert isinstance(exc, errors.CheckViolation), exc
+    assert message in str(exc)
+
+
+def test_a_key_for_a_detection_written_in_the_same_transaction_is_accepted(
+    worked: AppDatabase,
+) -> None:
+    with psycopg.connect(worked.app_url) as conn:
+        [(det_id, rule_id)] = conn.execute(
+            "INSERT INTO detections (evaluator, authorship, kind, identity, title, severity_id, "
+            "received_at, eval_time, ocsf_version, rule_ref) VALUES ('tuisku', 'local', "
+            "'testpack.x', '77777777-7777-4777-8777-777777777777', 't', 1, now(), now(), "
+            "'1.9.0', '{}') RETURNING id, identity"
+        ).fetchall()
+        with conn.transaction():  # a savepoint, as in the worker
+            conn.execute(
+                "INSERT INTO rule_firings (rule_id, rule_rev, kind, observation_id, group_key, "
+                "eval_time, firing_detection_id) SELECT %s::uuid, 1, 'row', o.id, sha256('z'), "
+                "now(), %s FROM observations o LIMIT 1",
+                (rule_id, det_id),
+            )
+        conn.rollback()

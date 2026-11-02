@@ -93,7 +93,10 @@ in its pack's `fixtures/`, run through the real adapters by `tests/test_packs.py
 
 Notifications go to an append-only outbox and are delivered after each evaluation commits;
 each delivery or notifier failure appends to the append-only `notification_deliveries` log, so
-one failing notification never blocks the others and none can be deleted unnoticed. The only
+one failing notification never blocks the others and none can be deleted unnoticed. A failed
+delivery is retried after an exponential backoff from its last failure (5 s doubling, capped
+at 5 minutes) and never dropped; after 10 failures a `tuisku.meta.notification_undeliverable`
+meta-detection pages through `tuisku-meta` (route it to another channel). The only
 notifier today writes one JSON line per notification to the `tuisku.notify` logger; routing
 them to people is a deployment decision. A rule that fails 5 times on a row is dead-lettered and
 pages (`evaluation_dead_lettered`), and `tuisku-meta` turns the resulting

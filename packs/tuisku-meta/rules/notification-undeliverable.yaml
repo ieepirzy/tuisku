@@ -1,0 +1,18 @@
+id: 5e7d2c1a-8b4f-4a6e-9d3c-2f1e0a9b8c7d
+rev: 1
+name: tuisku-meta.notification_undeliverable
+title: Notifications keep failing to deliver
+description: >-
+  Selects tuisku.meta.notification_undeliverable meta-detections: a notification failed ten
+  deliveries and is still being retried. A deployment routes this rule's pages to a channel
+  other than the one that is failing. Grouped by the failing notification's kind.
+severity: high
+select:
+  layer: detection
+  kind: tuisku.meta.notification_undeliverable
+finding:
+  group_by: [attributes.subject]
+  window: 6h
+  max_lifetime: 7d
+  notify: each
+incident: none
