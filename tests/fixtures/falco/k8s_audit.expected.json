@@ -51,7 +51,10 @@
     "observations": [
       {
         "attributes": {
-          "event_time_ns": 1793362800000000000
+          "event_time_ns": 1793362800000000000,
+          "metadata": {
+            "collector": "falco-k8saudit-0"
+          }
         },
         "community_id": null,
         "correlation": {},
@@ -79,7 +82,6 @@
             "ka.verb": "create"
           },
           "record": {
-            "hostname": "falco-k8saudit-0",
             "time": "2026-10-30T12:20:00.000000000Z"
           }
         }
@@ -128,7 +130,11 @@
     ],
     "observations": [
       {
-        "attributes": {},
+        "attributes": {
+          "metadata": {
+            "collector": "falco-cloudtrail-0"
+          }
+        },
         "community_id": null,
         "correlation": {},
         "entity_keys": [
@@ -145,8 +151,87 @@
             "ct.user": "example-admin"
           },
           "record": {
-            "hostname": "falco-cloudtrail-0",
             "time": "2026-10-30T12:21:00.000000000Z"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [
+          "k8s:default/web-2",
+          "k8s-ns:default",
+          "ip:192.0.2.10"
+        ],
+        "event_time": "2026-10-30T12:22:00+00:00",
+        "explanation": {
+          "matched_rule": "Attach/Exec Pod",
+          "output": "12:22:00.000000000: Notice Attach/Exec to pod (user=dev@example.com pod=web-2 resource=pods ns=default action=exec command=sh)",
+          "priority": "Notice",
+          "source": "k8s_audit",
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Attach/Exec Pod",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "Notice",
+          "rule": "Attach/Exec Pod",
+          "source": "k8s_audit",
+          "tags": [
+            "k8s"
+          ]
+        },
+        "severity": 2,
+        "title": "Attach/Exec Pod"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "event_time_ns": 1793362920000000000,
+          "metadata": {
+            "collector": "falco-k8saudit-0"
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [
+          "k8s:default/web-2",
+          "k8s-ns:default",
+          "ip:192.0.2.10"
+        ],
+        "event_time": "2026-10-30T12:22:00+00:00",
+        "flags": [
+          "source_ips_forwarded"
+        ],
+        "kind": "falco.event",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "output_fields": {
+            "evt.time": 1793362920000000000,
+            "ka.sourceips": [
+              "203.0.113.66",
+              "198.51.100.77",
+              "192.0.2.10"
+            ],
+            "ka.target.name": "web-2",
+            "ka.target.namespace": "default",
+            "ka.target.resource": "pods",
+            "ka.verb": "create"
+          },
+          "record": {
+            "time": "2026-10-30T12:22:00.000000000Z"
           }
         }
       }

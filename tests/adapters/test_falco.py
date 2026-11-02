@@ -172,8 +172,43 @@ class TestLayerSplit:
     def test_plugin_hostname_is_collector_not_asset(self) -> None:
         obs = _parse(_first("k8s_audit")).observations[0]
         assert "device" not in obs.attributes
-        assert obs.unmapped["record"]["hostname"] == "falco-k8saudit-0"
+        assert obs.attributes["metadata"] == {"collector": "falco-k8saudit-0"}
         assert not any(k.startswith("host:") for k in obs.entity_keys)
+
+    @pytest.mark.parametrize("source", [None, 7, "s" * 65], ids=["missing", "int", "long"])
+    def test_missing_or_invalid_source_is_not_syscall(self, source: object) -> None:
+        rec = _first("shell_in_container")
+        if source is None:
+            del rec["source"]
+        else:
+            rec["source"] = source
+        obs = _parse(rec).observations[0]
+        assert obs.kind == "falco.event"
+        assert obs.ocsf_class_uid is None
+        assert "device" not in obs.attributes
+        assert obs.attributes["metadata"] == {"collector": "node-1"}
+        assert not any(k.startswith(("host:", "process:")) for k in obs.entity_keys)
+
+    @pytest.mark.parametrize(
+        ("fd_type", "evt_type"),
+        [("unix", "openat"), ("file", "connect"), ("file", "sendto"), ("ipv4", "openat")],
+    )
+    def test_socket_fd_name_is_not_a_file(self, fd_type: str, evt_type: str) -> None:
+        rec = _first("sensitive_file_read")
+        rec["output_fields"]["fd.name"] = "/run/containerd/containerd.sock"
+        rec["output_fields"]["fd.type"] = fd_type
+        rec["output_fields"]["evt.type"] = evt_type
+        obs = _parse(rec).observations[0]
+        assert "file" not in obs.attributes
+        assert obs.kind == "falco.event"
+        assert obs.unmapped["output_fields"]["fd.name"] == "/run/containerd/containerd.sock"
+
+    def test_regular_file_fd_is_still_a_file(self) -> None:
+        rec = _first("sensitive_file_read")
+        rec["output_fields"]["fd.type"] = "file"
+        obs = _parse(rec).observations[0]
+        assert obs.attributes["file"] == {"path": "/etc/shadow"}
+        assert obs.kind == "file.access"
 
 
 class TestInternal:
@@ -287,6 +322,37 @@ class TestEntityKeys:
     def test_k8s_audit_keys(self) -> None:
         obs = _parse(_first("k8s_audit")).observations[0]
         assert obs.entity_keys == ("k8s:default/web-1", "k8s-ns:default", "ip:192.0.2.10")
+
+    def test_only_last_source_ip_is_trusted(self) -> None:
+        rec = _first("k8s_audit")
+        sourceips = ["203.0.113.66", "198.51.100.77", "192.0.2.10"]  # XFF, X-Real-Ip, remote
+        rec["output_fields"]["ka.sourceips"] = sourceips
+        obs = _parse(rec).observations[0]
+        ips = [k for k in obs.entity_keys if k.startswith("ip:")]
+        assert ips == ["ip:192.0.2.10"]
+        assert "source_ips_forwarded" in obs.flags
+        assert obs.unmapped["output_fields"]["ka.sourceips"] == sourceips
+
+    def test_single_source_ip_not_flagged(self) -> None:
+        obs = _parse(_first("k8s_audit")).observations[0]
+        assert "ip:192.0.2.10" in obs.entity_keys
+        assert "source_ips_forwarded" not in obs.flags
+
+    def test_long_source_ip_list_still_uses_real_last_entry(self) -> None:
+        rec = _first("k8s_audit")
+        forged = [f"203.0.113.{i}" for i in range(1, 20)]  # more than 16 forwarded entries
+        rec["output_fields"]["ka.sourceips"] = [*forged, "192.0.2.10"]
+        obs = _parse(rec).observations[0]
+        ips = [k for k in obs.entity_keys if k.startswith("ip:")]
+        assert ips == ["ip:192.0.2.10"]
+        assert obs.unmapped["output_fields"]["ka.sourceips"] == [*forged, "192.0.2.10"]
+        assert "source_ips_forwarded" in obs.flags
+
+    def test_invalid_last_source_ip_gives_no_key(self) -> None:
+        rec = _first("k8s_audit")
+        rec["output_fields"]["ka.sourceips"] = ["192.0.2.10", "not-an-ip"]
+        obs = _parse(rec).observations[0]
+        assert not any(k.startswith("ip:") for k in obs.entity_keys)
 
     def test_k8s_audit_non_pod_target_has_no_pod_key(self) -> None:
         rec = _first("k8s_audit")
@@ -458,12 +524,33 @@ class TestMalformed:
         with pytest.raises(AdapterError):
             _parse(line)
 
-    @pytest.mark.parametrize("line", CONTRACT_CRASH_LINES, ids=["superscript", "digits", "bigint"])
-    def test_contract_crash_inputs(self, line: str) -> None:
-        try:
-            _parse(line)
-        except AdapterError:
-            pass
+    @pytest.mark.parametrize(
+        ("line", "error"),
+        [
+            (CONTRACT_CRASH_LINES[0], None),
+            (CONTRACT_CRASH_LINES[1], None),
+            (CONTRACT_CRASH_LINES[2], "JSON number out of range"),
+        ],
+        ids=["superscript", "digits", "bigint"],
+    )
+    def test_contract_crash_inputs(self, line: str, error: str | None) -> None:
+        if error is not None:
+            with pytest.raises(AdapterError, match=error):
+                _parse(line)
+            return
+        result = _parse(line)
+        _check_result(result)
+        obs = result.observations[0]
+        # An unusable protocol yields no Community ID; the record has no time at all.
+        assert obs.community_id is None
+        assert obs.flags == ("event_time_missing",)
+        assert obs.attributes["src_endpoint"] == {"ip": "10.0.0.1", "port": 1}
+        proto = json.loads(line)["output_fields"]["fd.l4proto"]
+        if len(proto) <= 16:
+            assert obs.attributes["connection_info"] == {"protocol_name": proto}
+        else:
+            assert "connection_info" not in obs.attributes
+            assert obs.unmapped["output_fields"]["fd.l4proto"] == proto
 
     SECRET = "SECRET-" + "z" * 100
 
@@ -528,6 +615,36 @@ class TestMalformed:
         det = _parse(rec).detections[0]
         assert det.identity == "falco:" + "R" * 256
         assert "rule_truncated" not in det.explanation
+
+    def test_backslash_escaped_so_escaping_is_unambiguous(self) -> None:
+        rec = _first("shell_in_container")
+        identities = []
+        for rule in ("A\\x01", "A\x01"):
+            rec["rule"] = rule
+            result = _parse(rec)
+            identities.append(result.detections[0].identity)
+        assert identities == ["falco:A\\\\x01", "falco:A\\x01"]
+        rec["rule"] = "C:\\path"
+        result = _parse(rec)
+        assert result.detections[0].identity == "falco:C:\\\\path"
+        assert "control_chars" not in result.observations[0].flags
+
+    @pytest.mark.parametrize(
+        ("rule", "escaped"),
+        [
+            ("evil\u202ecod.exe", "evil\\u202ecod.exe"),
+            ("zero\u200bwidth", "zero\\u200bwidth"),
+            ("tag\U000e0041", "tag\\U000e0041"),
+        ],
+    )
+    def test_format_chars_escaped_and_flagged(self, rule: str, escaped: str) -> None:
+        rec = _first("shell_in_container")
+        rec["rule"] = rule
+        result = _parse(rec)
+        det = result.detections[0]
+        assert det.identity == "falco:" + escaped
+        assert det.title == escaped
+        assert "control_chars" in result.observations[0].flags
 
     def test_control_chars_escaped_and_flagged(self) -> None:
         rec = _first("shell_in_container")

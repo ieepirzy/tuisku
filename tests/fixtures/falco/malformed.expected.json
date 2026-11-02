@@ -490,5 +490,70 @@
         }
       }
     ]
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [],
+        "event_time": "2026-10-30T13:30:00+00:00",
+        "explanation": {
+          "matched_rule": "Back\\\\slash A\\\\x01 and \\u202ebidi",
+          "priority": "Notice",
+          "rule_control_chars_escaped": true,
+          "source": "syscall",
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Back\\\\slash A\\\\x01 and \\u202ebidi",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "Notice",
+          "rule": "Back\\\\slash A\\\\x01 and \\u202ebidi",
+          "source": "syscall",
+          "tags": []
+        },
+        "severity": 2,
+        "title": "Back\\\\slash A\\\\x01 and \\u202ebidi"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "event_time_ns": 1793367000000000000,
+          "process": {
+            "name": "curl",
+            "pid": 5
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-10-30T13:30:00+00:00",
+        "flags": [
+          "control_chars"
+        ],
+        "kind": "falco.event",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "output_fields": {
+            "evt.time": 1793367000000000000,
+            "evt.type": "connect",
+            "fd.name": "/run/example.sock",
+            "fd.type": "unix"
+          },
+          "record": {
+            "time": "2026-10-30T13:50:00Z"
+          }
+        }
+      }
+    ]
   }
 ]

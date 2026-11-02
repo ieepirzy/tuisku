@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Any
@@ -103,9 +104,17 @@ _FILE_EVENTS = frozenset(
     }
 )  # fmt: skip
 _IP_FIELDS = ("fd.cip", "fd.sip", "fd.rip", "fd.lip")
-_SYSCALL_SOURCES = (None, "syscall")
-# C0, DEL and C1 control characters, escaped as \xNN in rule names.
-_CONTROL = {c: f"\\x{c:02x}" for c in (*range(0x20), *range(0x7F, 0xA0))}
+# Only an explicit "syscall" source is a syscall record; a missing or invalid source is unknown.
+_SYSCALL_SOURCES = ("syscall",)
+# Syscalls whose fd is a socket: fd.name is a socket tuple or a unix socket path, not a file.
+_SOCKET_EVENTS = frozenset(
+    {
+        "socket", "socketpair", "connect", "accept", "accept4", "bind", "listen", "sendto",
+        "recvfrom", "sendmsg", "recvmsg", "sendmmsg", "recvmmsg", "getsockopt", "setsockopt",
+        "shutdown",
+    }
+)  # fmt: skip
+_SOCKET_FD_TYPES = frozenset({"unix", "ipv4", "ipv6"})
 _KNOWN_TOP = frozenset(
     {"time", "rule", "priority", "source", "tags", "hostname", "output", "output_fields", "uuid"}
 )
@@ -235,10 +244,27 @@ def _start_time(fields: Mapping[str, Any]) -> datetime | None:
     return parse_timestamp_or_none(ns) if ns is not None else None
 
 
+def _escape_char(ch: str) -> str:
+    """Escape one character of a rule name; returns it unchanged when it is safe to show.
+
+    The backslash is escaped first (as ``\\\\``) so the escaping is unambiguous: a literal
+    ``A\\x01`` and ``A`` followed by U+0001 render differently.
+    """
+    if ch == "\\":
+        return "\\\\"
+    code = ord(ch)
+    if code < 0x20 or 0x7F <= code < 0xA0:
+        return f"\\x{code:02x}"
+    if unicodedata.category(ch) == "Cf":  # bidi overrides, zero-width and other format chars
+        return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
+    return ch
+
+
 def _rule_identity(rule_full: str) -> tuple[str, str, bool, bool]:
-    """Return (display rule, identity, truncated, had control characters)."""
-    escaped = rule_full.translate(_CONTROL)
-    control = escaped != rule_full
+    """Return (display rule, identity, truncated, had control or format characters)."""
+    parts = [_escape_char(ch) for ch in rule_full]
+    escaped = "".join(parts)
+    control = any(len(p) > 1 and p != "\\\\" for p in parts)
     if len(escaped) <= MAX_RULE:
         return escaped, f"falco:{escaped}", False, control
     digest = hashlib.sha256(rule_full.encode("utf-8", "surrogatepass")).hexdigest()
@@ -278,23 +304,31 @@ def _classify(source: str | None, fields: Mapping[str, Any], attrs: Mapping[str,
     return "falco.event"
 
 
-def _source_ips(value: object) -> list[object]:
-    # ka.sourceips is a list field; accept a list or a single string, ignore anything else.
+def _remote_source_ip(value: object) -> tuple[object, bool]:
+    """Return (the address the API server saw, whether forwarded entries were present).
+
+    The Kubernetes API server fills ``sourceIPs`` from X-Forwarded-For and X-Real-Ip first and
+    appends the real remote address last, so every entry but the last is client-controlled.
+    Only the last entry is trusted, however long the list is.
+    """
     if isinstance(value, list):
-        return value[:16]
-    return [value] if isinstance(value, str) else []
+        return (value[-1] if value else None), len(value) > 1
+    return (value if isinstance(value, str) else None), False
 
 
-def _plugin_keys(fields: Mapping[str, Any]) -> tuple[str | None, ...]:
-    """Entity keys from k8s_audit and cloud plugin fields (validated by the entities helpers)."""
+def _plugin_keys(fields: Mapping[str, Any]) -> tuple[tuple[str | None, ...], bool]:
+    """Entity keys from k8s_audit and cloud plugin fields (validated by the entities helpers),
+    and whether ``ka.sourceips`` carried forwarded (untrusted) entries."""
     namespace = fields.get("ka.target.namespace")
     pod = fields.get("ka.target.name") if fields.get("ka.target.resource") == "pods" else None
-    return (
+    remote, forwarded = _remote_source_ip(fields.get("ka.sourceips"))
+    keys = (
         k8s_pod_key(namespace, pod),
         k8s_namespace_key(namespace),
         ip_key(fields.get("ct.srcip")),
-        *(ip_key(v) for v in _source_ips(fields.get("ka.sourceips"))),
+        ip_key(remote),
     )
+    return keys, forwarded
 
 
 class FalcoAdapter:
@@ -382,7 +416,13 @@ class FalcoAdapter:
             attrs["event_time_ns"] = event_time_ns
 
         fd_path = _path(fields.get("fd.name"))
-        if fd_path is not None and "src_endpoint" not in attrs and "dst_endpoint" not in attrs:
+        socket_fd = (
+            "src_endpoint" in attrs
+            or "dst_endpoint" in attrs
+            or bounded_str(fields.get("fd.type"), 16) in _SOCKET_FD_TYPES
+            or bounded_str(fields.get("evt.type"), 64) in _SOCKET_EVENTS
+        )
+        if fd_path is not None and not socket_fd:
             attrs["file"] = {"path": fd_path}
             unmapped_fields.pop("fd.name", None)
         elif (fs_path := _path(fields.get("fs.path.name"))) is not None:
@@ -391,12 +431,12 @@ class FalcoAdapter:
 
         internal = rule_full == INTERNAL_RULE or source == INTERNAL_SOURCE
         # For syscall and internal records the hostname is the monitored node; for plugin
-        # sources it is only the collector that ran the plugin.
+        # sources, or a missing/invalid source, it is only the Falco instance that reported.
         asset_host = hostname if (internal or source in _SYSCALL_SOURCES) else None
         if asset_host is not None:
             attrs["device"] = {"hostname": asset_host}
         elif hostname is not None:
-            extras["hostname"] = hostname
+            attrs["metadata"] = {"collector": hostname}
         kind = "falco.internal" if internal else _classify(source, fields, attrs)
         ocsf_class = {
             "process.exec": OCSF_PROCESS_ACTIVITY,
@@ -434,6 +474,9 @@ class FalcoAdapter:
             unmapped["record"] = extras
 
         namespace = fields.get("k8s.ns.name")
+        plugin_keys, forwarded = _plugin_keys(fields)
+        if forwarded:
+            flags.append("source_ips_forwarded")
         entity_keys = unique(
             host_key(asset_host),
             k8s_pod_key(namespace, fields.get("k8s.pod.name")),
@@ -442,7 +485,7 @@ class FalcoAdapter:
             image_digest_key(fields.get("container.image.digest")),
             process_key(asset_host, fields.get("proc.pid"), _start_time(fields)),
             *(ip_key(fields.get(k)) for k in _IP_FIELDS),
-            *_plugin_keys(fields),
+            *plugin_keys,
         )
 
         observation = ObservationDraft(
