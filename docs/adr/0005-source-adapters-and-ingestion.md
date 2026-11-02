@@ -100,9 +100,11 @@ sensor sees.
 - **Approval is separate from triage.** The `approve` role confirms hypotheses and approves
   proposed actions and evidence requests ([0009](0009-agent-runtime-and-authority.md)).
   - **Issued out of band.** Approve tokens and **person-bound operator tokens** cannot be
-    created through the API, not even by an admin. They are created only by
-    `tuisku approver add --person …` and `tuisku operator-token add --person …`. Both commands
-    connect as `tuisku_owner`, the database owner, which the API and worker never use.
+    created through the API, not even by an admin. A trigger on the token table rejects any row
+    with the `approve` role or a non-null person unless `current_user = 'tuisku_owner'`. Such
+    tokens are created only by `tuisku approver add --person …` and
+    `tuisku operator-token add --person …`, which connect as the database owner. The API and
+    worker never use that role.
     - API admins can create only tokens without a person.
     - An admin therefore cannot invent a person to start a session or to approve one.
     - Binding persons to an external identity provider (OIDC) is a later step. Until then, the

@@ -152,6 +152,14 @@ content produced it.
     `pg_advisory_xact_lock(<64-bit hash of the key>)` for every key the row touches. It takes
     them in sorted order, so two workers cannot deadlock on them. Two workers that see rows of
     the same group therefore cannot both fire or both open a finding.
+  - **Idempotent firings.** Every firing has a unique key enforced in the database:
+    - `(rule id, rev, triggering row)` for per-row rules
+    - `(rule id, rev, group, window start)` for correlations
+    - `(rule id, rev, linked row)` for `detection_evidence` links
+
+    Inserts use `ON CONFLICT DO NOTHING`, and a notification is emitted only when the insert
+    actually happened. A lease that expires mid-evaluation, or a retry after another rule
+    failed, therefore never writes a second detection or pages twice.
 - **Current derivations only.** Reprocessing L0 with a new adapter version writes a new parse
   attempt and new rows, and **enqueues the new current rows**.
   - A worker skips queued *adapter-derived* rows whose parse attempt is no longer current.
@@ -192,15 +200,23 @@ content produced it.
   - Rules without a `correlation` block fire once per selected row.
 - **Metric samples** (OTLP cumulative counters) are turned into deltas at evaluation time.
   - **Series key:** metric name + label set + resource attributes.
-  - **Within a series,** `delta = value - previous value` while `start_time` is unchanged.
+  - **Within a series,** samples are ordered by their own timestamp (`time_unix_nano`), not by
+    arrival. `delta = value - value of the latest earlier sample` while `start_time` is
+    unchanged. A sample older than one already processed (out-of-order delivery from collector
+    queues and retries) is stored but never treated as a reset. Its delta is computed against
+    its true predecessor, and the successor's delta is reduced to match, so totals never double.
   - **Reset:** a changed `start_time`, or a value lower than the previous one, is a reset. The
     new value itself is then the delta, because it counts from the new `start_time`.
-  - **First sample ever seen for a series:** its full value counts only if its `start_time` is
-    no earlier than the source's first `received_at` minus one export interval (default 60 s).
-    That covers a counter that began while Tuisku was already listening. OTel counters appear
-    only on their first increment, so the first refusal is counted. Otherwise the first sample
-    is a baseline with delta 0, so connecting Tuisku to a long-running process does not
-    produce a false spike.
+  - **First sample ever seen for a series:** its full value counts when either of these holds:
+    - Its `start_time` is no earlier than the source's first `received_at` minus one export
+      interval (default 60 s): the process started while Tuisku was listening.
+    - Tuisku has already received an export from the **same resource with the same
+      `start_time`** that did not contain this series. The label set appeared while Tuisku was
+      listening. OTel SDKs stamp a series with the instrument's start time, not the label set's
+      first use, so this case is common: a new `verdict="likely"` series on a long-running pod.
+
+    Otherwise the first sample is a baseline with delta 0, so connecting Tuisku to a
+    long-running process does not produce a false spike.
   - **Delta temporality:** sums with delta temporality are taken as-is.
 - **Output.** When a rule fires, the worker writes a detection with `evaluator = tuisku`, the
   pack's authorship, and `identity = <rule id>`. It then folds the detection into a **finding**
