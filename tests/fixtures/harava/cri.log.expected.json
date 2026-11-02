@@ -1,6 +1,6 @@
 [
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [
       {
         "attack": [],
@@ -71,7 +71,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [
       {
         "attack": [],
@@ -130,7 +130,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [
       {
         "attack": [],
@@ -191,7 +191,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {
@@ -217,7 +217,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {

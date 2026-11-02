@@ -1,6 +1,6 @@
 [
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {
@@ -200,7 +200,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {
@@ -463,7 +463,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {
@@ -642,7 +642,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {
@@ -846,11 +846,11 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "error": "resourceMetrics is not a list"
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {
