@@ -32,10 +32,17 @@ uv run tuisku source token list edge-suricata              # uids and dates, nev
 uv run tuisku source token revoke edge-suricata <token-uid>
 uv run tuisku source disable edge-suricata
 uv run tuisku operator-token add --name oncall --role read  # prints a tsk_op_ token once
+uv run tuisku operator-token list                          # uids, names, roles, never secrets
+uv run tuisku operator-token revoke <token-uid>
 # Out of band, connected as the database owner only (ADR 0005):
 uv run tuisku approver add --person "A. Person"
+uv run tuisku approver revoke <token-uid>
 uv run tuisku operator-token add --name lead --role triage --person "A. Person"
 ```
+
+Tokens are revoked, never deleted, so past actors stay resolvable; the API role has no `DELETE`
+on `operator_tokens`. Revoking an approve token or a person-bound token, like issuing one, needs
+the database owner.
 
 Approve tokens and person-bound operator tokens can be issued only by the database owner; a
 trigger refuses them for any other role, so the app role the API uses can never create them.
@@ -52,17 +59,25 @@ Shippers post NDJSON envelopes (`{"raw": "<line>", "collector": {...}}`) to
 malformed envelope is `rejected`: an over-long record is stored truncated, flagged, unparsed
 (`parse: skipped`), and an oversized `collector` is replaced by a marker. Every breach raises
 one `tuisku.meta.*` detection per source, kind, subject (the limit) and 5-minute bucket;
-repeats are counted in `meta_counters`.
+repeats are counted in `meta_counters`. Buckets are slices of the database clock, and the
+database accepts the API's meta-detections only for its own ingest kinds and the current bucket,
+so a bucket cannot be claimed in advance.
 
 Adapters run in a bounded pool of worker threads (`TUISKU_INGEST_PARSE_THREADS`). A request that
 runs past `TUISKU_INGEST_REQUEST_BUDGET_SECONDS` (10 s) stops before its next line, commits
 what it processed and answers 503 with `Retry-After`, marking the rest `not_processed`; the
-shipper retries the batch, and the processed lines come back as duplicates. A single runaway
-parse cannot be interrupted from Python: the budget is checked between records.
+shipper retries the batch, and the processed lines come back as duplicates. Each record's parse
+also has its own deadline (`TUISKU_INGEST_PARSE_TIMEOUT_SECONDS`, 2 s). A parse that overruns
+it is abandoned, because a Python thread cannot be killed: its thread runs on, but its slot is
+released. The record stays accepted with a failed `time_budget` parse attempt and a
+`parse_time` limit breach.
 
 The per-source rate limit (`TUISKU_INGEST_RATE_PER_SECOND`, `TUISKU_INGEST_RATE_BURST`) is a
 token bucket held **in each API replica's memory**: with N replicas a source can send up to
-N times the configured rate. An exhausted bucket answers 429 with `Retry-After`.
+N times the configured rate. An exhausted bucket answers 429 with `Retry-After`. Refusals are
+counted in process. The first refusal per source is recorded at once; the rest are written at
+most every `TUISKU_INGEST_RATE_BREACH_FLUSH_SECONDS` (10 s) and at shutdown, never once per
+refused request.
 
 Operator tokens with the `read` role (or `triage`/`admin`) can read evidence:
 `GET /v1/observations`, `GET /v1/detections` (filters `kind`, `source`, `entity_key`, `since`,
@@ -134,12 +149,15 @@ TUISKU_DATABASE_URL=<tuisku_app url> uv run tuisku api
 TUISKU_DATABASE_URL=<tuisku_worker url> uv run tuisku worker
 ```
 
-With `TUISKU_APP_ROLE` set, the API role gets `SELECT, INSERT` on the ingest evidence tables
-(`raw_records`, `raw_duplicates`, `parse_attempts`, `observations`, `detections`,
-`detection_observations`), `SELECT, INSERT, UPDATE, DELETE` on `sources`, `source_tokens`,
-`operator_tokens`, `evaluation_queue`, `evaluation_dead_letter` and `meta_counters`, and for
-triage `SELECT` on findings, incidents and their tables, `UPDATE` on `findings` and `incidents`,
-and `INSERT` on `finding_events`, `incident_events` (operator actors only) and `notifications`.
+With `TUISKU_APP_ROLE` set, migrations grant the app role `SELECT` on evidence tables and
+`INSERT` on those that ingest writes (`raw_records`, `raw_duplicates`, `parse_attempts`,
+`observations`, `detections`, `detection_observations`). They also grant it
+`SELECT, INSERT, UPDATE, DELETE` on `sources` and `source_tokens`, `SELECT, INSERT, UPDATE` on
+`operator_tokens` and `meta_counters`, `INSERT` only on `evaluation_queue`, and `USAGE` on
+sequences. Only the worker role claims, updates or deletes queue rows, or touches
+`evaluation_dead_letter`. For triage the API role gets `SELECT` on findings, incidents and
+their tables, `UPDATE` on `findings` and `incidents`, and `INSERT` on `finding_events`,
+`incident_events` (operator actors only) and `notifications`.
 
 Only the worker role writes rule output: `tuisku`-evaluated detections and their links,
 `detection_evidence`, `rule_firings`, `findings`, `incidents`, `finding_detections`,

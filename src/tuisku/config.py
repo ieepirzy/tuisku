@@ -61,11 +61,16 @@ class Settings(BaseSettings):
     # its own buckets, so the effective limit is replicas x rate.
     ingest_rate_per_second: float = Field(default=1000.0, gt=0)
     ingest_rate_burst: float = Field(default=10000.0, ge=1)
+    # 429s are counted in process and written at most this often per source (and at shutdown).
+    ingest_rate_breach_flush_seconds: float = Field(default=10.0, gt=0)
     # Wall-clock budget for one ingest request. Once spent, the remaining lines are not
     # processed and the answer is 503 with Retry-After (already processed lines are kept).
     ingest_request_budget_seconds: float = Field(default=10.0, gt=0)
     # Worker threads that run adapters, off the event loop.
     ingest_parse_threads: int = Field(default=4, ge=1)
+    # Wall-clock deadline for one record's parse. An overrunning parse is abandoned (its thread
+    # cannot be killed) and the record is kept with a failed `time_budget` parse attempt.
+    ingest_parse_timeout_seconds: float = Field(default=2.0, gt=0)
     # An event_time further than this in the future of received_at is flagged clock_skew
     # and evaluated at received_at (ADR 0004 section 6).
     clock_skew_tolerance_seconds: float = Field(default=300.0, ge=0)

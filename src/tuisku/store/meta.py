@@ -9,6 +9,10 @@ enforces it across API replicas. The subject is the limit name, so a breach of o
 cannot hide a breach of another. Every breach, the first included, increments
 ``meta_counters`` for that bucket; detections are append-only, so the count is never written
 into the detection itself.
+
+Buckets are 5-minute slices of the database clock (``tuisku_current_bucket()``), never of the
+caller's clock: the database lets the API role write a meta-detection only for the current
+bucket, so a compromised API cannot pre-claim a future bucket and silence a later breach.
 """
 
 from __future__ import annotations
@@ -129,7 +133,11 @@ async def _record(
     now: datetime,
     rule_name: str,
 ) -> bool:
-    bucket = bucket_start(now)
+    # The bucket comes from the database clock, the only clock the database trusts: the trigger
+    # on detections accepts the API's meta-detections only for the current bucket (ADR 0011).
+    got = await db.fetch_one(conn, "SELECT tuisku_current_bucket() AS bucket")
+    assert got is not None
+    bucket: datetime = got["bucket"]
     await conn.execute(
         "INSERT INTO meta_counters (source_id, kind, subject, bucket_start, count) "
         "VALUES (%s, %s, %s, %s, %s) ON CONFLICT ON CONSTRAINT meta_counters_key "

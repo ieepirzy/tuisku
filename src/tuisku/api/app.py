@@ -18,7 +18,7 @@ from tuisku import __version__, db
 from tuisku.adapters import builtin as _builtin_adapters  # noqa: F401  (registers adapters)
 from tuisku.api import ingest, read, triage
 from tuisku.api.deps import Clock, system_clock
-from tuisku.api.ratelimit import RateLimiter
+from tuisku.api.ratelimit import RateLimiter, RefusalCounter
 from tuisku.config import Settings
 
 log = logging.getLogger(__name__)
@@ -38,6 +38,7 @@ def create_app(settings: Settings | None = None, *, clock: Clock | None = None) 
         try:
             yield
         finally:
+            await ingest.flush_refusals(app)
             await db.close_pool(pool)
 
     app = FastAPI(title="Tuisku", version=__version__, lifespan=lifespan)
@@ -46,6 +47,7 @@ def create_app(settings: Settings | None = None, *, clock: Clock | None = None) 
     app.state.rate_limiter = RateLimiter(
         settings.ingest_rate_per_second, settings.ingest_rate_burst
     )
+    app.state.refusals = RefusalCounter(settings.ingest_rate_breach_flush_seconds)
     # Bounded worker threads for adapters, so parsing never blocks the event loop.
     app.state.parse_limiter = anyio.CapacityLimiter(settings.ingest_parse_threads)
     app.include_router(ingest.router)

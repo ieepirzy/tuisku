@@ -110,6 +110,9 @@ def _add_admin_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]
         help="bind the token to a named person; only the database owner may do this (ADR 0005)",
     )
     op_add.add_argument("--expires-at", type=_timestamp)
+    op_sub.add_parser("list", help="list operator and approve tokens (never the secrets)")
+    op_revoke = op_sub.add_parser("revoke", help="revoke an operator token by its uid")
+    op_revoke.add_argument("token_uid", type=UUID)
 
     approver = sub.add_parser(
         "approver", help="issue approve tokens (database owner only, out of band; ADR 0005)"
@@ -119,6 +122,10 @@ def _add_admin_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]
     approver_add.add_argument("--person", required=True, help="the named person who approves")
     approver_add.add_argument("--name", help="a label for the token (default: the person)")
     approver_add.add_argument("--expires-at", type=_timestamp)
+    approver_revoke = approver_sub.add_parser(
+        "revoke", help="revoke an approve token (database owner only, out of band)"
+    )
+    approver_revoke.add_argument("token_uid", type=UUID)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -166,6 +173,22 @@ def _run_admin(args: argparse.Namespace, settings: Settings) -> None:
     from tuisku.store import admin
     from tuisku.store.tokens import Role
 
+    if args.command == "approver" and args.approver_command == "revoke":
+        _with_connection(
+            settings,
+            lambda conn: admin.revoke_operator_token(conn, args.token_uid, approver=True),
+        )
+        print(f"tuisku: revoked approve token {args.token_uid}", file=sys.stderr)
+        return
+    if args.command == "operator-token" and args.operator_command == "list":
+        rows = _with_connection(settings, admin.list_operator_tokens)
+        for row in rows:
+            print(json.dumps(row, default=str, sort_keys=True))
+        return
+    if args.command == "operator-token" and args.operator_command == "revoke":
+        _with_connection(settings, lambda conn: admin.revoke_operator_token(conn, args.token_uid))
+        print(f"tuisku: revoked operator token {args.token_uid}", file=sys.stderr)
+        return
     if args.command == "approver":
         issued = _with_connection(
             settings,

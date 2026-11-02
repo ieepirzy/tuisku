@@ -138,12 +138,12 @@ def test_api_role_triages_but_cannot_write_rule_output(worked: AppDatabase) -> N
         "UPDATE incidents SET updated_at = updated_at",
         "INSERT INTO finding_events (finding_id, actor, kind) SELECT id, "
         "'operator:00000000-0000-4000-8000-000000000000', 'status_changed' FROM findings LIMIT 1",
-        # The API's own ingest meta-detection: identity is the kind, bucketed.
-        "INSERT INTO detections (evaluator, authorship, kind, identity, title, severity_id, "
-        "received_at, eval_time, ocsf_version, rule_ref, subject, bucket_start) VALUES "
-        "('tuisku', 'tuisku', 'tuisku.meta.source_limit_exceeded', "
+        # The API's own ingest meta-detection: its kind, a source, the current bucket.
+        "INSERT INTO detections (source_id, evaluator, authorship, kind, identity, title, "
+        "severity_id, received_at, eval_time, ocsf_version, rule_ref, subject, bucket_start) "
+        "SELECT id, 'tuisku', 'tuisku', 'tuisku.meta.source_limit_exceeded', "
         "'tuisku.meta.source_limit_exceeded', 't', 3, now(), now(), '1.9.0', '{}', 'probe', "
-        "now())",
+        "tuisku_current_bucket() FROM sources LIMIT 1",
     ]:
         assert _attempt(worked.app_url, statement) is None, statement
     for statement in [
