@@ -124,8 +124,9 @@ An adapter is a Python object registered under a name with a semantic version:
 
 ```python
 class Adapter(Protocol):
-    name: str               # "suricata"
-    version: str            # "1.0.0" — bump on any change to output for the same input
+    name: str  # "suricata"
+    version: str  # "1.0.0" — bump on any change to output for the same input
+
     def parse(self, raw: RawRecord, options: Mapping[str, Any]) -> ParseResult: ...
 ```
 
