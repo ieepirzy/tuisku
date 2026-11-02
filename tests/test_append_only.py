@@ -2,21 +2,18 @@
 
 First line: the app role has only SELECT and INSERT on evidence tables. Second line: row and
 statement triggers reject UPDATE, DELETE and TRUNCATE even for the owning role.
-
-Migration-level: every row here is written with direct SQL, as the role under test, so these
-tests need no ingest code.
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import Any
 
 import psycopg
 import pytest
 from psycopg import errors
 
 from tests.conftest import AppDatabase
+from tests.support import client, ndjson, new_source, post_records, query, run
 
 EVIDENCE_TABLES = [
     "raw_records",
@@ -32,95 +29,36 @@ EVIDENCE_TABLES = [
 ]
 
 
-def query(url: str, statement: str, params: Any = None) -> list[tuple[Any, ...]]:
-    with psycopg.connect(url) as conn:
-        return conn.execute(statement, params).fetchall()  # type: ignore[arg-type]
-
-
-def new_source(owner_url: str, name: str) -> int:
-    """A source with one token, as the owner; returns the source id."""
-    [(source_id,)] = query(
-        owner_url,
-        "WITH s AS (INSERT INTO sources (name, adapter) VALUES (%s, 'dummy') RETURNING id), "
-        "t AS (INSERT INTO source_tokens (source_id, token_sha256) SELECT id, "
-        "sha256(gen_random_uuid()::text::bytea) FROM s) SELECT id FROM s",
-        (name,),
-    )
-    return source_id
-
-
-def ingest_row(conn: psycopg.Connection, source_id: int, body: str = "x") -> dict[str, int]:
-    """What ingest writes for one record, in the caller's transaction: the raw record, an `ok`
-    parse attempt, an observation, a sensor detection, their link and the queue entries."""
-    [(raw,)] = conn.execute(
-        "INSERT INTO raw_records (source_id, source_name, token_id, sha256, received_at, "
-        "transport, body, body_size) SELECT s.id, s.name, t.id, sha256(%s::bytea), now(), "
-        "'ndjson', %s::bytea, octet_length(%s::bytea) FROM sources s JOIN source_tokens t "
-        "ON t.source_id = s.id WHERE s.id = %s LIMIT 1 RETURNING id",
-        (body.encode(), body.encode(), body.encode(), source_id),
-    ).fetchall()
-    [(attempt,)] = conn.execute(
-        "INSERT INTO parse_attempts (raw_record_id, adapter, adapter_version, status, "
-        "created_at) VALUES (%s, 'dummy', '0.1.0', 'ok', now()) RETURNING id",
-        (raw,),
-    ).fetchall()
-    [(obs,)] = conn.execute(
-        "INSERT INTO observations (raw_record_id, parse_attempt_id, source_id, kind, "
-        "received_at, eval_time, ocsf_version, attributes) VALUES (%s, %s, %s, 'dummy.record', "
-        "now(), now(), '1.9.0', '{}') RETURNING id",
-        (raw, attempt, source_id),
-    ).fetchall()
-    [(det,)] = conn.execute(
-        "INSERT INTO detections (raw_record_id, parse_attempt_id, source_id, evaluator, "
-        "authorship, kind, identity, title, severity_id, received_at, eval_time, ocsf_version, "
-        "rule_ref) VALUES (%s, %s, %s, 'sensor', 'community', 'dummy.alert', 'x', 't', 1, "
-        "now(), now(), '1.9.0', '{}') RETURNING id",
-        (raw, attempt, source_id),
-    ).fetchall()
-    conn.execute(
-        "INSERT INTO detection_observations (detection_id, observation_id) VALUES (%s, %s)",
-        (det, obs),
-    )
-    conn.execute("INSERT INTO evaluation_queue (observation_id) VALUES (%s)", (obs,))
-    conn.execute("INSERT INTO evaluation_queue (detection_id) VALUES (%s)", (det,))
-    return {"raw": raw, "attempt": attempt, "observation": obs, "detection": det}
-
-
 @pytest.fixture(scope="module")
 def populated(app_db: AppDatabase) -> AppDatabase:
-    """At least one row in every evidence table, each written as the role that writes it."""
-    source_id = new_source(app_db.owner_url, f"e{uuid.uuid4().hex[:10]}")
-    with psycopg.connect(app_db.app_url) as conn:  # what ingest writes, as the API role
-        rows = ingest_row(conn, source_id, "detect")
-        conn.execute(  # a duplicate receipt
-            "INSERT INTO raw_duplicates (raw_record_id, received_at, token_id) "
-            "SELECT id, now(), token_id FROM raw_records WHERE id = %s",
-            (rows["raw"],),
-        )
+    """At least one row in every evidence table."""
+    name = f"e{uuid.uuid4().hex[:10]}"
+    token = new_source(app_db.app_url, name)
+    with client(app_db.app_url) as c:
+        post_records(c, name, token, ndjson({"detect": 1}))
+        post_records(c, name, token, ndjson({"detect": 1}))  # duplicate receipt
     with psycopg.connect(app_db.worker_url) as conn:  # only the worker links (ADR 0011)
         conn.execute(
             "INSERT INTO detection_evidence (detection_id, observation_id, linked_at) "
-            "VALUES (%s, %s, now())",
-            (rows["detection"], rows["observation"]),
+            "SELECT d.id, l.observation_id, now() FROM detections d "
+            "JOIN detection_observations l ON l.detection_id = d.id LIMIT 1"
         )
-    # A throwaway source, disabled, with a revoked token, and a revoked operator token: rows in
-    # the request tables, written by the API role.
-    other = new_source(app_db.owner_url, f"x{uuid.uuid4().hex[:10]}")
-    with psycopg.connect(app_db.app_url) as conn:
-        conn.execute(
-            "INSERT INTO token_revocations (token_id) SELECT id FROM source_tokens "
-            "WHERE source_id = %s",
-            (other,),
-        )
-        conn.execute(
-            "INSERT INTO source_admin_requests (source_id, action) VALUES (%s, 'disable')",
-            (other,),
-        )
-        conn.execute(
-            "WITH t AS (INSERT INTO operator_tokens (name, roles, token_sha256) VALUES "
-            "('gone', '{read}', sha256(gen_random_uuid()::text::bytea)) RETURNING id) "
-            "INSERT INTO operator_token_revocations (token_id) SELECT id FROM t"
-        )
+    # A throwaway source, disabled, with a revoked token: rows in the request tables.
+    other = f"x{uuid.uuid4().hex[:10]}"
+    new_source(app_db.app_url, other)
+
+    async def requests(conn):  # type: ignore[no-untyped-def]
+        from tuisku.store import admin
+
+        [token] = await admin.list_source_tokens(conn, other)
+        await admin.revoke_source_token(conn, other, token["uid"])
+        from tuisku.store.tokens import Role
+
+        await admin.disable_source(conn, other)
+        issued = await admin.create_operator_token(conn, name="gone", roles=[Role.READ])
+        await admin.revoke_operator_token(conn, issued.uid)
+
+    run(app_db.app_url, requests)
     for table in EVIDENCE_TABLES:
         assert query(app_db.owner_url, f"SELECT count(*) FROM {table}")[0][0] > 0, table
     return app_db
@@ -399,24 +337,31 @@ def test_app_role_disables_and_revokes_by_request_only(populated: AppDatabase) -
     ]:
         exc = _attempt(populated.app_url, statement)
         assert isinstance(exc, errors.InsufficientPrivilege), statement
-    source_id = new_source(populated.owner_url, f"r{uuid.uuid4().hex[:10]}")
+    name = f"r{uuid.uuid4().hex[:10]}"
+    token = new_source(populated.app_url, name)
+    with client(populated.app_url) as c:
+        assert post_records(c, name, token, ndjson("a")).status_code == 200
+        with psycopg.connect(populated.app_url) as conn:
+            conn.execute(
+                "INSERT INTO token_revocations (token_id) SELECT t.id FROM source_tokens t "
+                "JOIN sources s ON s.id = t.source_id WHERE s.name = %s",
+                (name,),
+            )
+        assert post_records(c, name, token, ndjson("b")).status_code == 401
+    other = f"r{uuid.uuid4().hex[:10]}"
+    other_token = new_source(populated.app_url, other)
     with psycopg.connect(populated.app_url) as conn:
         conn.execute(
-            "INSERT INTO token_revocations (token_id) SELECT id FROM source_tokens "
-            "WHERE source_id = %s",
-            (source_id,),
+            "INSERT INTO source_admin_requests (source_id, action) "
+            "SELECT id, 'disable' FROM sources WHERE name = %s",
+            (other,),
         )
-        conn.execute(
-            "INSERT INTO source_admin_requests (source_id, action) VALUES (%s, 'disable')",
-            (source_id,),
-        )
-    [(revoked, disabled)] = query(
-        populated.owner_url,
-        "SELECT bool_and(t.revoked_at IS NOT NULL), bool_and(s.disabled_at IS NOT NULL) "
-        "FROM sources s JOIN source_tokens t ON t.source_id = s.id WHERE s.id = %s",
-        (source_id,),
+    with client(populated.app_url) as c:
+        assert post_records(c, other, other_token, ndjson("c")).status_code == 401
+    [(disabled,)] = query(
+        populated.owner_url, "SELECT disabled_at IS NOT NULL FROM sources WHERE name = %s", (other,)
     )
-    assert revoked and disabled
+    assert disabled
 
 
 def test_app_role_takes_no_row_lock_on_what_the_worker_uses(populated: AppDatabase) -> None:
@@ -467,9 +412,9 @@ def test_app_role_limits(populated: AppDatabase) -> None:
 
 def test_raw_records_keep_the_source_name_they_arrived_with(populated: AppDatabase) -> None:
     name = f"n{uuid.uuid4().hex[:10]}"
-    source_id = new_source(populated.owner_url, name)
-    with psycopg.connect(populated.app_url) as conn:
-        ingest_row(conn, source_id, "named")
+    token = new_source(populated.app_url, name)
+    with client(populated.app_url) as c:
+        post_records(c, name, token, ndjson({"msg": "named"}))
     with psycopg.connect(populated.owner_url) as conn:  # an owner rename, out of band
         conn.execute("UPDATE sources SET name = %s WHERE name = %s", (name + "x", name))
     [(stored, current)] = query(
@@ -524,15 +469,18 @@ def test_app_role_cannot_enqueue_existing_rows(populated: AppDatabase, column: s
 
 
 def test_ingest_still_enqueues_what_it_writes(populated: AppDatabase) -> None:
-    source_id = new_source(populated.owner_url, f"q{uuid.uuid4().hex[:10]}")
-    with psycopg.connect(populated.app_url) as conn:
-        rows = ingest_row(conn, source_id, "fresh")
+    name = f"q{uuid.uuid4().hex[:10]}"
+    token = new_source(populated.app_url, name)
+    with client(populated.app_url) as c:
+        response = post_records(c, name, token, ndjson({"detect": 1, "msg": "fresh"}))
+    assert response.json()["results"][0]["status"] == "accepted"
     [(queued,)] = query(
         populated.owner_url,
-        "SELECT count(*) FROM evaluation_queue WHERE observation_id = %s OR detection_id = %s",
-        (rows["observation"], rows["detection"]),
+        "SELECT count(*) FROM evaluation_queue q JOIN observations o ON o.id = q.observation_id "
+        "JOIN sources s ON s.id = o.source_id WHERE s.name = %s",
+        (name,),
     )
-    assert queued == 2
+    assert queued == 1
 
 
 def test_raw_source_name_is_set_by_the_database(populated: AppDatabase) -> None:
@@ -703,28 +651,38 @@ def test_the_counter_trigger_holds_without_row_level_security(populated: AppData
 
 
 def test_an_operator_revocation_cannot_be_undone(populated: AppDatabase) -> None:
-    """Round ten: the API role revokes an operator token by request only, and nothing it can do
-    brings the token back."""
+    """Round ten: the API role revokes an operator token by request only; nothing it can do
+    brings the token back, and authentication refuses it."""
     import hashlib
 
-    token = str(uuid.uuid4())
-    with psycopg.connect(populated.app_url) as conn:
-        [(token_id,)] = conn.execute(
-            "INSERT INTO operator_tokens (name, roles, token_sha256) VALUES ('t', '{triage}', "
-            "%s) RETURNING id",
-            (hashlib.sha256(token.encode()).digest(),),
-        ).fetchall()
-        conn.execute("INSERT INTO operator_token_revocations (token_id) VALUES (%s)", (token_id,))
+    from tuisku.store import admin
+    from tuisku.store.tokens import Role
+
+    async def issue(conn):  # type: ignore[no-untyped-def]
+        return await admin.create_operator_token(conn, name="t", roles=[Role.TRIAGE])
+
+    issued = run(populated.app_url, issue)
+
+    async def check(conn):  # type: ignore[no-untyped-def]
+        return await admin.authenticate_operator_token(conn, issued.token)
+
+    assert run(populated.app_url, check) is not None
+
+    async def revoke(conn):  # type: ignore[no-untyped-def]
+        await admin.revoke_operator_token(conn, issued.uid)
+
+    run(populated.app_url, revoke)
     for statement in [
-        "UPDATE operator_tokens SET revoked_at = NULL WHERE id = %(id)s",
+        "UPDATE operator_tokens SET revoked_at = NULL WHERE uid = %(uid)s",
         "DELETE FROM operator_token_revocations",
         "UPDATE operator_token_revocations SET token_id = 0",
     ]:
         with psycopg.connect(populated.app_url) as conn:
             with pytest.raises(errors.InsufficientPrivilege):
-                conn.execute(statement, {"id": token_id})  # type: ignore[arg-type]
+                conn.execute(statement, {"uid": issued.uid})  # type: ignore[arg-type]
+    assert run(populated.app_url, check) is None
     [(revoked,)] = query(
-        populated.owner_url, "SELECT revoked_at FROM operator_tokens WHERE id = %s", (token_id,)
+        populated.owner_url, "SELECT revoked_at FROM operator_tokens WHERE uid = %s", (issued.uid,)
     )
     assert revoked is not None
     # Person-bound tokens are revoked only by the owner, as they are issued (ADR 0005).
