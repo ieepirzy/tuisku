@@ -136,8 +136,10 @@
         "kind": "harava.mcp_refused_to_serve",
         "ocsf_class_uid": null,
         "unmapped": {
-          "attrs": {
-            "tag": "harava-mcp"
+          "envelope": {
+            "attrs": {
+              "tag": "harava-mcp"
+            }
           },
           "stream": "stderr"
         }

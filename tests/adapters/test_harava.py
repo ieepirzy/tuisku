@@ -23,6 +23,7 @@ from tuisku.adapters.harava import (
     MAX_MESSAGE,
     MAX_REASON,
     MAX_REFUSAL_MESSAGE,
+    _finite_float,
 )
 from tuisku.adapters.testing import FIXED_RECEIVED_AT, assert_golden, run_fixture_file
 
@@ -170,7 +171,20 @@ class TestRefusals:
 
     @pytest.mark.parametrize(
         "caller",
-        ["../../x$", "a b", "agents urls=9", "", "x" * 129, "agénts", "-lead", "a\x00b", "a\tb"],
+        [
+            "../../x$",
+            "a b",
+            "agents urls=9",
+            "agents classes=x",
+            "",
+            "x" * 129,
+            "y" * 300,
+            "z " * 2000,
+            "agénts",
+            "-lead",
+            "a\x00b",
+            "a\tb",
+        ],
     )
     @pytest.mark.parametrize("kind", ["outbound", "destination"])
     def test_invalid_caller_is_withheld(self, caller: str, kind: str) -> None:
@@ -184,6 +198,8 @@ class TestRefusals:
         assert obs.entity_keys == () and r.detections[0].entity_keys == ()
         assert "caller_invalid" in obs.flags
         assert len(r.detections) == 1
+        stored = all_strings([obs.attributes, obs.unmapped, r.detections[0].explanation])
+        assert caller == "" or not any(caller in s for s in stored if len(caller) > 3)
 
     @pytest.mark.parametrize(
         "message",
@@ -251,9 +267,29 @@ class TestControlCharacters:
         assert obs.unmapped["findings_unrecognised"] == ["em\\x01ail/query/plain"]
         assert "control_chars" in obs.flags
         env = parse(docker(OUTBOUND + "\n", **{"k\x02": "v\x9b", "s": "\ud800"})).observations[0]
-        assert env.unmapped["k\\x02"] == "v\\x9b"
-        assert env.unmapped["s"] == "\ufffd"
+        assert env.unmapped["envelope"]["k\\x02"] == "v\\x9b"
+        assert env.unmapped["envelope"]["s"] == "\ufffd"
         assert {"control_chars", "invalid_unicode_replaced"} <= set(env.flags)
+
+    @pytest.mark.parametrize(
+        ("raw", "escaped"),
+        [
+            ("a\\x01", "a\\\\x01"),  # a literal backslash cannot pass for an escape
+            ("a\x7fb", "a\\x7fb"),
+            ("a\u2028b\u2029", "a\\u2028b\\u2029"),
+            ("ab\u202ecd", "ab\\u202ecd"),
+            ("x\u200by\ufeff", "x\\u200by\\ufeff"),
+            ("tag\U000e0041", "tag\\U000e0041"),
+        ],
+    )
+    def test_escaping_is_unambiguous(self, raw: str, escaped: str) -> None:
+        obs = parse(docker(line(raw, level="INFO") + "\n")).observations[0]
+        assert obs.attributes["message"] == escaped
+
+    def test_backslash_alone_is_escaped_unflagged(self) -> None:
+        obs = parse(docker(line("C:\\x", level="INFO") + "\n")).observations[0]
+        assert obs.attributes["message"] == "C:\\\\x"
+        assert "control_chars" not in obs.flags
 
     def test_otlp_unicode_flag(self) -> None:
         obs = parse(otlp([dp(detector="a\x00")])).observations[0]
@@ -282,6 +318,8 @@ class TestOtherLines:
             ('  File "/app/harava/api/app.py", line 355, in _refuse', "traceback"),
             ("ValueError: bad https://example.com/?x=1", "traceback"),
             ("httpx2.ConnectError:", "traceback"),
+            ("KeyError", "traceback"),
+            ("asyncio.exceptions.CancelledError", "traceback"),
         ],
     )
     def test_kept_withheld(self, text: str, line_type: str) -> None:
@@ -349,7 +387,7 @@ class TestTimestampsAndWrappers:
         obs = parse(
             docker(OUTBOUND + "\n", **{long_a: 1, long_b: 2, "big": list(range(1000)), "ok": [1]})
         ).observations[0]
-        assert obs.unmapped == {"stream": "stderr", "ok": [1]}
+        assert obs.unmapped == {"stream": "stderr", "envelope": {"ok": [1]}}
         assert {"unmapped_key_too_long", "unmapped_dropped"} <= set(obs.flags)
 
     @pytest.mark.parametrize(
@@ -577,7 +615,12 @@ def test_fuzz_only_adapter_errors_escape() -> None:
         for path in FIXTURE_FILES
         for ln in path.read_text(encoding="utf-8").splitlines()
         if ln.strip()
-    ]
+    ] + FUZZ_EXTRA_SEEDS
+    for seed in FUZZ_EXTRA_SEEDS:
+        try:
+            parse(seed)
+        except AdapterError:
+            pass
     for _ in range(4000):
         mutated = _mutations(rng, rng.choice(seeds))
         try:
@@ -586,3 +629,114 @@ def test_fuzz_only_adapter_errors_escape() -> None:
             continue
         for o in r.observations:
             assert not any("\x00" in s for s in all_strings([o.attributes, o.unmapped]))
+
+
+HUGE = int("9" * 400)
+
+
+class TestOtlpRoundTwo:
+    def test_huge_asdouble_skips_only_that_datapoint(self) -> None:
+        bad = {k: v for k, v in dp().items() if k != "asInt"} | {"asDouble": HUGE}
+        r = parse(otlp([GOOD, bad, GOOD]))
+        assert [o.kind for o in r.observations] == [
+            "metric.sample",
+            "harava.unknown",
+            "metric.sample",
+        ]
+        assert "invalid_value" in r.observations[1].flags
+
+    def test_huge_double_label_flagged(self) -> None:
+        point = dp()
+        point["attributes"] = [_attr("d", HUGE, "doubleValue")]
+        obs = parse(otlp([point])).observations[0]
+        assert obs.kind == "metric.sample"
+        assert obs.attributes["labels"] == {"d": None}
+        assert "label_unsupported_value" in obs.flags
+
+    @pytest.mark.parametrize("flags", [2**32, -1])
+    def test_datapoint_flags_bounded_to_uint32(self, flags: int) -> None:
+        obs = parse(otlp([GOOD | {"flags": flags}])).observations[0]
+        assert obs.kind == "harava.unknown"
+        assert "invalid_datapoint" in obs.flags
+
+    def test_uint32_flags_without_no_value_bit_is_sample(self) -> None:
+        assert parse(otlp([GOOD | {"flags": 2**32 - 2}])).observations[0].kind == "metric.sample"
+
+    def _request(self, **over: Any) -> dict[str, Any]:
+        req = json.loads(otlp([GOOD | {"exemplars": [], "description": "dp-level"}]))
+        rm = req["resourceMetrics"][0]
+        rm["schemaUrl"] = "https://opentelemetry.io/schemas/1.26.0"
+        rm["resource"]["droppedAttributesCount"] = 2
+        sm = rm["scopeMetrics"][0]
+        sm["schemaUrl"] = "https://opentelemetry.io/schemas/1.25.0"
+        sm["scope"] |= {
+            "version": "0.9.2",
+            "attributes": [_attr("a", "b")],
+            "droppedAttributesCount": 1,
+        }
+        sm["metrics"][0]["description"] = "metric-level"
+        req["description"] = "request-level"
+        for path, value in over.items():
+            target: Any = req
+            *parents, last = path.split(".")
+            for part in parents:
+                target = target[int(part)] if part.isdigit() else target[part]
+            target[last] = value
+        return req
+
+    def test_everything_kept_without_collisions(self) -> None:
+        obs = parse(json.dumps(self._request())).observations[0]
+        assert obs.kind == "metric.sample"
+        u = obs.unmapped
+        assert u["request"] == {"description": "request-level"}
+        assert u["resource_metrics"] == {"schemaUrl": "https://opentelemetry.io/schemas/1.26.0"}
+        assert u["resource"] == {"droppedAttributesCount": 2}
+        assert u["scope_metrics"] == {"schemaUrl": "https://opentelemetry.io/schemas/1.25.0"}
+        assert u["scope"] == {"attributes": [_attr("a", "b")], "droppedAttributesCount": 1}
+        assert u["metric"] == {"description": "metric-level"}
+        assert u["datapoint"] == {"exemplars": [], "description": "dp-level"}
+        assert obs.attributes["scope"] == {"name": "harava", "version": "0.9.2"}
+
+    def test_docker_extras_cannot_overwrite_adapter_fields(self) -> None:
+        obs = parse(
+            docker(
+                line("outbound data refused: caller=agents urls=1 findings=x/y/z") + "\n",
+                findings_unrecognised=["forged"],
+            )
+        ).observations[0]
+        assert obs.unmapped["findings_unrecognised"] == ["x/y/z"]
+        assert obs.unmapped["envelope"] == {"findings_unrecognised": ["forged"]}
+
+    @pytest.mark.parametrize("attrs", ["x", [5], [{"key": 1}]])
+    def test_malformed_resource_attributes_keep_datapoints(self, attrs: Any) -> None:
+        req = self._request(**{"resourceMetrics.0.resource.attributes": attrs})
+        obs = parse(json.dumps(req)).observations[0]
+        assert obs.kind == "metric.sample"
+        assert obs.attributes["resource"] == {}
+        assert "invalid_resource_attributes" in obs.flags
+        assert obs.unmapped["resource"]["attributes"] == attrs
+
+    def test_repeated_sections_bounded(self) -> None:
+        req = self._request(description="d" * 5000)
+        obs = parse(json.dumps(req)).observations[0]
+        assert "request" not in obs.unmapped
+        assert "unmapped_dropped" in obs.flags
+
+    def test_repeated_section_total_bounded(self) -> None:
+        req = self._request(description="d" * 600, other="o" * 600)
+        obs = parse(json.dumps(req)).observations[0]
+        assert obs.unmapped["request"] == {"description": "d" * 600}
+        assert "unmapped_dropped" in obs.flags
+
+    def test_finite_float_guard(self) -> None:
+        assert _finite_float(float("inf")) is None
+        assert _finite_float(float("nan")) is None
+        assert _finite_float(HUGE) is None
+        assert _finite_float(True) is None
+        assert _finite_float(2) == 2.0
+
+
+FUZZ_EXTRA_SEEDS = [
+    otlp([{k: v for k, v in dp().items() if k != "asInt"} | {"asDouble": HUGE}]),
+    otlp([dp() | {"attributes": [_attr("d", HUGE, "doubleValue")]}]),
+]

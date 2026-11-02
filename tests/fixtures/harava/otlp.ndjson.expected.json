@@ -35,7 +35,9 @@
         "kind": "metric.sample",
         "ocsf_class_uid": null,
         "unmapped": {
-          "description": "Synthetic description."
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       },
       {
@@ -70,7 +72,9 @@
         "kind": "metric.sample",
         "ocsf_class_uid": null,
         "unmapped": {
-          "description": "Synthetic description."
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       },
       {
@@ -104,7 +108,9 @@
         "kind": "metric.sample",
         "ocsf_class_uid": null,
         "unmapped": {
-          "description": "Synthetic description."
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       },
       {
@@ -139,7 +145,9 @@
         "kind": "metric.sample",
         "ocsf_class_uid": null,
         "unmapped": {
-          "description": "Synthetic description."
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       },
       {
@@ -167,23 +175,25 @@
         "kind": "harava.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
-          "histogram": {
-            "aggregationTemporality": 2,
-            "dataPoints": [
-              {
-                "bucketCounts": [
-                  "1",
-                  "3"
-                ],
-                "count": "4",
-                "explicitBounds": [
-                  0.5
-                ],
-                "startTimeUnixNano": "1793523600000000000",
-                "sum": 1.5,
-                "timeUnixNano": "1793524440000000000"
-              }
-            ]
+          "metric": {
+            "histogram": {
+              "aggregationTemporality": 2,
+              "dataPoints": [
+                {
+                  "bucketCounts": [
+                    "1",
+                    "3"
+                  ],
+                  "count": "4",
+                  "explicitBounds": [
+                    0.5
+                  ],
+                  "startTimeUnixNano": "1793523600000000000",
+                  "sum": 1.5,
+                  "timeUnixNano": "1793524440000000000"
+                }
+              ]
+            }
           }
         }
       }
@@ -223,7 +233,9 @@
         "kind": "metric.sample",
         "ocsf_class_uid": null,
         "unmapped": {
-          "description": "Synthetic description."
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       },
       {
@@ -256,7 +268,9 @@
         "kind": "metric.sample",
         "ocsf_class_uid": null,
         "unmapped": {
-          "description": "Synthetic description."
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       },
       {
@@ -291,7 +305,9 @@
         "kind": "metric.sample",
         "ocsf_class_uid": null,
         "unmapped": {
-          "description": "Synthetic description."
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       },
       {
@@ -323,9 +339,14 @@
         "kind": "harava.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
-          "asDouble": "NaN",
-          "startTimeUnixNano": "1793523600000000000",
-          "timeUnixNano": "1793524440000000000"
+          "datapoint": {
+            "asDouble": "NaN",
+            "startTimeUnixNano": "1793523600000000000",
+            "timeUnixNano": "1793524440000000000"
+          },
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       },
       {
@@ -357,9 +378,14 @@
         "kind": "harava.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
-          "flags": 1,
-          "startTimeUnixNano": "1793523600000000000",
-          "timeUnixNano": "1793524440000000000"
+          "datapoint": {
+            "flags": 1,
+            "startTimeUnixNano": "1793523600000000000",
+            "timeUnixNano": "1793524440000000000"
+          },
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       },
       {
@@ -393,7 +419,9 @@
         "kind": "metric.sample",
         "ocsf_class_uid": null,
         "unmapped": {
-          "description": "Synthetic description."
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       },
       {
@@ -427,7 +455,9 @@
         "kind": "metric.sample",
         "ocsf_class_uid": null,
         "unmapped": {
-          "description": "Synthetic description."
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       }
     ]
@@ -467,7 +497,9 @@
         "kind": "metric.sample",
         "ocsf_class_uid": null,
         "unmapped": {
-          "description": "Synthetic description."
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       },
       {
@@ -495,22 +527,24 @@
         "kind": "harava.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
-          "gauge": {
-            "dataPoints": [
-              {
-                "asInt": "7",
-                "attributes": [
-                  {
-                    "key": "state",
-                    "value": {
-                      "stringValue": "pending"
+          "metric": {
+            "gauge": {
+              "dataPoints": [
+                {
+                  "asInt": "7",
+                  "attributes": [
+                    {
+                      "key": "state",
+                      "value": {
+                        "stringValue": "pending"
+                      }
                     }
-                  }
-                ],
-                "startTimeUnixNano": "1793523600000000000",
-                "timeUnixNano": "1793524440000000000"
-              }
-            ]
+                  ],
+                  "startTimeUnixNano": "1793523600000000000",
+                  "timeUnixNano": "1793524440000000000"
+                }
+              ]
+            }
           }
         }
       },
@@ -539,31 +573,33 @@
         "kind": "harava.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
-          "description": "Synthetic description.",
-          "sum": {
-            "aggregationTemporality": 1,
-            "dataPoints": [
-              {
-                "asInt": "9",
-                "attributes": [
-                  {
-                    "key": "lane",
-                    "value": {
-                      "stringValue": "render"
+          "metric": {
+            "description": "Synthetic description.",
+            "sum": {
+              "aggregationTemporality": 1,
+              "dataPoints": [
+                {
+                  "asInt": "9",
+                  "attributes": [
+                    {
+                      "key": "lane",
+                      "value": {
+                        "stringValue": "render"
+                      }
+                    },
+                    {
+                      "key": "outcome",
+                      "value": {
+                        "stringValue": "ok"
+                      }
                     }
-                  },
-                  {
-                    "key": "outcome",
-                    "value": {
-                      "stringValue": "ok"
-                    }
-                  }
-                ],
-                "startTimeUnixNano": "1793523600000000000",
-                "timeUnixNano": "1793524440000000000"
-              }
-            ],
-            "isMonotonic": true
+                  ],
+                  "startTimeUnixNano": "1793523600000000000",
+                  "timeUnixNano": "1793524440000000000"
+                }
+              ],
+              "isMonotonic": true
+            }
           }
         }
       },
@@ -598,7 +634,9 @@
         "kind": "metric.sample",
         "ocsf_class_uid": null,
         "unmapped": {
-          "description": "Synthetic description."
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       }
     ]
@@ -638,9 +676,14 @@
         "kind": "harava.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
-          "asInt": "lots",
-          "startTimeUnixNano": "1793523600000000000",
-          "timeUnixNano": "1793524440000000000"
+          "datapoint": {
+            "asInt": "lots",
+            "startTimeUnixNano": "1793523600000000000",
+            "timeUnixNano": "1793524440000000000"
+          },
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       },
       {
@@ -675,7 +718,9 @@
         "kind": "metric.sample",
         "ocsf_class_uid": null,
         "unmapped": {
-          "description": "Synthetic description."
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       },
       {
@@ -709,7 +754,9 @@
         "kind": "metric.sample",
         "ocsf_class_uid": null,
         "unmapped": {
-          "description": "Synthetic description."
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       },
       {
@@ -744,7 +791,9 @@
         "kind": "metric.sample",
         "ocsf_class_uid": null,
         "unmapped": {
-          "description": "Synthetic description."
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       },
       {
@@ -772,23 +821,25 @@
         "kind": "harava.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
-          "histogram": {
-            "aggregationTemporality": 2,
-            "dataPoints": [
-              {
-                "bucketCounts": [
-                  "1",
-                  "3"
-                ],
-                "count": "4",
-                "explicitBounds": [
-                  0.5
-                ],
-                "startTimeUnixNano": "1793523600000000000",
-                "sum": 1.5,
-                "timeUnixNano": "1793524440000000000"
-              }
-            ]
+          "metric": {
+            "histogram": {
+              "aggregationTemporality": 2,
+              "dataPoints": [
+                {
+                  "bucketCounts": [
+                    "1",
+                    "3"
+                  ],
+                  "count": "4",
+                  "explicitBounds": [
+                    0.5
+                  ],
+                  "startTimeUnixNano": "1793523600000000000",
+                  "sum": 1.5,
+                  "timeUnixNano": "1793524440000000000"
+                }
+              ]
+            }
           }
         }
       }
@@ -832,9 +883,14 @@
         "kind": "harava.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
-          "asInt": "1",
-          "startTimeUnixNano": "1793523600000000000",
-          "timeUnixNano": "0"
+          "datapoint": {
+            "asInt": "1",
+            "startTimeUnixNano": "1793523600000000000",
+            "timeUnixNano": "0"
+          },
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       },
       {
@@ -862,22 +918,24 @@
         "kind": "harava.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
-          "gauge": {
-            "dataPoints": [
-              {
-                "asInt": "7",
-                "attributes": [
-                  {
-                    "key": "state",
-                    "value": {
-                      "stringValue": "pending"
+          "metric": {
+            "gauge": {
+              "dataPoints": [
+                {
+                  "asInt": "7",
+                  "attributes": [
+                    {
+                      "key": "state",
+                      "value": {
+                        "stringValue": "pending"
+                      }
                     }
-                  }
-                ],
-                "startTimeUnixNano": "1793523600000000000",
-                "timeUnixNano": "1793524440000000000"
-              }
-            ]
+                  ],
+                  "startTimeUnixNano": "1793523600000000000",
+                  "timeUnixNano": "1793524440000000000"
+                }
+              ]
+            }
           }
         }
       },
@@ -906,31 +964,33 @@
         "kind": "harava.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
-          "description": "Synthetic description.",
-          "sum": {
-            "aggregationTemporality": 1,
-            "dataPoints": [
-              {
-                "asInt": "9",
-                "attributes": [
-                  {
-                    "key": "lane",
-                    "value": {
-                      "stringValue": "render"
+          "metric": {
+            "description": "Synthetic description.",
+            "sum": {
+              "aggregationTemporality": 1,
+              "dataPoints": [
+                {
+                  "asInt": "9",
+                  "attributes": [
+                    {
+                      "key": "lane",
+                      "value": {
+                        "stringValue": "render"
+                      }
+                    },
+                    {
+                      "key": "outcome",
+                      "value": {
+                        "stringValue": "ok"
+                      }
                     }
-                  },
-                  {
-                    "key": "outcome",
-                    "value": {
-                      "stringValue": "ok"
-                    }
-                  }
-                ],
-                "startTimeUnixNano": "1793523600000000000",
-                "timeUnixNano": "1793524440000000000"
-              }
-            ],
-            "isMonotonic": true
+                  ],
+                  "startTimeUnixNano": "1793523600000000000",
+                  "timeUnixNano": "1793524440000000000"
+                }
+              ],
+              "isMonotonic": true
+            }
           }
         }
       },
@@ -966,7 +1026,9 @@
         "kind": "metric.sample",
         "ocsf_class_uid": null,
         "unmapped": {
-          "description": "Synthetic description."
+          "metric": {
+            "description": "Synthetic description."
+          }
         }
       }
     ]

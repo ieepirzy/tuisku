@@ -30,13 +30,17 @@ Privacy: Harava never logs the refused URL, the matched value or a hash of eithe
 metrics never carry caller, host or URL. This adapter adds no field for any of them.
 
 U+0000 and lone surrogates are replaced with U+FFFD by the shared decoders
-(``invalid_unicode_replaced``); every other C0/C1 control character in a stored string is escaped
-as ``\\xNN`` and flagged ``control_chars``.
+(``invalid_unicode_replaced``). In every stored string the backslash is escaped as ``\\\\`` and
+C0, DEL, C1, U+2028/U+2029 and Unicode format (Cf) characters as ``\\xNN``/``\\uNNNN``/
+``\\UNNNNNNNN``, flagged ``control_chars``. Unmapped source fields are namespaced by level
+(``envelope``; ``request``, ``resource_metrics``, ``resource``, ``scope_metrics``, ``scope``,
+``metric``, ``datapoint``), so no source key can overwrite another or an adapter field.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Mapping
 from datetime import datetime
@@ -75,6 +79,10 @@ MAX_METRIC_NAME = 255
 MAX_UNMAPPED_KEYS = 64
 MAX_UNMAPPED_ENVELOPE = 1024  # JSON size of one extra docker envelope value
 MAX_UNMAPPED_OTLP = 64 * 1024  # JSON size of one unmapped OTLP value (e.g. a histogram)
+# Sections repeated on every datapoint of a request (resource, scope, metric fields) are kept
+# small so 10,000 datapoints cannot amplify them.
+MAX_UNMAPPED_REPEATED = 1024
+UINT32_MAX = 2**32 - 1
 INT64_MIN, INT64_MAX = -(2**63), 2**63 - 1
 UINT64_MAX = 2**64 - 1
 NO_RECORDED_VALUE = 1  # DataPointFlags.DATA_POINT_FLAGS_NO_RECORDED_VALUE_MASK
@@ -134,17 +142,20 @@ _STARTS_WITH_ASCTIME = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", _A)
 _CRI = re.compile(
     r"(\d{4}-\d{2}-\d{2}T[0-9:.]{8,18}(?:Z|[+-]\d{2}:\d{2})) (stdout|stderr) ([PF]) ", _A
 )
-_OUTBOUND = re.compile(
-    r"outbound data refused: caller=(.{0,256}?) urls=(\d{1,7}) findings=(\S{1,8192})", _A
-)
-_DESTINATION = re.compile(r"destination refused: caller=(.{0,256}?) classes=(\S{1,8192})", _A)
+# Refusal lines are split on the LAST " urls=" / " classes=" (the fields after the caller cannot
+# contain spaces), so any caller text, even one with spaces, parses in linear time.
+_OUTBOUND_HEAD = "outbound data refused: caller="
+_OUTBOUND_TAIL = re.compile(r"(\d{1,7}) findings=(\S{1,8192})", _A)
+_DESTINATION_HEAD = "destination refused: caller="
+_DESTINATION_TAIL = re.compile(r"\S{1,8192}", _A)
 _CALLER = re.compile(r"[A-Za-z0-9._:@+-]{1,128}", _A)
 _OUTBOUND_PREFIX = "outbound data refused:"
 _DESTINATION_PREFIX = "destination refused:"
 _MCP_PREFIX = "MCP refuses to serve: "
 _DIGITS = re.compile(r"-?\d{1,20}", _A)
 _UVICORN = re.compile(r"(?:INFO|WARNING|ERROR|DEBUG|CRITICAL):\s", _A)
-_EXCEPTION_LINE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,255}:(?: .*)?", _A | re.DOTALL)
+# ``ValueError: msg``, ``httpx2.ConnectError:``, or a bare ``KeyError`` / ``a.b.CancelledError``.
+_EXCEPTION_LINE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,255}(?::(?: .*)?)?", _A | re.DOTALL)
 _TRACEBACK_HEADERS = frozenset(
     {
         "Traceback (most recent call last):",
@@ -152,7 +163,16 @@ _TRACEBACK_HEADERS = frozenset(
         "The above exception was the direct cause of the following exception:",
     }
 )
-_CONTROL = re.compile(r"[\x00-\x1f\x80-\x9f]")
+# Escaped in every stored string: C0, DEL, C1, U+2028/U+2029 and Unicode category Cf (bidi
+# overrides, zero-width characters; ranges as of Unicode 15.0). The backslash is escaped too, so
+# the escaped form is unambiguous.
+_CF = (
+    "\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890-\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e"
+    "\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f"
+    "\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f"
+)
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029" + _CF + "]")
+_ESCAPE = re.compile("[\\\\\x00-\x1f\x7f-\x9f\u2028\u2029" + _CF + "]")
 
 _TEMPORALITY = {
     0: "unspecified",
@@ -169,19 +189,26 @@ _METRIC_TYPES = ("sum", "gauge", "histogram", "exponentialHistogram", "summary")
 
 
 def _escape_char(m: re.Match[str]) -> str:
-    return f"\\x{ord(m.group(0)):02x}"
+    char = m.group(0)
+    if char == "\\":
+        return "\\\\"
+    code = ord(char)
+    if code <= 0xFF:
+        return f"\\x{code:02x}"
+    return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
 
 
 def _clean(value: Any, flags: list[str]) -> Any:
-    """Escape C0/C1 control characters in every string, keys included.
+    """Escape backslashes and control/format characters in every string, keys included.
 
     Input depth is bounded by ``loads_object`` (64), so the recursion is bounded too.
     """
     if isinstance(value, str):
         if _CONTROL.search(value):
             flags.append("control_chars")
-            return _CONTROL.sub(_escape_char, value)
-        return value
+        elif "\\" not in value:
+            return value
+        return _ESCAPE.sub(_escape_char, value)
     if isinstance(value, dict):
         return {_clean(k, flags): _clean(v, flags) for k, v in value.items()}
     if isinstance(value, list):
@@ -208,9 +235,14 @@ def _observation(
     )
 
 
-def _bound_unmapped(source: Mapping[Any, Any], max_value: int, flags: list[str]) -> dict[str, Any]:
-    """Keep extra source fields verbatim but bounded: no long keys, no huge values."""
+def _bound_unmapped(
+    source: Mapping[Any, Any], max_value: int, flags: list[str], max_total: int | None = None
+) -> dict[str, Any]:
+    """Keep extra source fields verbatim but bounded: no long keys, no huge values, and at most
+    ``max_total`` bytes of JSON in all."""
     out: dict[str, Any] = {}
+    total = 0
+    max_total = max_value * 4 if max_total is None else max_total
     for key, value in source.items():
         if not isinstance(key, str) or len(key) > MAX_LABEL_KEY:
             flags.append("unmapped_key_too_long")
@@ -222,9 +254,10 @@ def _bound_unmapped(source: Mapping[Any, Any], max_value: int, flags: list[str])
             size = len(json.dumps(value))
         except (TypeError, ValueError):
             size = max_value + 1
-        if size > max_value:
+        if size > max_value or total + size > max_total:
             flags.append("unmapped_dropped")
             continue
+        total += size
         out[key] = value
     return out
 
@@ -294,7 +327,9 @@ def _docker_envelope(obj: dict[str, Any], json_flags: tuple[str, ...]) -> _Envel
         if not zone_given:
             flags.append("timezone_assumed_utc")
     extras = {k: v for k, v in obj.items() if k not in ("log", "stream", "time")}
-    unmapped |= _bound_unmapped(extras, MAX_UNMAPPED_ENVELOPE, flags)
+    if extras:
+        # Namespaced, so a source key can never overwrite an adapter field.
+        unmapped["envelope"] = _bound_unmapped(extras, MAX_UNMAPPED_ENVELOPE, flags)
     if log.endswith("\n"):
         log = log[:-1]
     else:
@@ -346,24 +381,30 @@ def _caller(raw_caller: str, flags: list[str]) -> tuple[dict[str, str], tuple[st
     return {"caller": raw_caller}, (key,)
 
 
-def _refusal_match(pattern: re.Pattern[str], ln: _Line, what: str) -> re.Match[str]:
+def _refusal_split(
+    ln: _Line, head: str, sep: str, tail: re.Pattern[str], what: str
+) -> tuple[str, re.Match[str]]:
+    """``(raw caller, tail match)``. The caller may be any text; it is validated separately."""
     if len(ln.message) > MAX_REFUSAL_MESSAGE:
         raise AdapterError(f"{what} refusal line longer than {MAX_REFUSAL_MESSAGE} characters")
-    m = pattern.fullmatch(ln.message)
+    if not ln.message.startswith(head):
+        raise AdapterError(f"malformed {what} refusal line")
+    caller, found, rest = ln.message[len(head) :].rpartition(sep)
+    m = tail.fullmatch(rest) if found else None
     if m is None:
         raise AdapterError(f"malformed {what} refusal line")
-    return m
+    return caller, m
 
 
 def _outbound(ln: _Line) -> ParseResult:
-    m = _refusal_match(_OUTBOUND, ln, "outbound")
+    raw_caller, m = _refusal_split(ln, _OUTBOUND_HEAD, " urls=", _OUTBOUND_TAIL, "outbound")
     flags = list(ln.env.flags)
-    caller, keys = _caller(m.group(1), flags)
-    urls = int(m.group(2))
+    caller, keys = _caller(raw_caller, flags)
+    urls = int(m.group(1))
     findings: list[dict[str, str]] = []
     unrecognised: list[str] = []
     seen: set[tuple[str, str, str]] = set()
-    for entry in m.group(3).split(","):
+    for entry in m.group(2).split(","):
         parts = entry.split("/")
         if len(parts) != 3:
             unrecognised.append(entry)
@@ -422,12 +463,14 @@ def _outbound(ln: _Line) -> ParseResult:
 
 
 def _destination(ln: _Line) -> ParseResult:
-    m = _refusal_match(_DESTINATION, ln, "destination")
+    raw_caller, m = _refusal_split(
+        ln, _DESTINATION_HEAD, " classes=", _DESTINATION_TAIL, "destination"
+    )
     flags = list(ln.env.flags)
-    caller, keys = _caller(m.group(1), flags)
+    caller, keys = _caller(raw_caller, flags)
     classes: list[str] = []
     unrecognised: list[str] = []
-    for cls in m.group(2).split(","):
+    for cls in m.group(0).split(","):
         if cls in DESTINATION_CLASSES:
             if cls not in classes:
                 classes.append(cls)
@@ -599,6 +642,17 @@ def _nanos_time(value: object, what: str) -> datetime:
         raise AdapterError(f"{what} is out of range") from None
 
 
+def _finite_float(value: object) -> float | None:
+    """``value`` as a finite float, or None. Huge integer literals overflow ``float()``."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _any_value(value: object, flags: list[str]) -> Any:
     """An OTLP AnyValue as a plain, bounded value. Unsupported shapes return None and flag."""
     if not isinstance(value, dict) or len(value) != 1:
@@ -615,8 +669,10 @@ def _any_value(value: object, flags: list[str]) -> Any:
         except AdapterError:
             flags.append("label_unsupported_value")
             return None
-    if kind == "doubleValue" and isinstance(inner, int | float) and not isinstance(inner, bool):
-        return float(inner)
+    if kind == "doubleValue":
+        number = _finite_float(inner)
+        if number is not None:
+            return number
     flags.append("label_unsupported_value")
     return None
 
@@ -693,10 +749,10 @@ def _value(dp: dict[str, Any]) -> int | float:
             return _int64(dp["asInt"], "asInt")
         except AdapterError as exc:
             raise _Skip("invalid_value", str(exc)) from None
-    value = dp["asDouble"]
-    if isinstance(value, bool) or not isinstance(value, int | float):
+    number = _finite_float(dp["asDouble"])
+    if number is None:
         raise _Skip("invalid_value", "asDouble is not a finite number")
-    return float(value)
+    return number
 
 
 _DP_MAPPED = ("attributes", "timeUnixNano", "startTimeUnixNano", "asInt", "asDouble")
@@ -713,8 +769,12 @@ def _sample(
     metric_unmapped: dict[str, Any],
 ) -> ObservationDraft:
     point_flags = dp.get("flags", 0)
-    if isinstance(point_flags, bool) or not isinstance(point_flags, int) or point_flags < 0:
-        raise _Skip("invalid_datapoint", "datapoint flags are not an unsigned integer")
+    if (
+        isinstance(point_flags, bool)
+        or not isinstance(point_flags, int)
+        or not 0 <= point_flags <= UINT32_MAX
+    ):
+        raise _Skip("invalid_datapoint", "datapoint flags are not a uint32")
     if point_flags & NO_RECORDED_VALUE:
         raise _Skip("no_recorded_value", "datapoint has the no-recorded-value flag")
     try:
@@ -731,9 +791,12 @@ def _sample(
     for label, allowed in KNOWN_LABELS.get(name, {}).items():
         if labels.get(label) not in allowed:
             flags.append("unknown_label_value")
-    unmapped = metric_unmapped | _bound_unmapped(
+    unmapped = dict(metric_unmapped)
+    extra = _bound_unmapped(
         {k: v for k, v in dp.items() if k not in _DP_MAPPED}, MAX_UNMAPPED_OTLP, flags
     )
+    if extra:
+        unmapped["datapoint"] = extra
     return _observation(
         "metric.sample",
         time,
@@ -797,19 +860,25 @@ def _samples(
                         "error": skip.reason,
                     },
                     [*flags, skip.flag],
-                    _bound_unmapped(
-                        {k: v for k, v in kept.items() if k != "attributes"},
-                        MAX_UNMAPPED_OTLP,
-                        flags,
-                    ),
+                    {
+                        **metric_unmapped,
+                        "datapoint": _bound_unmapped(
+                            {k: v for k, v in kept.items() if k != "attributes"},
+                            MAX_UNMAPPED_OTLP,
+                            flags,
+                        ),
+                    },
                 )
             )
     return out
 
 
 def _metric(
-    metric: object, common: dict[str, Any], rflags: list[str], top_unmapped: dict[str, Any]
+    metric: object, common: dict[str, Any], rflags: list[str], context: dict[str, Any]
 ) -> list[ObservationDraft]:
+    """One metric's observations. ``context`` holds the namespaced unmapped sections of the
+    request, resource and scope; this adds ``metric`` (and ``datapoint``), so source keys from
+    different levels never overwrite each other."""
     flags = list(rflags)
     name: str | None = None
     try:
@@ -827,10 +896,14 @@ def _metric(
             raise _Skip("invalid_metric", str(exc)) from None
         temporality = _temporality(data)
         if mtype == "sum" and temporality == "cumulative":
-            extra = {k: v for k, v in metric.items() if k not in ("name", "unit", "sum")}
-            extra = _bound_unmapped(extra | top_unmapped, MAX_UNMAPPED_OTLP, flags)
+            extra = _bound_unmapped(
+                {k: v for k, v in metric.items() if k not in ("name", "unit", "sum")},
+                MAX_UNMAPPED_REPEATED,
+                flags,
+                MAX_UNMAPPED_REPEATED,
+            )
             try:
-                return _samples(name, data, common, flags, extra)
+                return _samples(name, data, common, flags, context | _section("metric", extra))
             except AdapterError as exc:
                 raise _Skip("invalid_metric", str(exc)) from None
         if mtype == "sum":
@@ -843,10 +916,14 @@ def _metric(
                 None,
                 {"metric": name, "type": mtype, **common},
                 flags,
-                _bound_unmapped(
-                    {k: v for k, v in metric.items() if k not in ("name", "unit")} | top_unmapped,
-                    MAX_UNMAPPED_OTLP,
-                    flags,
+                context
+                | _section(
+                    "metric",
+                    _bound_unmapped(
+                        {k: v for k, v in metric.items() if k not in ("name", "unit")},
+                        MAX_UNMAPPED_OTLP,
+                        flags,
+                    ),
                 ),
             )
         ]
@@ -858,32 +935,72 @@ def _metric(
                 None,
                 {"metric": name, "type": None, **common, "error": skip.reason},
                 [*flags, skip.flag],
-                _bound_unmapped(kept, MAX_UNMAPPED_OTLP, flags),
+                context | {"metric": _bound_unmapped(kept, MAX_UNMAPPED_OTLP, flags)},
             )
         ]
+
+
+def _section(name: str, fields: dict[str, Any]) -> dict[str, Any]:
+    return {name: fields} if fields else {}
+
+
+def _repeated(source: Mapping[str, Any], skip: tuple[str, ...], flags: list[str]) -> dict[str, Any]:
+    """Unmapped fields of a level that every datapoint below it repeats: tightly bounded."""
+    return _bound_unmapped(
+        {k: v for k, v in source.items() if k not in skip},
+        MAX_UNMAPPED_REPEATED,
+        flags,
+        MAX_UNMAPPED_REPEATED,
+    )
 
 
 def _parse_otlp(obj: dict[str, Any], json_flags: tuple[str, ...]) -> ParseResult:
     resource_metrics = _list(obj["resourceMetrics"], "resourceMetrics")
     _count_datapoints(resource_metrics)  # enforce the cap before building anything
     observations: list[ObservationDraft] = []
-    top_unmapped = {k: v for k, v in obj.items() if k != "resourceMetrics"}
+    request_flags: list[str] = list(json_flags)
+    request = _section("request", _repeated(obj, ("resourceMetrics",), request_flags))
     for rm in resource_metrics:
         rm = _dict(rm, "resourceMetrics item")
-        rflags: list[str] = list(json_flags)
-        resource_obj = _dict(rm.get("resource"), "resource")
-        resource = _attributes(resource_obj.get("attributes"), rflags, "resource")
+        rflags = list(request_flags)
+        resource_obj = rm.get("resource")
+        if not isinstance(resource_obj, dict):
+            if resource_obj is not None:
+                rflags.append("invalid_resource")
+            resource_obj = {}
+        try:
+            resource = _attributes(resource_obj.get("attributes"), rflags, "resource")
+            resource_skip: tuple[str, ...] = ("attributes",)
+        except AdapterError:
+            # Keep the datapoints; the raw list stays in unmapped (bounded).
+            rflags.append("invalid_resource_attributes")
+            resource, resource_skip = {}, ()
+        rm_context = (
+            request
+            | _section("resource_metrics", _repeated(rm, ("resource", "scopeMetrics"), rflags))
+            | _section("resource", _repeated(resource_obj, resource_skip, rflags))
+        )
         for sm in _list(rm.get("scopeMetrics"), "scopeMetrics"):
             sm = _dict(sm, "scopeMetrics item")
-            scope_obj = _dict(sm.get("scope"), "scope")
+            sflags = list(rflags)
+            scope_obj = sm.get("scope")
+            if not isinstance(scope_obj, dict):
+                if scope_obj is not None:
+                    sflags.append("invalid_scope")
+                scope_obj = {}
             scope = {
-                k: _truncate(scope_obj[k], MAX_METRIC_NAME, "scope_truncated", rflags)
+                k: _truncate(scope_obj[k], MAX_METRIC_NAME, "scope_truncated", sflags)
                 for k in ("name", "version")
                 if isinstance(scope_obj.get(k), str)
             }
+            context = (
+                rm_context
+                | _section("scope_metrics", _repeated(sm, ("scope", "metrics"), sflags))
+                | _section("scope", _repeated(scope_obj, ("name", "version"), sflags))
+            )
             common: dict[str, Any] = {"resource": resource, "scope": scope}
             for metric in _list(sm.get("metrics"), "metrics"):
-                observations.extend(_metric(metric, common, rflags, top_unmapped))
+                observations.extend(_metric(metric, common, sflags, context))
     return ParseResult(observations=tuple(observations))
 
 
