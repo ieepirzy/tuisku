@@ -1,0 +1,130 @@
+[
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {},
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2023-09-18T06:14:00+00:00",
+        "flags": [],
+        "kind": "suricata.unknown",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "event_type": "stats",
+          "stats": {
+            "decoder": {
+              "pkts": 1000
+            },
+            "uptime": 120
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "protocol_name": "tcp",
+            "protocol_num": 6,
+            "protocol_ver_id": 4
+          },
+          "dst_endpoint": {
+            "ip": "198.51.100.9",
+            "port": 22
+          },
+          "src_endpoint": {
+            "ip": "10.0.0.7",
+            "port": 40000
+          }
+        },
+        "community_id": "1:jVqqWX+0TQwEaCCeuyWUDFeqeE4=",
+        "correlation": {
+          "suricata.flow_id": "130"
+        },
+        "entity_keys": [
+          "ip:10.0.0.7",
+          "ip:198.51.100.9"
+        ],
+        "event_time": "2023-09-18T06:14:01+00:00",
+        "flags": [
+          "orientation_unknown"
+        ],
+        "kind": "suricata.unknown",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "event_type": "ssh",
+          "ssh": {
+            "client": {
+              "proto_version": "2.0",
+              "software_version": "OpenSSH_9.0"
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "protocol_name": "udp",
+            "protocol_num": 17,
+            "protocol_ver_id": 4
+          },
+          "dst_endpoint": {
+            "ip": "198.51.100.10"
+          },
+          "src_endpoint": {
+            "ip": "10.0.0.8"
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [
+          "ip:10.0.0.8",
+          "ip:198.51.100.10"
+        ],
+        "event_time": "2023-09-18T06:14:02+00:00",
+        "flags": [
+          "orientation_unknown",
+          "missing_event_type"
+        ],
+        "kind": "suricata.unknown",
+        "ocsf_class_uid": null,
+        "unmapped": {}
+      }
+    ]
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {},
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2023-09-18T06:14:03+00:00",
+        "flags": [],
+        "kind": "suricata.unknown",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "event_type": [
+            "alert"
+          ],
+          "note": "event_type of the wrong type"
+        }
+      }
+    ]
+  }
+]

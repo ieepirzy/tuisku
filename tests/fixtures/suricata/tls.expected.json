@@ -1,0 +1,75 @@
+[
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "protocol_name": "tcp",
+            "protocol_num": 6,
+            "protocol_ver_id": 4
+          },
+          "dst_endpoint": {
+            "ip": "198.51.100.20",
+            "port": 443
+          },
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 50110
+          },
+          "tls": {
+            "certificate": {
+              "created_time_dt": "2023-01-01T00:00:00+00:00",
+              "expiration_time_dt": "2024-01-01T00:00:00+00:00",
+              "fingerprints": [
+                {
+                  "algorithm": "SHA-1",
+                  "value": "aabbccddeeff00112233445566778899aabbccdd"
+                }
+              ],
+              "issuer": "C=XX, O=Example CA, CN=Example Issuing CA",
+              "serial_number": "0A:1B:2C:3D",
+              "subject": "CN=www.example.org"
+            },
+            "ja3_hash": {
+              "algorithm": "MD5",
+              "value": "e7d705a3286e19ea42f587b344ee6865"
+            },
+            "ja3s_hash": {
+              "algorithm": "MD5",
+              "value": "f4febc55ea12b31ae17cfb7e614afda8"
+            },
+            "sni": "WWW.example.org",
+            "version": "TLS 1.2"
+          }
+        },
+        "community_id": "1:gBJ/w02paAsX8IH1Rfa3vqm4moM=",
+        "correlation": {
+          "suricata.flow_id": "110"
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:198.51.100.20",
+          "domain:www.example.org"
+        ],
+        "event_time": "2023-09-18T06:13:44+00:00",
+        "flags": [],
+        "kind": "tls.handshake",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "tls": {
+            "fingerprint": "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd",
+            "ja3": {
+              "string": "771,4865-4866,0-23,29-23,0"
+            },
+            "ja3s": {
+              "string": "771,4865,51-43"
+            },
+            "ja4": "t13d1516h2_8daaf6152771_02713d6af862"
+          }
+        }
+      }
+    ]
+  }
+]
