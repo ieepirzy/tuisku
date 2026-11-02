@@ -338,9 +338,12 @@ class TestEntityKeys:
         rec = {"event_type": "flow", "src_ip": "1" * 65, "dest_ip": "10.0.0.1"}
         assert "invalid_src_ip" in parse(rec).observations[0].flags
 
-    def test_ipv4_mapped_ipv6_key_is_normalised(self) -> None:
-        rec = {"event_type": "flow", "src_ip": "::ffff:192.0.2.1", "dest_ip": "10.0.0.1"}
-        assert parse(rec).observations[0].entity_keys[0] == "ip:192.0.2.1"
+    @pytest.mark.parametrize("value", ["::ffff:192.0.2.1", "::FFFF:c000:201", "0::ffff:192.0.2.1"])
+    def test_ipv4_mapped_ipv6_is_rendered_stably(self, value: str) -> None:
+        rec = {"event_type": "flow", "src_ip": value, "dest_ip": "10.0.0.1"}
+        obs = parse(rec).observations[0]
+        assert obs.entity_keys[0] == "ip:192.0.2.1"
+        assert obs.attributes["src_endpoint"] == {"ip": "::ffff:192.0.2.1"}
 
 
 class TestCommunityId:

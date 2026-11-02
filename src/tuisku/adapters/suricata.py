@@ -119,9 +119,13 @@ def _ip(value: object) -> str | None:
     if not isinstance(value, str) or len(value) > 64 or "%" in value:
         return None
     try:
-        return ipaddress.ip_address(value).compressed
+        addr = ipaddress.ip_address(value)
     except ValueError:
         return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        # CPython patch releases disagree on how .compressed renders these; pin one form.
+        return f"::ffff:{addr.ipv4_mapped}"
+    return addr.compressed
 
 
 def _hexdigest(pattern: re.Pattern[str]) -> Callable[[object], str | None]:
