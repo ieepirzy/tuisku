@@ -1145,3 +1145,43 @@ def test_meta_pages_are_delivered_first_and_marked_by_the_database(app_db: AppDa
         for k in (keys["rule"], keys["backlog"])
     ]
     assert order.index(backlog_uid) < order.index(rule_uid)  # severity 1 meta before severity 6
+
+
+def test_a_triage_bounce_cannot_take_the_evidence_reopen_slot(
+    app_db: AppDatabase, tmp_path: Path
+) -> None:
+    """Round eleven: a reopen on new evidence (the worker) and a reopen by triage page under
+    different keys, so a bounce in the same 5-minute bucket cannot pre-empt the worker's."""
+    uid, caller, rules, source = _agent_finding(app_db, tmp_path)
+    [(incident,)] = query(
+        app_db.owner_url,
+        "SELECT i.uid::text FROM incidents i JOIN findings f ON f.incident_id = i.id "
+        "WHERE f.uid = %s",
+        (uid,),
+    )
+    with psycopg.connect(app_db.app_url) as conn:
+        for status in ("contained", "investigating", "contained"):
+            _run_all(conn, _request("incident", status), {"uid": uid})
+            conn.commit()
+    ingest(app_db.app_url, source, "harava", [_refusal(AT + timedelta(minutes=3), caller)])
+    notifier = RecordingNotifier()
+    run_worker(app_db.worker_url, rules, Clock(AT + timedelta(minutes=4)), notifier)
+    [(status,)] = query(
+        app_db.owner_url, "SELECT status FROM incidents WHERE uid = %s", (incident,)
+    )
+    assert status == "investigating"  # reopened by the new evidence
+    keys = [
+        k
+        for (k,) in query(
+            app_db.owner_url,
+            "SELECT dedupe_key FROM notifications WHERE kind = 'incident_escalated' "
+            "AND payload ->> 'incident_uid' = %s AND payload ->> 'reason' = 'reopened' ORDER BY id",
+            (incident,),
+        )
+    ]
+    assert len(keys) == 2
+    assert ":reopened:evidence:" not in keys[0] and ":reopened:evidence:" in keys[1]
+    assert any(
+        n["kind"] == "incident_escalated" and n.get("incident_uid") == incident
+        for n in notifier.sent
+    )

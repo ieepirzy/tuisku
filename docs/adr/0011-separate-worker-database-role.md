@@ -71,7 +71,11 @@ able to forge rule output or firing keys.
     the API role from attributing triage to an operator whose token it has not seen. It does
     not stop a compromised API process from reusing a token presented to it while it is
     compromised, or from triaging as a token it issued itself; both are attributed to that
-    token. Only attachable findings change, and a finding is
+    token. Postgres statement logging can capture the secret: `log_statement`,
+    `log_min_duration_statement` and `auto_explain` with parameter logging may write the
+    `set_config` call with its value. Keep statement logging off for the app role
+    (`ALTER ROLE <app role> SET log_statement = 'none'`, and no duration or auto_explain
+    parameter logging for it, where the server allows), or treat the server logs as secret. Only attachable findings change, and a finding is
     never set to `expired`. A suppression needs an expiry and a reason, and ends within 30
     days of the finding's first suppression, so a lift and re-suppress does not restart the
     clock. The trigger sets the suppression's start and count itself. Incidents move only
@@ -130,7 +134,14 @@ able to forge rule output or firing keys.
   suppression's own expiry, its incident closing, or the finding expiring while suppressed)
   pages every threshold crossed meanwhile and one `finding_suppression_ended` summary with the
   count accumulated during the suppression. An incident reopened pages an escalation at most
-  once per incident per 5-minute bucket, however often a request bounces it.
+  once per incident per 5-minute bucket, however often a request bounces it. Reopens on new
+  evidence (the worker's own update) and reopens by triage have separate slots
+  (`escalation:<uid>:reopened:evidence:<bucket>` and `escalation:<uid>:reopened:<bucket>`), so
+  a triage bounce cannot take the worker's. The pager runs as the owner, so it cannot tell the
+  roles apart by `tuisku_is_worker()`; instead `tuisku_apply_triage` marks its own change with
+  a transaction-local setting, which the API role cannot clear between the trigger's
+  statements. `source_admin_requests.requested_at` and `token_revocations.revoked_at` are set to
+  `now()` by a trigger, for every role.
 - **The worker role** writes all of the above that the API cannot. A queued row whose parse
   attempt was superseded is never dropped as stale: no reprocessing run exists yet, so the
   worker raises a `tuisku.meta.evaluation_failed` (subject `superseded_derivation`) and

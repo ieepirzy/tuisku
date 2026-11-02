@@ -185,7 +185,11 @@ token with the triage role; a suppression at most 30 days from the finding's fir
 the incident transition table) and writes its event, or refuses it, and the API answers 404 or
 409 as before. The request must come with the operator's bearer secret, which the API sets
 for the transaction only and the trigger checks against the token's hash, so the API role
-cannot triage as an operator whose token it has not seen. It cannot write notifications at all: the pages triage causes are written by
+cannot triage as an operator whose token it has not seen. Statement logging can capture that secret:
+`log_statement`, `log_min_duration_statement` and `auto_explain` with parameter logging may
+write the `set_config` call with its value. Keep them off for the app role (as a superuser:
+`ALTER ROLE tuisku_app SET log_statement = 'none'`, and no duration or auto_explain parameter
+logging for it), or treat the server logs as secret. It cannot write notifications at all: the pages triage causes are written by
 owner-defined triggers. ADR 0011 lists exactly what each role can
 write.
 

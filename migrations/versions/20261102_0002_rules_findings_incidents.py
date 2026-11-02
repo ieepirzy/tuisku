@@ -635,9 +635,13 @@ BEGIN
     END IF;
     INSERT INTO public.incident_events (incident_id, actor, kind, payload)
     VALUES (inc.id, NEW.actor, ev_kind, payload);
+    -- Marks this status change as triage for the reopen pager, so a triage bounce never takes
+    -- the slot of a reopen on new evidence (which the worker makes with a direct UPDATE).
+    PERFORM set_config('tuisku.triage_request', NEW.uid::text, true);
     UPDATE public.incidents SET status = NEW.status, disposition = NEW.disposition,
         updated_at = now()
     WHERE id = inc.id;
+    PERFORM set_config('tuisku.triage_request', '', true);
     IF NEW.status IN ('resolved', 'closed') THEN
         FOR fr IN
             SELECT fx.* FROM public.findings fx JOIN public.incident_findings l
@@ -750,8 +754,13 @@ BEGIN
     IF OLD.status IN ('contained', 'resolved') AND NEW.status = 'investigating' THEN
         INSERT INTO public.notifications (dedupe_key, kind, severity_id, payload, created_at)
         VALUES (
-            -- At most one page per incident per 5-minute bucket, however often it bounces.
+            -- At most one page per incident per 5-minute bucket, however often it bounces;
+            -- reopens on new evidence (the worker's direct update) and by triage (applied by
+            -- tuisku_apply_triage, which marks its change) have separate slots, so a triage
+            -- bounce cannot take the worker's.
             'escalation:' || NEW.uid || ':reopened:'
+                || CASE WHEN coalesce(current_setting('tuisku.triage_request', true), '') = ''
+                        THEN 'evidence:' ELSE '' END
                 || extract(epoch FROM public.tuisku_current_bucket())::bigint,
             'incident_escalated',
             NEW.severity_id,
