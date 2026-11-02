@@ -30,6 +30,13 @@ if "app_role" not in config.attributes:
     config.attributes["app_role"] = Settings().app_role
 if "worker_role" not in config.attributes:
     config.attributes["worker_role"] = Settings().worker_role
+if "app_role_limits" not in config.attributes:
+    _settings = Settings()
+    config.attributes["app_role_limits"] = {
+        "connection_limit": _settings.app_role_connection_limit,
+        "statement_timeout_seconds": _settings.app_role_statement_timeout_seconds,
+        "idle_in_transaction_seconds": _settings.app_role_idle_in_transaction_seconds,
+    }
 
 
 def _database_url(settings: Settings) -> str:

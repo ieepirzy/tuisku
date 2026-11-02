@@ -107,8 +107,9 @@ async def list_source_tokens(conn: AsyncConnection[Any], source_name: str) -> li
     source_id = await _source_id(conn, source_name)
     return await db.fetch_all(
         conn,
-        "SELECT uid, label, created_at, expires_at, revoked_at, last_used_at "
-        "FROM source_tokens WHERE source_id = %s ORDER BY id",
+        "SELECT t.uid, t.label, t.created_at, t.expires_at, t.revoked_at, u.last_used_at "
+        "FROM source_tokens t LEFT JOIN source_token_usage u ON u.token_id = t.id "
+        "WHERE t.source_id = %s ORDER BY t.id",
         (source_id,),
     )
 
@@ -119,8 +120,9 @@ async def revoke_source_token(
     source_id = await _source_id(conn, source_name)
     row = await db.fetch_one(
         conn,
-        "UPDATE source_tokens SET revoked_at = coalesce(revoked_at, now()) "
-        "WHERE source_id = %s AND uid = %s RETURNING id",
+        # A revocation request, applied at once by an owner trigger (ADR 0011).
+        "INSERT INTO token_revocations (token_id) SELECT id FROM source_tokens "
+        "WHERE source_id = %s AND uid = %s RETURNING token_id",
         (source_id, token_uid),
     )
     if row is None:
@@ -130,8 +132,9 @@ async def revoke_source_token(
 async def disable_source(conn: AsyncConnection[Any], name: str) -> None:
     row = await db.fetch_one(
         conn,
-        "UPDATE sources SET disabled_at = coalesce(disabled_at, now()) WHERE name = %s "
-        "RETURNING id",
+        # A request, applied at once by an owner trigger (ADR 0011).
+        "INSERT INTO source_admin_requests (source_id, action) SELECT id, 'disable' "
+        "FROM sources WHERE name = %s RETURNING source_id",
         (name,),
     )
     if row is None:
@@ -216,8 +219,9 @@ async def authenticate_source_token(
     token_id = row.pop("token_id")
     # Working column; throttled so busy tokens do not write on every request.
     await conn.execute(
-        "UPDATE source_tokens SET last_used_at = now() WHERE id = %s "
-        "AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute')",
+        "INSERT INTO source_token_usage (token_id, last_used_at) VALUES (%s, now()) "
+        "ON CONFLICT (token_id) DO UPDATE SET last_used_at = now() "
+        "WHERE source_token_usage.last_used_at < now() - interval '1 minute'",
         (token_id,),
     )
     return SourceCredential(token_id=token_id, source=Source(**row))

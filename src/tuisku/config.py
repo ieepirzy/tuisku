@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     # the worker writes (rule output, firing keys, links, findings, incidents) and the app role
     # loses those writes. Ignored in single-role setups (app_role unset).
     worker_role: str = "tuisku_worker"
+    # Availability limits `tuisku migrate` sets on the app role (ADR 0011): a connection limit,
+    # and defaults (a session can override them) for statement and idle-in-transaction timeouts.
+    app_role_connection_limit: int = Field(default=20, ge=1)
+    app_role_statement_timeout_seconds: float = Field(default=30.0, gt=0)
+    app_role_idle_in_transaction_seconds: float = Field(default=60.0, gt=0)
 
     # Ingest limits (ADR 0005), enforced at the HTTP boundary.
     ingest_max_body_bytes: int = Field(default=5 * 1024 * 1024, ge=1)

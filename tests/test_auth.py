@@ -30,8 +30,8 @@ def test_valid_token_is_accepted_and_marks_last_used(app_db: AppDatabase) -> Non
         assert post_records(c, name, token, ndjson("a")).status_code == 200
     [(last_used,)] = query(
         app_db.owner_url,
-        "SELECT t.last_used_at FROM source_tokens t JOIN sources s ON s.id = t.source_id "
-        "WHERE s.name = %s",
+        "SELECT u.last_used_at FROM source_token_usage u JOIN source_tokens t "
+        "ON t.id = u.token_id JOIN sources s ON s.id = t.source_id WHERE s.name = %s",
         (name,),
     )
     assert last_used is not None

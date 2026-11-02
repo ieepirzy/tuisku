@@ -39,6 +39,8 @@ EVIDENCE_TABLES = (
     "detections",
     "detection_observations",
     "detection_evidence",
+    "source_admin_requests",
+    "token_revocations",
 )
 # Mutable working tables the app role may change.
 WORKING_TABLES = (
@@ -55,9 +57,10 @@ WORKING_TABLES = (
 # to them) to the worker, apart from the API's own ingest meta-detections.
 API_INSERT = tuple(t for t in EVIDENCE_TABLES if t != "detection_evidence")
 API_ADMIN = ("sources", "source_tokens")
-WORKER_READ = ("raw_records", "parse_attempts", "observations", "sources")
+WORKER_READ = ("raw_records", "parse_attempts", "observations", "sources", "meta_counters")
 WORKER_INSERT = ("detections", "detection_observations", "detection_evidence")
-WORKER_WORKING = ("evaluation_queue", "evaluation_dead_letter", "meta_counters")
+# meta_counters is the API's own (ingest breach repeats): the worker only reads it.
+WORKER_WORKING = ("evaluation_queue", "evaluation_dead_letter")
 
 _ROLE_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
@@ -89,11 +92,32 @@ CREATE TABLE source_tokens (
     label        text CHECK (char_length(label) <= 200),
     created_at   timestamptz NOT NULL DEFAULT now(),
     expires_at   timestamptz,
-    revoked_at   timestamptz,
-    -- Working column (not evidence): updated at most once a minute per token.
-    last_used_at timestamptz
+    revoked_at   timestamptz
 );
 CREATE INDEX source_tokens_source_id_idx ON source_tokens (source_id);
+
+-- ADR 0011: the API role updates neither sources nor source_tokens, so it can take no row lock
+-- on them (a row lock needs UPDATE) and never blocks the worker's foreign-key checks. It asks
+-- instead, by inserting into these append-only tables; an owner trigger (SECURITY DEFINER)
+-- applies the change at once. The applied column stays where authentication reads it.
+CREATE TABLE source_admin_requests (
+    id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    source_id    bigint NOT NULL REFERENCES sources (id),
+    action       text NOT NULL CHECK (action IN ('disable')),
+    requested_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE token_revocations (
+    id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    token_id   bigint NOT NULL REFERENCES source_tokens (id),
+    revoked_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- When each source token was last used: the API's own bookkeeping, in a table the worker never
+-- reads or references, so the API may update it freely.
+CREATE TABLE source_token_usage (
+    token_id     bigint PRIMARY KEY REFERENCES source_tokens (id),
+    last_used_at timestamptz NOT NULL
+);
 
 CREATE TABLE operator_tokens (
     id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -525,6 +549,48 @@ $$;
 CREATE TRIGGER meta_counters_guard BEFORE INSERT OR UPDATE ON meta_counters
     FOR EACH ROW EXECUTE FUNCTION tuisku_meta_counters_guard();
 
+-- Applies a source request or a token revocation as the owner, at once (ADR 0011). Non-key
+-- updates only, so they never conflict with the worker's foreign-key checks (FOR KEY SHARE).
+CREATE FUNCTION tuisku_apply_source_request() RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF TG_RELID NOT IN ('public.source_admin_requests'::regclass::oid) OR TG_WHEN <> 'AFTER'
+       OR TG_OP NOT IN ('INSERT') OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF NEW.action = 'disable' THEN
+        UPDATE public.sources SET disabled_at = coalesce(disabled_at, now())
+        WHERE id = NEW.source_id;
+    END IF;
+    RETURN NULL;
+END
+$$;
+CREATE TRIGGER source_admin_requests_apply AFTER INSERT ON source_admin_requests
+    FOR EACH ROW EXECUTE FUNCTION tuisku_apply_source_request();
+
+CREATE FUNCTION tuisku_apply_token_revocation() RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF TG_RELID NOT IN ('public.token_revocations'::regclass::oid) OR TG_WHEN <> 'AFTER'
+       OR TG_OP NOT IN ('INSERT') OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    UPDATE public.source_tokens SET revoked_at = coalesce(revoked_at, now())
+    WHERE id = NEW.token_id;
+    RETURN NULL;
+END
+$$;
+CREATE TRIGGER token_revocations_apply AFTER INSERT ON token_revocations
+    FOR EACH ROW EXECUTE FUNCTION tuisku_apply_token_revocation();
+
 CREATE FUNCTION tuisku_current_bucket() RETURNS timestamptz
 LANGUAGE sql STABLE
 SET search_path = pg_catalog
@@ -664,8 +730,8 @@ def upgrade() -> None:
     # Sources and tokens: created by the API role, then only disabled or revoked; never renamed
     # or deleted (renames go through the owner CLI), so evidence keeps its provenance.
     op.execute(f'GRANT SELECT, INSERT ON {", ".join(API_ADMIN)} TO "{app}"')
-    op.execute(f'GRANT UPDATE (disabled_at) ON sources TO "{app}"')
-    op.execute(f'GRANT UPDATE (revoked_at, last_used_at) ON source_tokens TO "{app}"')
+    # No UPDATE on sources or source_tokens (see source_admin_requests): its own usage table only.
+    op.execute(f'GRANT SELECT, INSERT, UPDATE ON source_token_usage TO "{app}"')
     # Tokens are revoked, never deleted, so their history stays (ADR 0005).
     # Non-person read/triage/admin tokens only (the person trigger refuses the rest to any role
     # but the owner); afterwards only revoked, never otherwise changed.
@@ -690,13 +756,30 @@ def upgrade() -> None:
     )
     op.execute(
         f'CREATE POLICY meta_counters_worker ON meta_counters TO "{worker}" '
-        "USING (true) WITH CHECK (true)"
+        "USING (true) WITH CHECK (false)"  # the worker reads counters, never writes them
     )
     op.execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "{app}"')
     op.execute(f'GRANT SELECT ON {", ".join(WORKER_READ)} TO "{worker}"')
     op.execute(f'GRANT SELECT, INSERT ON {", ".join(WORKER_INSERT)} TO "{worker}"')
     op.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON {", ".join(WORKER_WORKING)} TO "{worker}"')
     op.execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "{worker}"')
+    # Availability (ADR 0011): bound what a compromised API process can take from a shared
+    # Postgres. Defaults for the role in this database; a session can still change its own
+    # timeouts, so the health endpoint, not these, is what detects exhaustion.
+    limits = context.config.attributes.get("app_role_limits") or {}
+    connections = int(limits.get("connection_limit", 20))
+    statement_ms = int(float(limits.get("statement_timeout_seconds", 30)) * 1000)
+    idle_ms = int(float(limits.get("idle_in_transaction_seconds", 60)) * 1000)
+    op.execute(f'ALTER ROLE "{app}" CONNECTION LIMIT {connections}')
+    op.execute(
+        f"""DO $$ BEGIN
+            EXECUTE format('ALTER ROLE %I IN DATABASE %I SET statement_timeout = %L',
+                           '{app}', current_database(), '{statement_ms}ms');
+            EXECUTE format('ALTER ROLE %I IN DATABASE %I SET '
+                           'idle_in_transaction_session_timeout = %L',
+                           '{app}', current_database(), '{idle_ms}ms');
+        END $$;"""
+    )
     for helper in HELPER_FUNCTIONS:
         op.execute(f'GRANT EXECUTE ON FUNCTION {helper} TO "{app}", "{worker}"')
     # Both runtime roles must be left without TEMP: refuse to finish if PUBLIC's could not be
@@ -714,7 +797,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute(
-        "DROP TABLE meta_counters, evaluation_dead_letter, evaluation_queue, detection_evidence, "
+        "DROP TABLE source_token_usage, token_revocations, source_admin_requests, "
+        "meta_counters, evaluation_dead_letter, evaluation_queue, detection_evidence, "
         "detection_observations, detections, observations, parse_attempts, raw_duplicates, "
         "raw_records, operator_tokens, source_tokens, sources"
     )
@@ -723,5 +807,6 @@ def downgrade() -> None:
         "tuisku_detections_worker_only(), tuisku_rule_links_worker_only(), tuisku_is_worker(), "
         "tuisku_current_bucket(), tuisku_derivation_same_transaction(), "
         "tuisku_xmin_is_current(xid), tuisku_queue_same_transaction(), tuisku_raw_source_name(), "
-        "tuisku_meta_counters_guard()"
+        "tuisku_meta_counters_guard(), tuisku_apply_source_request(), "
+        "tuisku_apply_token_revocation()"
     )

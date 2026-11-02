@@ -13,7 +13,7 @@ import pytest
 from psycopg import errors
 
 from tests.conftest import AppDatabase
-from tests.support import client, ndjson, new_source, post_records, query
+from tests.support import client, ndjson, new_source, post_records, query, run
 
 EVIDENCE_TABLES = [
     "raw_records",
@@ -23,6 +23,8 @@ EVIDENCE_TABLES = [
     "detections",
     "detection_observations",
     "detection_evidence",
+    "source_admin_requests",
+    "token_revocations",
 ]
 
 
@@ -40,6 +42,18 @@ def populated(app_db: AppDatabase) -> AppDatabase:
             "SELECT d.id, l.observation_id, now() FROM detections d "
             "JOIN detection_observations l ON l.detection_id = d.id LIMIT 1"
         )
+    # A throwaway source, disabled, with a revoked token: rows in the request tables.
+    other = f"x{uuid.uuid4().hex[:10]}"
+    new_source(app_db.app_url, other)
+
+    async def requests(conn):  # type: ignore[no-untyped-def]
+        from tuisku.store import admin
+
+        [token] = await admin.list_source_tokens(conn, other)
+        await admin.revoke_source_token(conn, other, token["uid"])
+        await admin.disable_source(conn, other)
+
+    run(app_db.app_url, requests)
     for table in EVIDENCE_TABLES:
         assert query(app_db.owner_url, f"SELECT count(*) FROM {table}")[0][0] > 0, table
     return app_db
@@ -65,6 +79,8 @@ _UPDATE_COLUMN = {
     "detections": "kind",
     "detection_observations": "detection_id",
     "detection_evidence": "linked_at",
+    "source_admin_requests": "action",
+    "token_revocations": "revoked_at",
 }
 
 
@@ -111,7 +127,6 @@ def test_app_role_does_not_own_evidence_tables(populated: AppDatabase) -> None:
 
 
 def test_app_role_can_change_working_tables(populated: AppDatabase) -> None:
-    assert _attempt(populated.app_url, "UPDATE sources SET disabled_at = disabled_at") is None
     assert _attempt(populated.app_url, "UPDATE meta_counters SET count = count") is None
     assert _attempt(populated.app_url, "UPDATE operator_tokens SET revoked_at = revoked_at") is None
 
@@ -305,12 +320,86 @@ def test_app_role_cannot_rename_delete_or_preload(populated: AppDatabase, statem
     assert "permission denied" in str(exc)
 
 
-def test_app_role_disables_and_revokes_only(populated: AppDatabase) -> None:
+def test_app_role_disables_and_revokes_by_request_only(populated: AppDatabase) -> None:
+    """Round nine: no UPDATE on sources or source_tokens. A request row, applied at once by an
+    owner trigger, disables a source or revokes a token, and authentication honours it."""
     for statement in [
         "UPDATE sources SET disabled_at = disabled_at",
-        "UPDATE source_tokens SET revoked_at = revoked_at, last_used_at = last_used_at",
+        "UPDATE source_tokens SET revoked_at = revoked_at",
     ]:
-        assert _attempt(populated.app_url, statement) is None, statement
+        exc = _attempt(populated.app_url, statement)
+        assert isinstance(exc, errors.InsufficientPrivilege), statement
+    name = f"r{uuid.uuid4().hex[:10]}"
+    token = new_source(populated.app_url, name)
+    with client(populated.app_url) as c:
+        assert post_records(c, name, token, ndjson("a")).status_code == 200
+        with psycopg.connect(populated.app_url) as conn:
+            conn.execute(
+                "INSERT INTO token_revocations (token_id) SELECT t.id FROM source_tokens t "
+                "JOIN sources s ON s.id = t.source_id WHERE s.name = %s",
+                (name,),
+            )
+        assert post_records(c, name, token, ndjson("b")).status_code == 401
+    other = f"r{uuid.uuid4().hex[:10]}"
+    other_token = new_source(populated.app_url, other)
+    with psycopg.connect(populated.app_url) as conn:
+        conn.execute(
+            "INSERT INTO source_admin_requests (source_id, action) "
+            "SELECT id, 'disable' FROM sources WHERE name = %s",
+            (other,),
+        )
+    with client(populated.app_url) as c:
+        assert post_records(c, other, other_token, ndjson("c")).status_code == 401
+    [(disabled,)] = query(
+        populated.owner_url, "SELECT disabled_at IS NOT NULL FROM sources WHERE name = %s", (other,)
+    )
+    assert disabled
+
+
+def test_app_role_takes_no_row_lock_on_what_the_worker_uses(populated: AppDatabase) -> None:
+    """A row lock (FOR UPDATE, FOR SHARE and their KEY variants) needs UPDATE. The app role
+    holds UPDATE only on tables the worker never references or updates."""
+    updatable = query(
+        populated.owner_url,
+        "SELECT DISTINCT table_name FROM information_schema.column_privileges "
+        "WHERE grantee = %s AND privilege_type = 'UPDATE' ORDER BY 1",
+        (populated.app_role,),
+    )
+    assert [t for (t,) in updatable] == ["meta_counters", "operator_tokens", "source_token_usage"]
+    readable = [
+        t
+        for (t,) in query(
+            populated.owner_url,
+            "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relkind = 'r' "
+            "AND has_table_privilege(%s, c.oid, 'SELECT')",
+            (populated.app_role,),
+        )
+        if t not in ("meta_counters", "operator_tokens", "source_token_usage")
+    ]
+    assert "sources" in readable and "source_tokens" in readable
+    for table in readable:
+        for mode in ("UPDATE", "NO KEY UPDATE", "SHARE", "KEY SHARE"):
+            exc = _attempt(populated.app_url, f"SELECT 1 FROM {table} LIMIT 1 FOR {mode}")
+            assert isinstance(exc, errors.InsufficientPrivilege), (table, mode, exc)
+
+
+def test_app_role_limits(populated: AppDatabase) -> None:
+    [(limit,)] = query(
+        populated.owner_url,
+        "SELECT rolconnlimit FROM pg_roles WHERE rolname = %s",
+        (populated.app_role,),
+    )
+    [(config,)] = query(
+        populated.owner_url,
+        "SELECT setconfig FROM pg_db_role_setting s JOIN pg_roles r ON r.oid = s.setrole "
+        "JOIN pg_database d ON d.oid = s.setdatabase WHERE r.rolname = %s "
+        "AND d.datname = current_database()",
+        (populated.app_role,),
+    )
+    assert limit == 20
+    assert "statement_timeout=30000ms" in config
+    assert "idle_in_transaction_session_timeout=60000ms" in config
 
 
 def test_raw_records_keep_the_source_name_they_arrived_with(populated: AppDatabase) -> None:
@@ -477,7 +566,8 @@ def test_the_app_role_cannot_lock_any_table(populated: AppDatabase) -> None:
         for (t,) in query(
             populated.owner_url, "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
         )
-        if t != "alembic_version"
+        # source_token_usage is the API's own: the worker never reads or references it.
+        if t not in ("alembic_version", "source_token_usage")
     ]
     assert "meta_counters" in tables and len(tables) >= 13
     for table in tables:
@@ -490,7 +580,8 @@ def test_the_app_role_cannot_lock_any_table(populated: AppDatabase) -> None:
         "WHERE grantee = %s AND privilege_type IN ('UPDATE', 'DELETE', 'TRUNCATE')",
         (populated.app_role,),
     )
-    assert rows == []  # only column-level UPDATE grants remain
+    # Only column-level UPDATE grants remain, but for the API's own usage table.
+    assert {t for t, _ in rows} <= {"source_token_usage"}
 
 
 @pytest.mark.parametrize(
