@@ -87,11 +87,60 @@ Operator tokens with the `read` role (or `triage`/`admin`) can read evidence:
 each raw record's newest successful parse attempt unless `all_attempts=true`) and
 `GET /v1/raw/{uid}` (metadata and the body as base64).
 
+## Rules, findings and incidents
+
+`tuisku worker` evaluates every new observation and detection against the rule packs (ADR 0006)
+and folds firings into findings and incidents (ADR 0007). Run it as its own process, connected
+as the worker role (ADR 0011); `--once` drains the queue and exits, `--check-packs` only
+validates the packs.
+
+```sh
+uv run tuisku worker --check-packs          # load and validate packs/ plus configured paths
+uv run tuisku worker                        # poll the evaluation queue
+```
+
+Packs are directories with a `pack.yaml` and `rules/*.yaml` (see `packs/` and ADR 0006). The
+built-in packs (`harava`, `sensors-default`, `tuisku-meta`) ship generic defaults only, and only
+they may declare `authorship: tuisku`. A deployment mounts
+its own packs and params from its configuration repository:
+`TUISKU_RULE_PACK_PATHS=/etc/tuisku/packs` (separated by `:`) and
+`TUISKU_RULE_PARAMS_FILE=/etc/tuisku/params.yaml`, which maps pack ids to param overrides, e.g.
+`harava: {restricted_callers: [agents, crawler]}`. Every pack's SHA-256 is recorded in
+`pack_loads` and in each detection's explanation. Each rule ships positive and negative fixtures
+in its pack's `fixtures/`, run through the real adapters by `tests/test_packs.py`.
+
+Notifications go to an append-only outbox and are delivered after each evaluation commits;
+each delivery or notifier failure appends to the append-only `notification_deliveries` log, so
+one failing notification never blocks the others and none can be deleted unnoticed. A failed
+delivery is retried after an exponential backoff from its last failure (5 s doubling, capped
+at 5 minutes) and never dropped; after 10 failures a `tuisku.meta.notification_undeliverable`
+meta-detection pages through `tuisku-meta` (route it to another channel). The only
+notifier today writes one JSON line per notification to the `tuisku.notify` logger; routing
+them to people is a deployment decision. A rule that fails 5 times on a row is dead-lettered and
+pages (`evaluation_dead_lettered`), and `tuisku-meta` turns the resulting
+`tuisku.meta.evaluation_failed` meta-detections into a finding that pages on every occurrence.
+
+Operator tokens with `read` list `GET /v1/findings` and `GET /v1/incidents` (filters `status`,
+`entity_key`, `rule_id` for findings; `before`/`limit` paging) and read
+`GET /v1/incidents/{uid}` (timeline, findings, evidence summary). Tokens with `triage` post
+`POST /v1/incidents/{uid}/status` (`{"status": "closed", "disposition": "false_positive"}`;
+closing or resolving resolves the incident's open findings, so detection re-arms) and
+`POST /v1/findings/{uid}/status` (`acknowledged`, `resolved`, `open`, or `suppressed` with
+`suppressed_until` within 30 days and a `reason`). Every change is an event attributed to
+`operator:<token uid>`.
+
+Worker settings: `TUISKU_WORKER_BATCH_SIZE`, `TUISKU_WORKER_LEASE_SECONDS` (120),
+`TUISKU_WORKER_POLL_SECONDS`, `TUISKU_WORKER_STATEMENT_TIMEOUT_SECONDS` (10),
+`TUISKU_WORKER_MAX_OPEN_FINDINGS` (1000) and `TUISKU_WORKER_MAX_LIVE_INCIDENTS` (100), which
+can only be lowered, `TUISKU_WORKER_EXPORT_INTERVAL_SECONDS` (60) and
+`TUISKU_WORKER_ALLOWED_LATENESS_SECONDS` (86400). A queued row or undelivered notification older
+than `TUISKU_WORKER_BACKLOG_SECONDS` (300) raises a `tuisku.meta.backlog` that pages at once.
+
 ## Database roles
 
 Evidence tables are append-only (ADR 0004). Run `tuisku migrate` as the owning role, the API as
-a non-owning app role (`TUISKU_APP_ROLE`), and the rule worker as a separate worker role
-(`TUISKU_WORKER_ROLE`, default `tuisku_worker`), both named when migrating:
+a non-owning app role (`TUISKU_APP_ROLE`), and `tuisku worker` as a separate worker role
+(`TUISKU_WORKER_ROLE`, default `tuisku_worker`, ADR 0011), named when migrating:
 
 ```sh
 # as a superuser, once:
@@ -100,6 +149,7 @@ a non-owning app role (`TUISKU_APP_ROLE`), and the rule worker as a separate wor
 TUISKU_APP_ROLE=tuisku_app TUISKU_WORKER_ROLE=tuisku_worker \
   TUISKU_DATABASE_URL=<owner url> uv run tuisku migrate
 TUISKU_DATABASE_URL=<tuisku_app url> uv run tuisku api
+TUISKU_DATABASE_URL=<tuisku_worker url> uv run tuisku worker
 ```
 
 With `TUISKU_APP_ROLE` set, migrations grant the app role `SELECT` on evidence tables and
@@ -127,7 +177,21 @@ read-only helpers `tuisku_is_worker()`, `tuisku_xmin_is_current()` and
 run on any table but its own, and PUBLIC has no `TEMP` on the database, so no role can attach
 Tuisku's trigger functions to a table of its own. The migrating role must therefore own the
 database, or the migration stops and asks for the `REVOKE TEMP` to be run by its owner. Operator
-tokens can be created without a person (read, triage, admin) and only revoked afterwards.
+tokens can be created without a person (read, triage, admin) and only revoked afterwards. For
+triage the API role gets `SELECT` on findings, incidents and their tables, and `INSERT` on the
+append-only `triage_requests`, nothing more: no `UPDATE` on findings or incidents and no
+events. An owner trigger applies each request with the triage rules (a live, unexpired operator
+token with the triage role; a suppression at most 30 days from the finding's first suppression;
+the incident transition table) and writes its event, or refuses it, and the API answers 404 or
+409 as before. The request must come with the operator's bearer secret, which the API sets
+for the transaction only and the trigger checks against the token's hash, so the API role
+cannot triage as an operator whose token it has not seen. Statement logging can capture that secret:
+`log_statement`, `log_min_duration_statement` and `auto_explain` with parameter logging may
+write the `set_config` call with its value. Keep them off for the app role (as a superuser:
+`ALTER ROLE tuisku_app SET log_statement = 'none'`, and no duration or auto_explain parameter
+logging for it), or treat the server logs as secret. It cannot write notifications at all: the pages triage causes are written by
+owner-defined triggers. ADR 0011 lists exactly what each role can
+write.
 
 Tuisku expects a database of its own. `REVOKE TEMP ON DATABASE ... FROM PUBLIC` applies to the
 whole database, so any other application sharing it would lose temporary tables too. Two things
@@ -143,17 +207,31 @@ can override those timeouts, so they bound mistakes, not attacks. On Postgres 16
 reserve slots for the worker so an exhausted pool cannot lock it out: set
 `reserved_connections` (for example 3) and `GRANT pg_use_reserved_connections TO
 tuisku_worker`. Give the database a disk quota, or at least disk alerts, sized to the retention
-policy. The
-worker's backlog check (`tuisku.meta.backlog`) pages when the queue or the notification outbox
-falls behind.
+policy. The worker's backlog check (`tuisku.meta.backlog`) pages when the queue or the
+notification outbox falls behind. A stalled worker cannot page about itself, and a compromised API could fake any health
+view it serves, so monitor the worker process directly: `tuisku worker --health-port 8081`
+(or `TUISKU_WORKER_HEALTH_PORT`, bound to `TUISKU_WORKER_HEALTH_HOST`) answers any `GET` with
+200 `{"status": "ok"}` while its last healthy pass is newer than
+`TUISKU_WORKER_HEARTBEAT_STALE_SECONDS` (120), and 503 otherwise, without authentication and
+with status only. Set `TUISKU_WORKER_DEADMAN_URL` to have the worker fetch a dead-man's-switch
+URL after each healthy round. `GET /v1/worker/health` on the API is advisory and needs the
+`read` role: it shows the heartbeat and the age of the oldest queued row and undelivered
+notification (ADR 0011, "Availability limits").
 
-The worker role alone writes rule output, so a compromised API process cannot forge it. Only the
-worker role gets `INSERT` on `detection_evidence`. A trigger lets only the worker role insert
-`tuisku`-evaluated detections and links to them. The one exception is the API's own bucketed
-ingest meta-detections, whose identity is their kind.
+Only the worker role writes rule output: `tuisku`-evaluated detections and their links,
+`detection_evidence`, `rule_firings`, `findings`, `incidents`, `finding_detections`,
+`incident_findings`, `finding_overflow_groups`, `pack_loads`, `notification_deliveries`,
+`evaluation_attempts` and `evaluation_dead_letter_rules`, and events with `system` or `rule:`
+actors. Triggers enforce the parts that share a table with ingest. A compromised API process
+therefore cannot forge rule output or firing keys (ADR 0011). A firing key is also accepted
+only for a row linked to its detection in the same transaction. The worker serializes itself
+with row locks on the worker-only tables `worker_locks` and `group_locks`, never with advisory
+locks, which any role could take. Its connection runs with `lock_timeout` and
+`statement_timeout`, so a lock held elsewhere delays one step and never stalls a pass.
 
-Grants are made by the revision that creates each table, so set both variables before the first
-`tuisku migrate`. For an existing database, run the same `GRANT` statements by hand. With
+Triggers set the timestamps of the histories, link tables, firing keys, pack loads and
+deliveries to the database clock. Grants for both roles are made by the revision that creates
+each table, so set both variables before the first `tuisku migrate`. For an existing database, run the same `GRANT` statements by hand. With
 `TUISKU_APP_ROLE` unset no grants are made, and the owning role does everything; that suits
 local development only. Independently of roles, triggers reject `UPDATE`, `DELETE` and
 `TRUNCATE` on evidence tables for every role, owner included.
