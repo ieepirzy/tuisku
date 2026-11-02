@@ -159,15 +159,17 @@ cannot make a stored record's rows stale or attach rows to it. The migrations al
 `UPDATE (revoked_at, last_used_at)` respectively. Renames go through the owner CLI, and each raw
 record keeps the source name it arrived with in `source_name`. They grant
 `SELECT, INSERT, UPDATE` on `operator_tokens` and `meta_counters`, and
-`INSERT (observation_id, detection_id, enqueued_at)` on `evaluation_queue`, plus `USAGE` on
-sequences. Only the worker role claims, updates or deletes queue rows, or touches
+`INSERT (observation_id, detection_id, enqueued_at)` on `evaluation_queue` (a trigger accepts
+only observations and detections inserted in the same transaction), plus `USAGE` on
+sequences. A trigger sets each raw record's `source_name` from `sources`, whatever the writer
+supplied. Only the worker role claims, updates or deletes queue rows, or touches
 `evaluation_dead_letter`. For triage the API role gets `SELECT` on findings, incidents and
 their tables. On `findings` it may update only the status and suppression columns, and on
 `incidents` only status and disposition. A trigger requires each such change to come with its
-operator event in the same transaction, and caps a suppression at 30 days from its start. It
-may also insert `finding_events` and `incident_events` with operator actors, and
-`notifications` with the triage key prefixes (`operator_escalation:`, `triage_threshold:`).
-ADR 0011 lists exactly what each role can write.
+operator event in the same transaction, and caps a suppression at 30 days from the finding's
+first suppression. It may also insert `finding_events` and `incident_events` with an operator
+actor and a triage kind. It cannot write notifications at all: the pages triage causes are
+written by owner-defined triggers (ADR 0011 lists exactly what each role can write).
 
 Only the worker role writes rule output: `tuisku`-evaluated detections and their links,
 `detection_evidence`, `rule_firings`, `findings`, `incidents`, `finding_detections`,
