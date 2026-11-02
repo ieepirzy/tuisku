@@ -1,0 +1,4 @@
+{"timestamp":"2023-09-18T06:14:00.000000+0000","event_type":"stats","stats":{"uptime":120,"decoder":{"pkts":1000}}}
+{"timestamp":"2023-09-18T06:14:01.000000+0000","flow_id":130,"event_type":"ssh","src_ip":"10.0.0.7","src_port":40000,"dest_ip":"198.51.100.9","dest_port":22,"proto":"TCP","ssh":{"client":{"proto_version":"2.0","software_version":"OpenSSH_9.0"}}}
+{"timestamp":"2023-09-18T06:14:02.000000+0000","src_ip":"10.0.0.8","dest_ip":"198.51.100.10","proto":"UDP"}
+{"timestamp":"2023-09-18T06:14:03.000000+0000","event_type":["alert"],"note":"event_type of the wrong type"}

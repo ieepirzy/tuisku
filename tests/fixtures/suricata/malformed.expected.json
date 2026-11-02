@@ -1,0 +1,169 @@
+[
+  {
+    "adapter": "suricata@1.0.0",
+    "error": "invalid JSON at position 0"
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "error": "invalid JSON at position 67"
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "error": "expected a JSON object"
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "error": "non-standard JSON constant"
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "error": "alert without a valid gid and signature_id"
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "error": "alert record without an alert object"
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "error": "anomaly record without an anomaly object"
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "dst_endpoint": {
+            "ip": "10.0.0.5"
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [
+          "ip:10.0.0.5"
+        ],
+        "event_time": null,
+        "flags": [
+          "invalid_timestamp",
+          "invalid_flow_id",
+          "invalid_src_ip",
+          "invalid_src_port",
+          "invalid_dest_port"
+        ],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "dest_port": 70000,
+          "flow": {
+            "bytes_toserver": true,
+            "pkts_toserver": -1,
+            "start": 12
+          },
+          "flow_id": "12",
+          "proto": 7,
+          "src_ip": "999.1.1.1",
+          "src_port": "80",
+          "timestamp": "yesterday"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "activity_id": 2
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2023-09-18T06:13:41+00:00",
+        "flags": [],
+        "kind": "dns.answer",
+        "ocsf_class_uid": 4003,
+        "unmapped": {
+          "dns": {
+            "answers": "none",
+            "queries": [
+              "x",
+              {
+                "rrname": "a.example"
+              }
+            ],
+            "rcode": 5,
+            "version": 3
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {},
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2023-09-18T06:13:41+00:00",
+        "flags": [],
+        "kind": "http.request",
+        "ocsf_class_uid": 4002,
+        "unmapped": {
+          "http": [
+            "not",
+            "object"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "dst_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 80
+          },
+          "http_request": {
+            "http_method": "GET",
+            "url": {
+              "hostname": "ua.example"
+            },
+            "user_agent": "evil�agent�"
+          },
+          "src_endpoint": {
+            "ip": "::ffff:192.0.2.7",
+            "port": 49300
+          }
+        },
+        "community_id": "1:AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "correlation": {
+          "suricata.flow_id": "140"
+        },
+        "entity_keys": [
+          "ip:192.0.2.7",
+          "ip:10.0.0.5",
+          "domain:ua.example"
+        ],
+        "event_time": "2023-09-18T06:13:41.532140+00:00",
+        "flags": [
+          "invalid_unicode_replaced",
+          "timezone_assumed_utc",
+          "community_id_unverified"
+        ],
+        "kind": "http.request",
+        "ocsf_class_uid": 4002,
+        "unmapped": {
+          "community_id": "1:AAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        }
+      }
+    ]
+  }
+]

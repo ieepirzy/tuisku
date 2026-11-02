@@ -1,0 +1,191 @@
+[
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {},
+        "authorship": "builtin",
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:198.51.100.40"
+        ],
+        "event_time": "2023-09-18T06:13:47+00:00",
+        "explanation": {
+          "summary": "Suricata's built-in applayer checks reported UNABLE_TO_MATCH_RESPONSE_TO_REQUEST (http); the reported facts are on the referenced observation"
+        },
+        "identity": "suricata:anomaly:applayer:http:UNABLE_TO_MATCH_RESPONSE_TO_REQUEST",
+        "kind": "suricata.anomaly",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "check": "anomaly",
+          "engine": "suricata",
+          "event": "UNABLE_TO_MATCH_RESPONSE_TO_REQUEST",
+          "scope": "http",
+          "type": "applayer"
+        },
+        "severity": 1,
+        "title": "Suricata applayer anomaly UNABLE_TO_MATCH_RESPONSE_TO_REQUEST"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "anomaly": {
+            "app_proto": "http",
+            "event": "UNABLE_TO_MATCH_RESPONSE_TO_REQUEST",
+            "layer": "proto_parser",
+            "type": "applayer"
+          },
+          "app_name": "http",
+          "connection_info": {
+            "protocol_name": "tcp",
+            "protocol_num": 6,
+            "protocol_ver_id": 4
+          },
+          "dst_endpoint": {
+            "ip": "198.51.100.40",
+            "port": 80
+          },
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 49300
+          }
+        },
+        "community_id": "1:xRTuIsEUsL9eoYCgEGZSCBv8IBU=",
+        "correlation": {
+          "suricata.flow_id": "120"
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:198.51.100.40"
+        ],
+        "event_time": "2023-09-18T06:13:47+00:00",
+        "flags": [
+          "orientation_unknown"
+        ],
+        "kind": "network.anomaly",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "tx_id": 0
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {},
+        "authorship": "builtin",
+        "entity_keys": [
+          "ip:10.0.0.6",
+          "ip:198.51.100.41"
+        ],
+        "event_time": "2023-09-18T06:13:48+00:00",
+        "explanation": {
+          "summary": "Suricata's built-in decode checks reported decoder.udp.pkt_too_small (-); the reported facts are on the referenced observation"
+        },
+        "identity": "suricata:anomaly:decode:-:decoder.udp.pkt_too_small",
+        "kind": "suricata.anomaly",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "check": "anomaly",
+          "engine": "suricata",
+          "event": "decoder.udp.pkt_too_small",
+          "scope": "-",
+          "type": "decode"
+        },
+        "severity": 1,
+        "title": "Suricata decode anomaly decoder.udp.pkt_too_small"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "anomaly": {
+            "event": "decoder.udp.pkt_too_small",
+            "type": "decode"
+          },
+          "connection_info": {
+            "protocol_name": "udp",
+            "protocol_num": 17,
+            "protocol_ver_id": 4
+          },
+          "dst_endpoint": {
+            "ip": "198.51.100.41"
+          },
+          "src_endpoint": {
+            "ip": "10.0.0.6"
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [
+          "ip:10.0.0.6",
+          "ip:198.51.100.41"
+        ],
+        "event_time": "2023-09-18T06:13:48+00:00",
+        "flags": [
+          "orientation_unknown"
+        ],
+        "kind": "network.anomaly",
+        "ocsf_class_uid": 4001,
+        "unmapped": {}
+      }
+    ]
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {},
+        "authorship": "builtin",
+        "entity_keys": [],
+        "event_time": "2023-09-18T06:13:49+00:00",
+        "explanation": {
+          "summary": "Suricata's built-in unknown checks reported - (-); the reported facts are on the referenced observation"
+        },
+        "identity": "suricata:anomaly:unknown:-:-",
+        "kind": "suricata.anomaly",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "check": "anomaly",
+          "engine": "suricata",
+          "event": "-",
+          "scope": "-",
+          "type": "unknown"
+        },
+        "severity": 1,
+        "title": "Suricata unknown anomaly -"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "anomaly": {
+            "code": 77,
+            "event": "bad event name; DROP TABLE",
+            "type": "unknown"
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2023-09-18T06:13:49+00:00",
+        "flags": [],
+        "kind": "network.anomaly",
+        "ocsf_class_uid": 4001,
+        "unmapped": {}
+      }
+    ]
+  }
+]

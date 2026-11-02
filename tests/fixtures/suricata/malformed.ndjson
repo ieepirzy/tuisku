@@ -1,0 +1,11 @@
+not json at all
+{"timestamp":"2023-09-18T06:13:41.532140+0000","event_type":"alert"
+[1,2,3]
+{"event_type":"flow","timestamp":NaN}
+{"event_type":"alert","timestamp":"2023-09-18T06:13:41.532140+0000","src_ip":"10.0.0.1","alert":{"signature_id":"2045001","gid":1}}
+{"event_type":"alert","timestamp":"2023-09-18T06:13:41.532140+0000","alert":"string not object"}
+{"event_type":"anomaly","timestamp":"2023-09-18T06:13:41.532140+0000","anomaly":null}
+{"event_type":"flow","timestamp":"yesterday","flow_id":"12","src_ip":"999.1.1.1","src_port":"80","dest_ip":"10.0.0.5","dest_port":70000,"proto":7,"flow":{"pkts_toserver":-1,"bytes_toserver":true,"start":12}}
+{"event_type":"dns","timestamp":"2023-09-18T06:13:41+0000","dns":{"version":3,"type":"response","queries":["x",{"rrname":"a.example"}],"answers":"none","rcode":5}}
+{"event_type":"http","timestamp":"2023-09-18T06:13:41+0000","http":["not","object"]}
+{"timestamp":"2023-09-18T06:13:41.532140","flow_id":140,"event_type":"http","src_ip":"::ffff:192.0.2.7","src_port":49300,"dest_ip":"10.0.0.5","dest_port":80,"community_id":"1:AAAAAAAAAAAAAAAAAAAAAAAAAAA=","http":{"hostname":"ua.example","http_user_agent":"evil\u0000agent\ud800","http_method":"GET"}}
