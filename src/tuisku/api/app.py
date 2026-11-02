@@ -10,16 +10,17 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import anyio
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from psycopg_pool import AsyncConnectionPool
 
 from tuisku import __version__, db
 from tuisku.adapters import builtin as _builtin_adapters  # noqa: F401  (registers adapters)
-from tuisku.api import ingest, read
-from tuisku.api.deps import Clock, system_clock
+from tuisku.api import ingest, read, triage
+from tuisku.api.deps import Clock, require_role, system_clock
 from tuisku.api.ratelimit import RateLimiter, RefusalCounter
 from tuisku.config import Settings
+from tuisku.store.tokens import Role
 
 log = logging.getLogger(__name__)
 
@@ -52,11 +53,59 @@ def create_app(settings: Settings | None = None, *, clock: Clock | None = None) 
     app.state.parse_limiter = anyio.CapacityLimiter(settings.ingest_parse_threads)
     app.include_router(ingest.router)
     app.include_router(read.router)
+    app.include_router(triage.router)
 
     @app.get("/v1/health")
     async def health() -> dict[str, str]:
         """Liveness: the process is up. Never touches the database."""
         return {"status": "ok", "revision": settings.build_revision}
+
+    @app.get("/v1/worker/health", dependencies=[Depends(require_role(Role.READ))])
+    async def worker_health(request: Request) -> JSONResponse:
+        """Advisory, for operators with the ``read`` role: the worker's last heartbeat and the
+        backlog figures, as the database shows them. A compromised API could fake this, so
+        monitoring uses the worker's own listener (``tuisku worker --health-port``) or its
+        dead-man's switch instead (ADR 0011 "Availability limits"). 503 when no heartbeat is
+        fresh, or when the oldest undelivered notification is older than the backlog limit."""
+        pool: AsyncConnectionPool = request.app.state.pool
+        try:
+            async with pool.connection(timeout=settings.ready_timeout_seconds) as conn:
+                row = await db.fetch_one(
+                    conn,
+                    "SELECT extract(epoch FROM now() - max(beat_at)) AS heartbeat_age, "
+                    "extract(epoch FROM now() - min(oldest_queued_at)) AS queued_age, "
+                    "coalesce(sum(queued), 0) AS queued, "
+                    "(SELECT extract(epoch FROM now() - min(n.created_at)) FROM notifications n "
+                    " WHERE NOT EXISTS (SELECT 1 FROM notification_deliveries d "
+                    " WHERE d.notification_id = n.id AND d.status = 'delivered')) "
+                    "AS undelivered_age FROM worker_heartbeats "
+                    "WHERE beat_at > now() - interval '1 day'",
+                )
+        except Exception as exc:
+            log.warning("worker health check failed: %s", type(exc).__name__)
+            return JSONResponse(status_code=503, content={"status": "unavailable"})
+        assert row is not None
+        age = None if row["heartbeat_age"] is None else float(row["heartbeat_age"])
+        undelivered = None if row["undelivered_age"] is None else float(row["undelivered_age"])
+        if age is None or age > settings.worker_heartbeat_stale_seconds:
+            status = "no_worker"
+        elif undelivered is not None and undelivered > settings.worker_backlog_seconds:
+            status = "backlog"
+        else:
+            status = "ok"
+        return JSONResponse(
+            status_code=200 if status == "ok" else 503,
+            content={
+                "status": status,
+                "advisory": True,
+                "heartbeat_age_seconds": age,
+                "oldest_undelivered_seconds": undelivered,
+                "oldest_queued_seconds": (
+                    None if row["queued_age"] is None else float(row["queued_age"])
+                ),
+                "queued": int(row["queued"]),
+            },
+        )
 
     @app.get("/v1/ready")
     async def ready(request: Request) -> JSONResponse:

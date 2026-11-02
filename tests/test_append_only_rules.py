@@ -1,13 +1,11 @@
-"""Revision 0002's append-only tables (ADR 0004 sections 3-4) and role split (ADR 0011): grants
-refuse UPDATE/DELETE/TRUNCATE to the app role, triggers refuse them even to the owner, and
-event timestamps are forced to the database clock.
-
-Migration-level: every row here is written with direct SQL, as the role that writes it, so these
-tests need no worker code."""
+"""Revision 0002's append-only tables (ADR 0004 sections 3-4), with the worker running as the
+app role: grants refuse UPDATE/DELETE/TRUNCATE to it, triggers refuse them even to the owner,
+and event timestamps are forced to the database clock."""
 
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
@@ -15,20 +13,16 @@ from psycopg import errors
 
 from tests.conftest import AppDatabase
 from tests.support import query
-
-OPERATOR = "00000000-0000-4000-8000-000000000000"  # its token secret is its uid, in tests
-RULE = "66666666-6666-4666-8666-666666666666"
+from tests.worker_support import Clock, builtin_rules, ingest, run_worker
+from tuisku.store.ingest import Transport
 
 
 @pytest.fixture(autouse=True)
 def _live_operator(app_db: AppDatabase) -> None:
-    """Triage requests need a live operator token (ADR 0011)."""
-    with psycopg.connect(app_db.owner_url) as conn:
-        conn.execute(
-            "INSERT INTO operator_tokens (uid, name, roles, token_sha256) VALUES (%s, "
-            "'test-operator', '{triage}', sha256(%s::bytea)) ON CONFLICT (uid) DO NOTHING",
-            (OPERATOR, OPERATOR.encode()),
-        )
+    """Operator events need a live operator token (ADR 0011)."""
+    from tests.worker_support import ensure_test_operator
+
+    ensure_test_operator(app_db.owner_url)
 
 
 NEW_EVIDENCE_TABLES = [
@@ -53,122 +47,37 @@ _COLUMN = {
     "notifications": "kind",
     "notification_deliveries": "status",
 }
+T = datetime(2026, 11, 1, 10, 0, tzinfo=UTC)
 
 
-def _an_ingested_observation(app_url: str, owner_url: str) -> int:
-    """What ingest writes for one record, as the API role (revision 0001's same-transaction
-    rules): a raw record, an `ok` attempt, an observation and its queue entry."""
-    name = f"w{uuid.uuid4().hex[:10]}"
-    with psycopg.connect(owner_url) as conn:
-        conn.execute(
-            "WITH s AS (INSERT INTO sources (name, adapter) VALUES (%s, 'dummy') RETURNING id) "
-            "INSERT INTO source_tokens (source_id, token_sha256) SELECT id, "
-            "sha256(gen_random_uuid()::text::bytea) FROM s",
-            (name,),
-        )
-    with psycopg.connect(app_url) as conn:
-        [(raw, source_id)] = conn.execute(
-            "INSERT INTO raw_records (source_id, source_name, token_id, sha256, received_at, "
-            "transport, body, body_size) SELECT s.id, s.name, t.id, sha256(s.name::bytea), "
-            "now(), 'ndjson', 'x', 1 FROM sources s JOIN source_tokens t ON t.source_id = s.id "
-            "WHERE s.name = %s RETURNING id, source_id",
-            (name,),
-        ).fetchall()
-        [(attempt,)] = conn.execute(
-            "INSERT INTO parse_attempts (raw_record_id, adapter, adapter_version, status, "
-            "created_at) VALUES (%s, 'dummy', '0.1.0', 'ok', now()) RETURNING id",
-            (raw,),
-        ).fetchall()
-        [(obs,)] = conn.execute(
-            "INSERT INTO observations (raw_record_id, parse_attempt_id, source_id, kind, "
-            "received_at, eval_time, ocsf_version, attributes) VALUES (%s, %s, %s, "
-            "'dummy.record', now(), now(), '1.9.0', '{}') RETURNING id",
-            (raw, attempt, source_id),
-        ).fetchall()
-        conn.execute("INSERT INTO evaluation_queue (observation_id) VALUES (%s)", (obs,))
-    return obs
+def _line(at: datetime, caller: str) -> tuple[datetime, bytes, Transport]:
+    stamp = at.strftime("%Y-%m-%d %H:%M:%S,000")
+    body = (
+        f"{stamp} WARNING harava.api outbound data refused: caller={caller} "
+        "urls=1 findings=email/query/plain"
+    )
+    return at + timedelta(seconds=1), body.encode(), Transport.NDJSON
 
 
 @pytest.fixture(scope="module")
 def worked(app_db: AppDatabase) -> AppDatabase:
-    """Rows in every new evidence table, written with SQL as the worker role, as the worker
-    writes them: a rule detection linked to its row and firing key, a finding and an incident
-    with their links and events, a pack load, and a delivered notification."""
-    obs = _an_ingested_observation(app_db.app_url, app_db.owner_url)
-    with psycopg.connect(app_db.worker_url) as conn:
-        [(det,)] = conn.execute(
-            "INSERT INTO detections (evaluator, authorship, kind, identity, title, severity_id, "
-            "received_at, eval_time, ocsf_version, rule_ref) VALUES ('tuisku', 'local', "
-            "'testpack.seed', %s, 't', 3, now(), now(), '1.9.0', '{}') RETURNING id",
-            (RULE,),
-        ).fetchall()
-        conn.execute(
-            "INSERT INTO detection_observations (detection_id, observation_id) VALUES (%s, %s)",
-            (det, obs),
-        )
-        conn.execute(
-            "INSERT INTO rule_firings (rule_id, rule_rev, kind, observation_id, group_key, "
-            "eval_time, firing_detection_id) VALUES (%s, 1, 'row', %s, sha256('seed'), now(), %s)",
-            (RULE, obs, det),
-        )
-        [(inc,)] = conn.execute(
-            "INSERT INTO incidents (fingerprint, title, severity_id, opened_at, updated_at) "
-            "VALUES (sha256(gen_random_uuid()::text::bytea), 'seed', 3, now(), now()) "
-            "RETURNING id"
-        ).fetchall()
-        [(finding,)] = conn.execute(
-            "INSERT INTO findings (fingerprint, rule_id, rule_rev, title, severity_id, "
-            "first_seen, last_seen, group_values, rule_ref, window_seconds, "
-            "max_lifetime_seconds, notify, incident_id, created_at, updated_at) VALUES "
-            "(sha256(gen_random_uuid()::text::bytea), %s, 1, 'seed', 3, now(), now(), '[]', "
-            "'{\"pack\": \"testpack\"}', 3600, 86400, 'each', %s, now(), now()) RETURNING id",
-            (RULE, inc),
-        ).fetchall()
-        conn.execute(
-            "INSERT INTO finding_detections (finding_id, detection_id, linked_at) "
-            "VALUES (%s, %s, now())",
-            (finding, det),
-        )
-        conn.execute(  # a second finding, not yet in any incident
-            "INSERT INTO findings (fingerprint, rule_id, rule_rev, title, severity_id, "
-            "first_seen, last_seen, group_values, rule_ref, window_seconds, "
-            "max_lifetime_seconds, notify, created_at, updated_at) VALUES "
-            "(sha256(gen_random_uuid()::text::bytea), %s, 1, 'seed 2', 3, now(), now(), '[]', "
-            "'{}', 3600, 86400, 'thresholds', now(), now())",
-            (RULE,),
-        )
-        conn.execute(
-            "INSERT INTO finding_overflow_groups (finding_id, group_key, group_values, "
-            "detection_id, linked_at) VALUES (%s, sha256('g'), '[]', %s, now())",
-            (finding, det),
-        )
-        conn.execute(
-            "INSERT INTO finding_events (finding_id, actor, kind) VALUES (%s, %s, 'opened')",
-            (finding, f"rule:{RULE}@1"),
-        )
-        conn.execute(
-            "INSERT INTO incident_findings (incident_id, finding_id, linked_at) "
-            "VALUES (%s, %s, now())",
-            (inc, finding),
-        )
-        conn.execute(
-            "INSERT INTO incident_events (incident_id, actor, kind) VALUES (%s, %s, 'opened')",
-            (inc, f"rule:{RULE}@1"),
-        )
-        conn.execute(
-            "INSERT INTO pack_loads (pack, version, authorship, sha256, max_lookback_seconds, "
-            "rules) VALUES ('testpack', '1.0.0', 'local', sha256('p'), 0, '[]')"
-        )
-        [(note,)] = conn.execute(
-            "INSERT INTO notifications (dedupe_key, kind, severity_id, payload, created_at) "
-            "VALUES (%s, 'finding_opened', 3, '{}', now()) RETURNING id",
-            (f"seed:{uuid.uuid4()}",),
-        ).fetchall()
-        conn.execute(
-            "INSERT INTO notification_deliveries (notification_id, status) "
-            "VALUES (%s, 'delivered')",
-            (note,),
-        )
+    """Rows in every new evidence table, written by the worker connected as the app role."""
+    source = f"w{uuid.uuid4().hex[:10]}"
+    callers = ["agents", f"s{uuid.uuid4().hex[:6]}", f"t{uuid.uuid4().hex[:6]}"]
+    ingest(
+        app_db.app_url,
+        source,
+        "harava",
+        [_line(T + timedelta(minutes=i), c) for i, c in enumerate(callers)],
+    )
+    stats = run_worker(
+        app_db.worker_url,
+        builtin_rules(),
+        Clock(T + timedelta(minutes=5)),
+        record_packs=True,
+        max_open_findings=1,
+    )
+    assert stats.failed_pairs == 0
     for table in NEW_EVIDENCE_TABLES:
         assert query(app_db.owner_url, f"SELECT count(*) FROM {table}")[0][0] > 0, table
     return app_db
@@ -428,6 +337,80 @@ def test_a_link_from_an_earlier_transaction_does_not_count(worked: AppDatabase) 
         conn.rollback()
 
 
+# --- the reviewer's bypasses, attempted by the API role (ADR 0011) ----------------------------
+
+FALCO_CRITICAL = "a74b77e6-92fb-4d32-a9c3-955719118fdb"
+
+
+def _falco_line(tag: str) -> bytes:
+    import yaml
+
+    from tests.conftest import REPO_ROOT
+
+    doc = yaml.safe_load(
+        (REPO_ROOT / "packs/sensors-default/fixtures/falco-critical.yaml").read_text()
+    )
+    raw: str = doc["cases"][0]["records"][0]["raw"]
+    container = uuid.UUID(tag).hex[:12]
+    raw = raw.replace("5d0b0f8e-1b7a-4c1e-9d2a-2f0e6c1a9b01", tag).replace("web-1", tag)
+    # The main entity (first key) is the host: a fresh one means a fresh finding.
+    return raw.replace("3ad7b26ded6d", container).replace("node-1", f"node-{container}").encode()
+
+
+@pytest.mark.parametrize("bypass", ["a", "b"])
+def test_api_role_cannot_hide_a_page(app_db: AppDatabase, bypass: str) -> None:
+    from tests.worker_support import RecordingNotifier
+
+    source = f"f{uuid.uuid4().hex[:10]}"
+    tag = str(uuid.uuid4())
+    at = datetime(2026, 10, 30, 12, 0, 1, tzinfo=UTC)
+    ingest(app_db.app_url, source, "falco", [(at, _falco_line(tag), Transport.NDJSON)])
+    [(victim, victim_uid)] = query(
+        app_db.owner_url,
+        "SELECT d.id, d.uid::text FROM detections d JOIN sources s ON s.id = d.source_id "
+        "WHERE s.name = %s AND d.evaluator = 'sensor'",
+        (source,),
+    )
+    with psycopg.connect(app_db.app_url) as conn:
+        if bypass == "a":  # a throwaway rule detection, then a row key for the victim
+            with pytest.raises(errors.InsufficientPrivilege, match="worker role"):
+                conn.execute(
+                    "INSERT INTO detections (evaluator, authorship, kind, identity, title, "
+                    "severity_id, received_at, eval_time, ocsf_version, rule_ref) VALUES "
+                    "('tuisku', 'local', 'x.y', %s, 't', 0, now(), now(), '1.9.0', '{}')",
+                    (FALCO_CRITICAL,),
+                )
+            conn.rollback()
+        else:  # tie an old rule detection to the victim
+            with pytest.raises(errors.InsufficientPrivilege, match="permission denied"):
+                conn.execute(
+                    "INSERT INTO detection_evidence (detection_id, detection_ref_id, linked_at) "
+                    "SELECT max(id), %s, now() FROM detections WHERE evaluator = 'tuisku'",
+                    (victim,),
+                )
+            conn.rollback()
+        with pytest.raises(errors.InsufficientPrivilege, match="permission denied"):
+            conn.execute(
+                "INSERT INTO rule_firings (rule_id, rule_rev, kind, detection_id, group_key, "
+                "eval_time, firing_detection_id) SELECT %s, 1, %s, %s, sha256('q'), now(), "
+                "max(id) FROM detections WHERE evaluator = 'tuisku'",
+                (FALCO_CRITICAL, "row" if bypass == "a" else "member", victim),
+            )
+        conn.rollback()
+    notifier = RecordingNotifier()
+    run_worker(app_db.worker_url, builtin_rules(), Clock(at + timedelta(minutes=1)), notifier)
+    fired_for_victim = query(
+        app_db.owner_url,
+        "SELECT count(*) FROM detections WHERE identity = %s "
+        "AND explanation -> 'triggered_by' ->> 'uid' = %s",
+        (FALCO_CRITICAL, victim_uid),
+    )
+    assert fired_for_victim == [(1,)]
+    assert any(
+        n["kind"] == "finding_opened" and n["rule"] == f"{FALCO_CRITICAL}@1" for n in notifier.sent
+    )
+
+
 def test_a_detection_observations_link_from_an_earlier_transaction_does_not_count(
     worked: AppDatabase,
 ) -> None:
@@ -443,49 +426,3 @@ def test_a_detection_observations_link_from_an_earlier_transaction_does_not_coun
         with pytest.raises(errors.CheckViolation, match="not linked"):
             conn.execute(_ROW_KEY, ("member", obs, det))  # type: ignore[arg-type]
         conn.rollback()
-
-
-# --- triage is a request the database applies (ADR 0011) --------------------------------------
-
-
-def _request(status: str, bearer: str | None = OPERATOR) -> list[str]:
-    statements = (
-        [] if bearer is None else [f"SELECT set_config('tuisku.operator_token', '{bearer}', true)"]
-    )
-    return statements + [
-        "INSERT INTO triage_requests (target, target_uid, status, actor) "
-        f"SELECT 'finding', uid, '{status}', 'operator:{OPERATOR}' FROM findings "
-        "WHERE status IN ('open', 'acknowledged') ORDER BY id LIMIT 1"
-    ]
-
-
-def test_a_triage_request_is_applied_with_its_event(worked: AppDatabase) -> None:
-    with psycopg.connect(worked.app_url) as conn:
-        for statement in _request("acknowledged"):
-            conn.execute(statement)  # type: ignore[arg-type]
-        [(actor, kind)] = conn.execute(
-            "SELECT actor, kind FROM finding_events WHERE actor LIKE 'operator:%%' "
-            "ORDER BY id DESC LIMIT 1"
-        ).fetchall()
-        conn.rollback()
-    assert (actor, kind) == (f"operator:{OPERATOR}", "status_changed")
-
-
-@pytest.mark.parametrize("bearer", [None, "", "wrong"])
-def test_a_triage_request_needs_the_operators_own_token(
-    worked: AppDatabase, bearer: str | None
-) -> None:
-    with psycopg.connect(worked.app_url) as conn:
-        with pytest.raises(errors.InsufficientPrivilege, match="own token"):
-            for statement in _request("acknowledged", bearer):
-                conn.execute(statement)  # type: ignore[arg-type]
-        conn.rollback()
-
-
-def test_a_triage_request_cannot_expire_a_finding(worked: AppDatabase) -> None:
-    with psycopg.connect(worked.app_url) as conn:
-        with pytest.raises(psycopg.Error, match="cannot set a finding to expired") as info:
-            for statement in _request("expired"):
-                conn.execute(statement)  # type: ignore[arg-type]
-        conn.rollback()
-    assert info.value.diag.sqlstate == "TK409"
