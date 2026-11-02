@@ -1,0 +1,35 @@
+rule: harava.content_signals_likely_rise
+cases:
+  - name: the last hour far above the previous hours fires
+    params: {likely_baseline_windows: 2}
+    source: {adapter: harava}
+    records:
+      - at: "2026-11-01T08:00:05Z"
+        otlp_sum: {metric: harava.content.signals, labels: {verdict: likely}, start: "2026-11-01T07:59:00Z", time: "2026-11-01T08:00:00Z", value: 0}
+      - at: "2026-11-01T08:50:05Z"
+        otlp_sum: {metric: harava.content.signals, labels: {verdict: likely}, start: "2026-11-01T07:59:00Z", time: "2026-11-01T08:50:00Z", value: 1}
+      - at: "2026-11-01T09:50:05Z"
+        otlp_sum: {metric: harava.content.signals, labels: {verdict: likely}, start: "2026-11-01T07:59:00Z", time: "2026-11-01T09:50:00Z", value: 2}
+      - at: "2026-11-01T10:50:05Z"
+        otlp_sum: {metric: harava.content.signals, labels: {verdict: likely}, start: "2026-11-01T07:59:00Z", time: "2026-11-01T10:50:00Z", value: 12}
+    fires: [harava.content_signals_likely_rise]
+  - name: a rise that stays under the floor does not
+    params: {likely_baseline_windows: 2}
+    source: {adapter: harava}
+    records:
+      - at: "2026-11-01T08:00:05Z"
+        otlp_sum: {metric: harava.content.signals, labels: {verdict: likely}, start: "2026-11-01T07:59:00Z", time: "2026-11-01T08:00:00Z", value: 0}
+      - at: "2026-11-01T08:50:05Z"
+        otlp_sum: {metric: harava.content.signals, labels: {verdict: likely}, start: "2026-11-01T07:59:00Z", time: "2026-11-01T08:50:00Z", value: 1}
+      - at: "2026-11-01T09:50:05Z"
+        otlp_sum: {metric: harava.content.signals, labels: {verdict: likely}, start: "2026-11-01T07:59:00Z", time: "2026-11-01T09:50:00Z", value: 2}
+      - at: "2026-11-01T10:50:05Z"
+        otlp_sum: {metric: harava.content.signals, labels: {verdict: likely}, start: "2026-11-01T07:59:00Z", time: "2026-11-01T10:50:00Z", value: 6}
+    fires: []
+  - name: suspected verdicts do not count
+    params: {likely_baseline_windows: 2}
+    source: {adapter: harava}
+    records:
+      - at: "2026-11-01T10:50:05Z"
+        otlp_sum: {metric: harava.content.signals, labels: {verdict: suspected}, start: "2026-11-01T10:49:00Z", time: "2026-11-01T10:50:00Z", value: 50}
+    fires: []

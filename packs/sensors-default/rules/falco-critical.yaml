@@ -1,0 +1,16 @@
+id: a74b77e6-92fb-4d32-a9c3-955719118fdb
+rev: 1
+name: sensors-default.falco_critical
+title: Falco rule at Critical priority or above
+description: The Falco adapter maps Emergency, Alert and Critical to severity_id 5 (critical).
+severity: critical
+select:
+  layer: detection
+  kind: falco.rule
+  where:
+    - {field: severity_id, op: gte, value: 5}
+finding:
+  group_by: [identity, entity_keys.0]
+  window: 1h
+  max_lifetime: 24h
+incident: none

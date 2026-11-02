@@ -1,0 +1,7 @@
+pack: tuisku-meta
+version: 1.0.0
+authorship: tuisku
+license: MIT
+description: >-
+  Tuisku's own health. A rule that keeps failing to evaluate rows is a detection gap, so every
+  dead-lettered (row, rule) pair pages.

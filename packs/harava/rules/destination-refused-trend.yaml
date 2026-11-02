@@ -1,0 +1,25 @@
+id: 48a5304d-2f64-4a94-8309-f348b42d6f13
+rev: 1
+name: harava.destination_refused_trend
+title: Destination refusals beyond admission are rising
+description: >-
+  Harava logs destination refusals only at admission; the other stages (side requests, hops,
+  discovery, render) are visible only in its harava.destination.refused counter. Sums the
+  counter's deltas per stage over an hour.
+severity: medium
+select:
+  layer: observation
+  kind: metric.sample
+  where:
+    - {field: attributes.metric, op: eq, value: harava.destination.refused}
+    - {field: attributes.labels.stage, op: neq, value: admission}
+correlation:
+  type: value_sum
+  field: delta
+  timespan: 1h
+  condition: {gte: {param: destination_trend_threshold}}
+finding:
+  group_by: [source, attributes.labels.stage]
+  window: 6h
+  max_lifetime: 7d
+incident: none

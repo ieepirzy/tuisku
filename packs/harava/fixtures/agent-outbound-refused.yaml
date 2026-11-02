@@ -1,0 +1,24 @@
+# Synthetic Harava log lines through the real harava adapter, on an injected clock.
+rule: harava.agent_outbound_refused
+cases:
+  - name: an agent outbound refusal fires once per line
+    source: {adapter: harava}
+    records:
+      - at: "2026-11-01T09:14:04Z"
+        raw: "2026-11-01 09:14:03,512 WARNING harava.api outbound data refused: caller=agents urls=1 findings=email/query/percent"
+      - at: "2026-11-01T09:20:00Z"
+        raw: "2026-11-01T09:19:59.000000000Z stderr F 2026-11-01 09:19:59,000 WARNING harava.api outbound data refused: caller=agents urls=2 findings=phone/host/plain"
+    fires: [harava.agent_outbound_refused, harava.agent_outbound_refused]
+  - name: a caller listed in params fires
+    params: {restricted_callers: [agents, crawler]}
+    source: {adapter: harava}
+    records:
+      - at: "2026-11-01T09:14:04Z"
+        raw: "2026-11-01 09:14:03,512 WARNING harava.api outbound data refused: caller=crawler urls=1 findings=email/query/percent"
+    fires: [harava.agent_outbound_refused]
+  - name: a destination refusal is not an outbound refusal
+    source: {adapter: harava}
+    records:
+      - at: "2026-11-01T09:16:00Z"
+        raw: "2026-11-01 09:15:40,207 WARNING harava.api destination refused: caller=agents classes=capture_sink"
+    fires: [harava.agent_destination_refused]

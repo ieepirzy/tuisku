@@ -17,6 +17,8 @@ dependencies = [
     "communityid>=1.5.0",
     "idna>=3.20",
     "anyio>=4",
+    "pyyaml>=6.0.3",
+    "rfc8785>=0.1.4",
 ]
 
 [project.scripts]
@@ -28,6 +30,7 @@ dev = [
     "pyright>=1.1.380",
     "pytest>=8",
     "ruff>=0.6",
+    "types-pyyaml>=6.0.12.20261030",
 ]
 
 [build-system]

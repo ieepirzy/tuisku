@@ -1,0 +1,17 @@
+# `worker` sets the worker's backlog limit and how long after the last record it first runs.
+rule: tuisku-meta.backlog
+cases:
+  - name: a row queued longer than the limit raises a backlog
+    source: {adapter: harava}
+    worker: {backlog_seconds: 60, clock_offset_minutes: 10}
+    records:
+      - at: "2026-11-01T09:14:04Z"
+        raw: "2026-11-01 09:14:03,512 WARNING harava.api outbound data refused: caller=agents urls=1 findings=email/query/percent"
+    fires: [harava.agent_outbound_refused, tuisku-meta.backlog]
+  - name: a fresh queue raises nothing
+    source: {adapter: harava}
+    worker: {backlog_seconds: 60, clock_offset_minutes: 0}
+    records:
+      - at: "2026-11-01T09:14:04Z"
+        raw: "2026-11-01 09:14:03,512 WARNING harava.api outbound data refused: caller=agents urls=1 findings=email/query/percent"
+    fires: [harava.agent_outbound_refused]

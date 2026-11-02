@@ -1,0 +1,14 @@
+rule: harava.agent_destination_refused
+cases:
+  - name: an agent destination refusal at admission fires
+    source: {adapter: harava}
+    records:
+      - at: "2026-11-01T09:16:03Z"
+        raw: "2026-11-01 09:16:02,644 WARNING harava.api destination refused: caller=agents classes=ip_literal,overlay,tunnel"
+    fires: [harava.agent_destination_refused]
+  - name: a service caller's destination refusal does not
+    source: {adapter: harava}
+    records:
+      - at: "2026-11-01T09:16:31Z"
+        raw: "2026-11-01 09:16:30,000 WARNING harava.api destination refused: caller=loimi classes=overlay"
+    fires: []

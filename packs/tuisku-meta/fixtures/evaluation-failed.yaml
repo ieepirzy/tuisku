@@ -1,0 +1,17 @@
+# `fail_rule` makes that rule raise on every evaluation (a test hook), so the pair is
+# dead-lettered after 5 attempts and the meta-detection is selected by this rule.
+rule: tuisku-meta.evaluation_failed
+cases:
+  - name: a rule failing five times is dead-lettered and pages
+    source: {adapter: harava}
+    fail_rule: harava.agent_outbound_refused
+    records:
+      - at: "2026-11-01T09:14:04Z"
+        raw: "2026-11-01 09:14:03,512 WARNING harava.api outbound data refused: caller=agents urls=1 findings=email/query/percent"
+    fires: [tuisku-meta.evaluation_failed]
+  - name: a healthy evaluation raises nothing
+    source: {adapter: harava}
+    records:
+      - at: "2026-11-01T09:14:04Z"
+        raw: "2026-11-01 09:14:03,512 WARNING harava.api outbound data refused: caller=agents urls=1 findings=email/query/percent"
+    fires: [harava.agent_outbound_refused]

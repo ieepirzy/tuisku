@@ -1,0 +1,21 @@
+id: 0ce68af0-91ed-4a3a-ac5f-e6667818dcac
+rev: 1
+name: harava.service_caller_outbound_refused
+title: Non-agent caller had outbound data refused
+description: >-
+  A caller that is not restricted should never send URLs carrying personal or secret data. A
+  refusal for one means a bug in that service or a compromise. A refusal whose caller Harava's
+  log did not name plainly also lands here: an absent value is not in the allowlist.
+severity: medium
+select:
+  layer: observation
+  kind: harava.refusal
+  where:
+    - {field: attributes.type, op: eq, value: outbound}
+    - {field: attributes.caller, op: not_in, value: {param: restricted_callers}}
+finding:
+  group_by: [attributes.caller]
+  window: 1h
+  max_lifetime: 24h
+  notify: each
+incident: none

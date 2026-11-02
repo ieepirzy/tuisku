@@ -1,0 +1,15 @@
+# Synthetic Zeek JSON logs through the real zeek adapter.
+rule: sensors-default.zeek_notice
+cases:
+  - name: a notice becomes a finding
+    source: {adapter: zeek, options: {log: notice}}
+    records:
+      - at: "2023-09-18T06:13:41Z"
+        raw: "{\"ts\":1695017620.0,\"uid\":\"CHhAvVGS1DHFjwGM9\",\"id.orig_h\":\"198.51.100.9\",\"id.orig_p\":4444,\"id.resp_h\":\"10.0.0.5\",\"id.resp_p\":22,\"proto\":\"tcp\",\"note\":\"SSH::Password_Guessing\",\"msg\":\"198.51.100.9 appears to be guessing SSH passwords (seen in 30 connections).\",\"sub\":\"Sampled servers:  10.0.0.5\",\"src\":\"198.51.100.9\",\"dst\":\"10.0.0.5\",\"p\":22,\"n\":30,\"peer_descr\":\"zeek\",\"actions\":[\"Notice::ACTION_LOG\"],\"email_dest\":[],\"suppress_for\":3600.0,\"community_id\":\"1:J2yH/q0MfiSWWwgElbeSQG+C6TY=\"}"
+    fires: [sensors-default.zeek_notice]
+  - name: a weird does not
+    source: {adapter: zeek, options: {log: weird}}
+    records:
+      - at: "2023-09-18T06:13:42Z"
+        raw: "{\"ts\":1695017621.0,\"uid\":\"CHhAvVGS1DHFjwGM9\",\"id.orig_h\":\"198.51.100.9\",\"id.orig_p\":4444,\"id.resp_h\":\"10.0.0.5\",\"id.resp_p\":22,\"name\":\"inappropriate_FIN\",\"addl\":\"\",\"notice\":false,\"peer\":\"zeek\",\"source\":\"TCP\"}"
+    fires: []

@@ -1,0 +1,19 @@
+id: 2b7e4c1d-6a3f-4e8b-9c5d-1f0a2e3b4c5d
+rev: 1
+name: tuisku-meta.backlog
+title: Evaluation or notification is falling behind
+description: >-
+  Selects tuisku.meta.backlog meta-detections: the evaluation queue or the notification outbox
+  holds work older than TUISKU_WORKER_BACKLOG_SECONDS. Each one also pages directly, through a
+  notification the database writes, since the backed-up queue may delay this rule. Grouped by
+  what is behind (queue or notifications).
+severity: high
+select:
+  layer: detection
+  kind: tuisku.meta.backlog
+finding:
+  group_by: [attributes.subject]
+  window: 6h
+  max_lifetime: 7d
+  notify: each
+incident: none
