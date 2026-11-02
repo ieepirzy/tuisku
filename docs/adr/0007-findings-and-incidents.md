@@ -37,9 +37,10 @@ Grouping keys are built from attacker-controlled values, so the grouping itself 
 - **Expiry.** The worker sets a finding to `expired` once `last_seen + window` or
   `first_seen + max_lifetime` has passed. An expired finding no longer counts toward the rule's
   cap.
-- **Attaching** increments `count`, moves `last_seen`, which is the evaluation time of the
-  newest row, and links the detection in `finding_detections`. The underlying detections are
-  never merged or deleted.
+- **Attaching** increments `count` and moves `last_seen` to the evaluation time of the newest
+  row. A detection attaches through `finding_detections`; a row linked between firings attaches
+  through `detection_evidence` ([0006](0006-detection-rules-and-correlation.md)). Both count.
+  The underlying detections are never merged or deleted.
 - **Fields:**
   - `uid`, `fingerprint` and `title`
   - `severity_id`: the maximum of its detections

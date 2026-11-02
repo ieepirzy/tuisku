@@ -53,11 +53,7 @@ select:                      # which rows feed the rule
   where:                     # all predicates must hold
     - {field: attributes.type, op: eq, value: outbound}
     - {field: attributes.caller, op: in, value: {param: restricted_callers}}
-correlation:                 # optional; absent = each selected row fires on its own
-  type: event_count
-  group_by: [attributes.caller]
-  timespan: 1h
-  condition: {gte: 1}
+# no correlation block: each selected row fires on its own
 finding:
   group_by: [attributes.caller]
   window: 1h
@@ -162,13 +158,11 @@ content produced it.
   - Correlation queries count only adapter-derived rows from current attempts, which are
     defined in [0002](0002-epistemic-layers.md), so reprocessing never double-counts.
   - Rows without a parse attempt are always current: Tuisku rule output and meta-detections.
-  - **Firing after reprocessing.** A firing is suppressed when a detection already exists for
-    the same rule, group and overlapping window, if either of these holds:
-    - that detection's finding is still attachable;
-    - the rows behind the new firing come only from raw records that already contributed to
-      that detection.
-
-    Re-evaluation after reprocessing therefore never pages twice for the same evidence.
+  - **Firing after reprocessing (re-evaluation only).** This suppression applies only to rows
+    enqueued by a reprocessing re-evaluation, never to live ingest. A re-evaluated firing is
+    suppressed when a detection already exists for the same rule, group and overlapping window
+    and the rows behind it come only from raw records that already contributed to that
+    detection. Re-evaluation therefore never pages twice for the same evidence.
 - **Windows.** A row's evaluation time is its `event_time`. It is its `received_at` instead
   when the row is flagged `clock_skew` (future-dated) or has no event time. The correlation
   window is `(t - timespan, t]`.
@@ -187,8 +181,12 @@ content produced it.
   Triage can never mute a rule.
   - Rows that match between firings, while the finding is still attachable, are linked to the
     most recent firing detection through the append-only `detection_evidence` table, with a
-    timestamp. They also move the finding's `last_seen`. The chain finding → detection → rows
+    timestamp. They move the finding's `last_seen` and increment its `count`, so counts and the
+    10/100/1000 thresholds reflect every matching row. The chain finding → detection → rows
     stays complete.
+  - **Paging on every occurrence.** A rule with `finding.notify: each` emits a notification for
+    every linked row as well as for each firing, one per row. Rules that must "page on any
+    occurrence" (issue #2) use `notify: each`, and usually no `correlation` block.
   - At load time, a pack is rejected unless `finding.window >= correlation.timespan` and
     `finding.max_lifetime >= correlation.timespan`.
   - Rules without a `correlation` block fire once per selected row.

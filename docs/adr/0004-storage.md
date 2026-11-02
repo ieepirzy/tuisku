@@ -75,8 +75,9 @@ are mutable working objects that keep a history.
      `detection_evidence`)
    - the links that build evidence closures: `finding_detections` (finding → detection) and
      `incident_findings` (incident → finding). These are append-only, so even a compromised
-     app process cannot shrink an incident's evidence closure. Retention computes holds over
-     these links only.
+     app process cannot shrink an incident's evidence closure. Retention follows these links
+     and then the evidence links below them (`detection_observations`, `detection_evidence`,
+     `raw_record_id`) down to L0. It never uses mutable columns to decide what is held.
    - the histories: `finding_events` and `incident_events`
    - later, the L4 tables (`hypotheses`, `investigator_sessions`, `investigator_session_events`, `tool_calls`, `proposed_actions`, `evidence_requests`)
 
