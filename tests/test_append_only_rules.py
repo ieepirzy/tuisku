@@ -24,6 +24,8 @@ NEW_EVIDENCE_TABLES = [
     "incident_findings",
     "rule_firings",
     "pack_loads",
+    "notifications",
+    "notification_deliveries",
 ]
 _COLUMN = {
     "finding_events": "kind",
@@ -33,6 +35,8 @@ _COLUMN = {
     "incident_findings": "linked_at",
     "rule_firings": "kind",
     "pack_loads": "version",
+    "notifications": "kind",
+    "notification_deliveries": "status",
 }
 T = datetime(2026, 11, 1, 10, 0, tzinfo=UTC)
 
@@ -130,8 +134,8 @@ def test_app_role_can_work_findings_and_incidents(worked: AppDatabase) -> None:
     for statement in [
         "UPDATE findings SET updated_at = updated_at",
         "UPDATE incidents SET updated_at = updated_at",
-        "UPDATE notifications SET delivered_at = delivered_at",
         "DELETE FROM evaluation_dead_letter_rules WHERE false",
+        "UPDATE evaluation_attempts SET attempts = attempts",
     ]:
         assert _attempt(worked.app_url, statement) is None, statement
 
@@ -144,3 +148,51 @@ def test_live_incident_fingerprint_is_unique(worked: AppDatabase) -> None:
         "WHERE status <> 'closed' LIMIT 1",
     )
     assert isinstance(exc, errors.UniqueViolation)
+
+
+_FORGED_TIME_INSERTS = {
+    "finding_detections.linked_at": (
+        "INSERT INTO finding_detections (finding_id, detection_id, linked_at) "
+        "SELECT f.id, d.id, '2000-01-01Z' FROM findings f, detections d "
+        "WHERE NOT EXISTS (SELECT 1 FROM finding_detections x WHERE x.detection_id = d.id) "
+        "LIMIT 1 RETURNING linked_at"
+    ),
+    "incident_findings.linked_at": (
+        "INSERT INTO incident_findings (incident_id, finding_id, linked_at) "
+        "SELECT i.id, f.id, '2000-01-01Z' FROM incidents i, findings f WHERE NOT EXISTS "
+        "(SELECT 1 FROM incident_findings x WHERE x.incident_id = i.id AND x.finding_id = f.id) "
+        "LIMIT 1 RETURNING linked_at"
+    ),
+    "finding_overflow_groups.linked_at": (
+        "INSERT INTO finding_overflow_groups (finding_id, group_key, group_values, detection_id, "
+        "linked_at) SELECT f.id, sha256(gen_random_uuid()::text::bytea), '[]', d.id, "
+        "'2000-01-01Z' FROM findings f, detections d LIMIT 1 RETURNING linked_at"
+    ),
+    "rule_firings.created_at": (
+        "INSERT INTO rule_firings (rule_id, rule_rev, kind, observation_id, group_key, eval_time, "
+        "firing_detection_id, created_at) SELECT d.identity::uuid, 999, 'link', o.id, "
+        "sha256('x'), now(), d.id, '2000-01-01Z' FROM detections d, observations o "
+        "WHERE d.evaluator = 'tuisku' AND d.kind NOT LIKE 'tuisku.meta.%%' LIMIT 1 "
+        "RETURNING created_at"
+    ),
+    "pack_loads.loaded_at": (
+        "INSERT INTO pack_loads (pack, version, authorship, sha256, max_lookback_seconds, rules, "
+        "loaded_at) VALUES ('x', '1.0.0', 'local', sha256('x'), 0, '[]', '2000-01-01Z') "
+        "RETURNING loaded_at"
+    ),
+    "notification_deliveries.at": (
+        "INSERT INTO notification_deliveries (notification_id, status, at) "
+        "SELECT id, 'failed', '2000-01-01Z' FROM notifications LIMIT 1 RETURNING at"
+    ),
+}
+
+
+@pytest.mark.parametrize("column", sorted(_FORGED_TIME_INSERTS))
+def test_link_firing_and_load_timestamps_come_from_the_database(
+    worked: AppDatabase, column: str
+) -> None:
+    with psycopg.connect(worked.app_url) as conn:
+        rows = conn.execute(_FORGED_TIME_INSERTS[column]).fetchall()  # type: ignore[arg-type]
+        [(now,)] = conn.execute("SELECT now()").fetchall()
+        conn.rollback()
+    assert rows == [(now,)], column

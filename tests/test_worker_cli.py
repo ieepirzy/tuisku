@@ -49,4 +49,4 @@ def test_worker_once_records_pack_loads(
     rows = query(
         fresh_database_url, "SELECT pack, max_lookback_seconds FROM pack_loads ORDER BY pack"
     )
-    assert rows == [("harava", 25 * 3600), ("sensors-default", 0)]
+    assert rows == [("harava", 25 * 3600), ("sensors-default", 0), ("tuisku-meta", 0)]

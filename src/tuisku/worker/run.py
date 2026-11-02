@@ -16,17 +16,22 @@ from tuisku.rules.packs import RuleSet, load_rule_set
 from tuisku.worker.engine import Worker, WorkerConfig
 
 log = logging.getLogger(__name__)
+MAX_BACKOFF_SECONDS = 60.0
 
 
 def pack_roots(settings: Settings) -> list[Path]:
-    roots = [Path(settings.builtin_packs_dir)]
-    roots += [Path(p) for p in settings.rule_pack_paths.split(os.pathsep) if p.strip()]
-    return roots
+    """The configured (non-built-in) pack directories."""
+    return [Path(p) for p in settings.rule_pack_paths.split(os.pathsep) if p.strip()]
 
 
 def load_configured_rules(settings: Settings) -> RuleSet:
     params = Path(settings.rule_params_file) if settings.rule_params_file else None
-    return load_rule_set(pack_roots(settings), params, require_rules=True)
+    return load_rule_set(
+        pack_roots(settings),
+        params,
+        builtin=[Path(settings.builtin_packs_dir)],
+        require_rules=True,
+    )
 
 
 def worker_config(settings: Settings) -> WorkerConfig:
@@ -60,18 +65,34 @@ def run_worker(settings: Settings, *, once: bool = False, check_only: bool = Fal
     worker = Worker(rule_set=rule_set, clock=_system_clock, config=worker_config(settings))
 
     async def main() -> None:
-        conn = await AsyncConnection.connect(
-            settings.require_database_url(), autocommit=True, connect_timeout=5
-        )
-        async with conn:
-            await worker.record_pack_loads(conn)
-            while True:
-                stats = await worker.run_until_idle(conn)
-                if stats.claimed:
-                    log.info("worker pass: %s", stats)
+        recorded = False
+        failures = 0
+        while True:
+            try:
+                conn = await AsyncConnection.connect(
+                    settings.require_database_url(), autocommit=True, connect_timeout=5
+                )
+                async with conn:
+                    if not recorded:
+                        await worker.record_pack_loads(conn)
+                        recorded = True
+                    while True:
+                        stats = await worker.run_until_idle(conn)
+                        failures = 0
+                        if stats.claimed:
+                            log.info("worker pass: %s", stats)
+                        if once:
+                            return
+                        await asyncio.sleep(settings.worker_poll_seconds)
+            except Exception as exc:  # one bad pass must not stop the worker
+                failures += 1
                 if once:
-                    return
-                await asyncio.sleep(settings.worker_poll_seconds)
+                    raise
+                delay = min(MAX_BACKOFF_SECONDS, settings.worker_poll_seconds * 2**failures)
+                log.exception(
+                    "worker pass failed (%s); retrying in %.0fs", type(exc).__name__, delay
+                )
+                await asyncio.sleep(delay)
 
     asyncio.run(main())
     return 0

@@ -12,6 +12,8 @@
   from the same resource with the same ``start_time`` did not contain the series (the label set
   appeared while Tuisku was listening). Otherwise it is a baseline with delta 0.
 - **Delta temporality:** taken as-is.
+- **Never negative:** every delta is clamped to zero or more, so a hostile sample (the adapter
+  already refuses negative counter values) cannot cancel other samples out of a sum.
 """
 
 from __future__ import annotations
@@ -61,13 +63,15 @@ def series_deltas(
     prev = predecessor
     for s in samples:
         if s.temporality == "delta":
-            out[s.id] = s.value
+            delta = s.value
         elif prev is None:
-            out[s.id] = s.value if first_counts(s) else 0.0
+            delta = s.value if first_counts(s) else 0.0
         elif s.start_time != prev.start_time or s.value < prev.value:
-            out[s.id] = s.value  # reset: the counter restarted from the new start_time
+            delta = s.value  # reset: the counter restarted from the new start_time
         else:
-            out[s.id] = s.value - prev.value
+            delta = s.value - prev.value
+        # Never negative: a hostile sample must not cancel other samples out of a sum.
+        out[s.id] = max(0.0, delta)
         prev = s
     return out
 

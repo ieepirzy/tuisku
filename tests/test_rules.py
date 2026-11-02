@@ -168,9 +168,9 @@ def _pack(tmp_path: Path, *rules: dict[str, Any], params: Any = None, name: str 
 
 
 def test_builtin_packs_load_with_hashes_and_lookback() -> None:
-    rs = load_rule_set([PACKS])
+    rs = load_rule_set([], builtin=[PACKS])
     by_id = {p.info.id: p for p in rs.packs}
-    assert set(by_id) == {"harava", "sensors-default"}
+    assert set(by_id) == {"harava", "sensors-default", "tuisku-meta"}
     assert len(by_id["harava"].info.sha256) == 64
     assert by_id["harava"].max_lookback == timedelta(hours=25)  # (24 + 1) baseline windows
     assert by_id["sensors-default"].max_lookback == timedelta(0)
@@ -328,6 +328,8 @@ def test_fingerprint_boundaries_cannot_move() -> None:
     assert finding_fingerprint(rid, 1, ["a,b"]) != finding_fingerprint(rid, 1, ["a", "b"])
     assert finding_fingerprint(rid, 1, ['a","b']) != finding_fingerprint(rid, 1, ["a", "b"])
     assert finding_fingerprint(rid, 1, [None]) != finding_fingerprint(rid, 1, ["null"])
+    missing, null = group_value(MISSING), group_value(None)
+    assert finding_fingerprint(rid, 1, [missing]) != finding_fingerprint(rid, 1, [null])
     assert finding_fingerprint(rid, 1, ["x"]) != finding_fingerprint(rid, 2, ["x"])
     assert finding_fingerprint(rid, 1, []) != overflow_fingerprint(rid, 1)
     # Stable across processes: the SHA-256 of JCS ["finding","<id>",1,["agents"]].
@@ -339,10 +341,20 @@ def test_fingerprint_boundaries_cannot_move() -> None:
     assert finding_fingerprint(rid, 1, ["agents"]) == expected
 
 
-def test_group_values_are_truncated_and_normalised() -> None:
-    assert group_value("x" * 300) == "x" * 256
-    assert group_value(MISSING) is None
-    assert group_value(2**60) == str(2**60)
+def test_group_values_are_normalised_without_collisions() -> None:
+    import hashlib
+
+    long_a, long_b = "x" * 256 + "a", "x" * 256 + "b"
+    assert group_value(long_a) == {
+        "prefix": "x" * 256,
+        "sha256": hashlib.sha256(long_a.encode()).hexdigest(),
+    }
+    assert group_value(long_a) != group_value(long_b)  # same prefix, different groups
+    assert group_value("x" * 256) == "x" * 256
+    assert group_value(MISSING) == {"missing": True}
+    assert group_value(None) is None  # an explicit null is not a missing field
+    assert group_value(2**60) == {"int": str(2**60)}  # never equal to the string of digits
+    assert group_value(2**60) != group_value(str(2**60))
     assert group_value({"b": 1, "a": 2}) == '{"a":2,"b":1}'
 
 
@@ -394,6 +406,14 @@ def _s(i: int, minute: int, value: float, start: str | None = "s0", temporality=
     )
 
 
+def test_deltas_are_never_negative() -> None:
+    never = lambda _s: False  # noqa: E731
+    seq = [_s(1, 0, 5, temporality="delta"), _s(2, 10, -1e15, temporality="delta")]
+    assert series_deltas(seq, None, never) == {1: 5, 2: 0}
+    reset = [_s(1, 0, 10), _s(2, 10, -3)]  # a negative value after a reset counts as zero
+    assert series_deltas(reset, None, lambda _s: True) == {1: 10, 2: 0}
+
+
 def test_series_deltas() -> None:
     never = lambda _s: False  # noqa: E731
     always = lambda _s: True  # noqa: E731
@@ -403,3 +423,65 @@ def test_series_deltas() -> None:
     assert series_deltas(seq[1:], seq[0], never) == {2: 5, 3: 4, 4: 7}
     deltas = [_s(1, 0, 3, temporality="delta"), _s(2, 10, 2, temporality="delta")]
     assert series_deltas(deltas, None, never) == {1: 3, 2: 2}
+
+
+def test_authorship_tuisku_is_reserved_for_builtin_packs(tmp_path: Path) -> None:
+    root = _pack(tmp_path, _rule())
+    manifest = root / "p" / "pack.yaml"
+    manifest.write_text(manifest.read_text().replace('"local"', '"tuisku"'))
+    with pytest.raises(PackError, match="reserved"):
+        load_rule_set([root])
+    assert len(load_rule_set([], builtin=[root]).rules) == 1
+
+
+def test_deep_yaml_is_a_pack_error(tmp_path: Path) -> None:
+    root = _pack(tmp_path, _rule())
+    (root / "p" / "rules" / "0.yaml").write_text("[" * 20000 + "]" * 20000)
+    with pytest.raises(PackError):
+        load_rule_set([root])
+
+
+def test_merge_keys_order_and_truncation() -> None:
+    from tuisku.worker.fold import merge_keys
+
+    keys, cut = merge_keys(["z:1", "a:1"], ["m:1", "b:1", "a:1"], cap=3)
+    assert keys == ["z:1", "a:1", "b:1"] and cut
+    assert merge_keys(["z:1"], ["b:1"], cap=3) == (["z:1", "b:1"], False)
+
+
+def test_advisory_locks_are_taken_in_sorted_order() -> None:
+    import asyncio
+
+    from tuisku.worker.engine import Worker
+
+    calls: list[int] = []
+
+    class FakeConn:
+        async def execute(self, query: str, params: tuple[int]) -> None:
+            calls.append(params[0])
+
+    worker = Worker(rule_set=load_rule_set([], builtin=[PACKS]), clock=lambda: datetime.now(UTC))
+    asyncio.run(worker._lock(FakeConn(), [9, -4, 3, 1]))  # type: ignore[arg-type]
+    assert calls == [-4, 1, 3, 9]
+
+
+def test_window_filters_push_static_predicates_and_group_values() -> None:
+    from psycopg import sql
+
+    from tuisku.worker.engine import window_filters
+
+    rs = load_rule_set([], builtin=[PACKS])
+    [trend] = [r for r in rs.rules if r.name == "harava.destination_refused_trend"]
+    env = {
+        "layer": "observation",
+        "kind": "metric.sample",
+        "source": "edge",
+        "attributes": {"metric": "harava.destination.refused", "labels": {"stage": "hop"}},
+    }
+    rendered = [f.as_string(None) for f in window_filters(trend, env)]  # type: ignore[arg-type]
+    assert rendered == [
+        "(t.attributes ->> 'metric') = 'harava.destination.refused'",
+        "s.name = 'edge'",
+        "(t.attributes #>> '{labels,stage}') = 'hop'",
+    ]
+    assert isinstance(window_filters(trend, env)[0], sql.Composable)

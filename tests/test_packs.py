@@ -86,5 +86,16 @@ def test_pack_fixture(
     )
     assert all(o == "accepted/ok" for o in outcomes), outcomes
     clock = Clock(max(at for at, _, _ in records))
-    run_worker(fresh_database_url, rules, clock)
+    failing = case.get("fail_rule")
+    if failing is None:
+        run_worker(fresh_database_url, rules, clock)
+    else:
+
+        def explode(rule: Any, env: Any) -> None:
+            if rule.name == failing:
+                raise RuntimeError("fixture: this rule fails")
+
+        for _ in range(6):  # five counted attempts, then dead letter, then the meta rule
+            run_worker(fresh_database_url, rules, clock, before_pair=explode)
+            clock.advance(minutes=1)
     assert fired(fresh_database_url) == sorted(case["fires"])

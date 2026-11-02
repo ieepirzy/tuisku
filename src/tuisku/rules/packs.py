@@ -212,6 +212,8 @@ def _read_yaml(path: Path) -> tuple[Any, bytes]:
         return yaml.load(data, Loader=_StrictLoader), data  # noqa: S506 (strict SafeLoader)
     except yaml.YAMLError as exc:
         raise PackError(f"{path}: invalid YAML: {exc}") from None
+    except RecursionError:
+        raise PackError(f"{path}: YAML nested too deeply") from None
 
 
 # --- validation helpers -------------------------------------------------------------------------
@@ -518,7 +520,9 @@ def _check_params(params: Any, where: str) -> dict[str, Any]:
     return dict(params)
 
 
-def load_pack(directory: Path, overrides: Mapping[str, Any] | None = None) -> Pack:
+def load_pack(
+    directory: Path, overrides: Mapping[str, Any] | None = None, *, builtin: bool = False
+) -> Pack:
     manifest_path = directory / "pack.yaml"
     if not manifest_path.is_file():
         raise PackError(f"{directory}: no pack.yaml")
@@ -538,6 +542,8 @@ def load_pack(directory: Path, overrides: Mapping[str, Any] | None = None) -> Pa
     authorship = obj["authorship"]
     if authorship not in ("tuisku", "community", "local"):
         raise ctx.fail("authorship must be tuisku, community or local")
+    if authorship == "tuisku" and not builtin:
+        raise ctx.fail("authorship tuisku is reserved for the built-in packs directory")
     license_ = _str(obj["license"], ctx, "license", n=128)
     description = obj.get("description", "")
     if not isinstance(description, str) or len(description) > 4096:
@@ -617,9 +623,14 @@ def load_params_file(path: Path) -> tuple[dict[str, dict[str, Any]], str]:
 
 
 def load_rule_set(
-    roots: Sequence[Path], params_file: Path | None = None, *, require_rules: bool = False
+    roots: Sequence[Path],
+    params_file: Path | None = None,
+    *,
+    builtin: Sequence[Path] = (),
+    require_rules: bool = False,
 ) -> RuleSet:
-    """Load every pack under ``roots`` (built-in first, then configured paths)."""
+    """Load every pack under ``builtin`` (the shipped ``packs/``), then under ``roots`` (the
+    configured paths). Only built-in packs may declare ``authorship: tuisku``."""
     overrides: dict[str, dict[str, Any]] = {}
     params_sha: str | None = None
     if params_file is not None:
@@ -628,9 +639,12 @@ def load_rule_set(
     seen_packs: dict[str, str] = {}
     seen_rules: dict[str, str] = {}
     seen_names: dict[str, str] = {}
-    for root in roots:
+    sources = [(root, True) for root in builtin] + [(root, False) for root in roots]
+    for root, is_builtin in sources:
         for directory in _discover(root):
-            pack = load_pack(directory, overrides.get(_peek_pack_id(directory) or ""))
+            pack = load_pack(
+                directory, overrides.get(_peek_pack_id(directory) or ""), builtin=is_builtin
+            )
             if pack.info.id in seen_packs:
                 raise PackError(
                     f"pack {pack.info.id!r} loaded twice ({seen_packs[pack.info.id]}, {directory})"

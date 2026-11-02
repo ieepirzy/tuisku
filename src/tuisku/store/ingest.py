@@ -317,8 +317,19 @@ async def enqueue(
     observation_ids: list[int],
     detection_ids: list[int],
     enqueued_at: datetime,
+    reevaluation: bool = False,
 ) -> None:
-    """One evaluation_queue row per new observation and detection (ADR 0006)."""
+    """One evaluation_queue row per new observation and detection (ADR 0006).
+
+    Only new rows may be enqueued. Re-enqueueing rows from reprocessing (``reevaluation``)
+    needs ADR 0006's re-evaluation suppression in the worker first: a re-evaluated firing whose
+    evidence already produced a detection must not page twice. That is not built, so it fails.
+    """
+    if reevaluation:
+        raise NotImplementedError(
+            "build the ADR 0006 re-evaluation suppression in the worker before enqueueing "
+            "reprocessed rows"
+        )
     if observation_ids:
         await conn.execute(
             "INSERT INTO evaluation_queue (observation_id, enqueued_at) "

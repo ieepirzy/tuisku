@@ -16,28 +16,39 @@ import rfc8785
 
 from tuisku.rules.predicates import MISSING
 
-MAX_GROUP_VALUE_CHARS = 256  # ADR 0006 hard limit: values truncated before grouping
+MAX_GROUP_VALUE_CHARS = 256  # ADR 0006 hard limit: longer values group by prefix and hash
 _JS_SAFE = 2**53 - 1  # JCS numbers are IEEE doubles; larger integers are grouped as text
 
 
+def _long(text: str) -> dict[str, str]:
+    """A value longer than the limit groups by its prefix plus the SHA-256 of the whole."""
+    digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+    return {"prefix": text[:MAX_GROUP_VALUE_CHARS], "sha256": digest}
+
+
 def group_value(value: Any) -> Any:
-    """Normalise one ``group_by`` value: missing is null, strings are truncated to 256
-    characters, containers become their (truncated) canonical JSON text."""
-    if value is MISSING or value is None:
-        return None
-    if isinstance(value, bool):
+    """Normalise one ``group_by`` value for the fingerprint.
+
+    Real field values only ever become JSON strings, numbers, booleans or null here, so the
+    object markers below cannot collide with them: a missing field is ``{"missing": true}``
+    (distinct from an explicit null), an integer beyond IEEE double precision is
+    ``{"int": "<digits>"}``, a container is its canonical JSON text, and any string longer than
+    256 characters is ``{"prefix": <first 256>, "sha256": <digest of all of it>}``.
+    """
+    if value is MISSING:
+        return {"missing": True}
+    if value is None or isinstance(value, bool | float):
         return value
     if isinstance(value, int):
-        return value if -_JS_SAFE <= value <= _JS_SAFE else str(value)[:MAX_GROUP_VALUE_CHARS]
-    if isinstance(value, float):
-        return value
+        return value if -_JS_SAFE <= value <= _JS_SAFE else {"int": str(value)}
     if isinstance(value, str):
-        return value[:MAX_GROUP_VALUE_CHARS]
-    try:
-        text = rfc8785.dumps(value).decode("utf-8")
-    except Exception:
-        text = repr(type(value).__name__)
-    return text[:MAX_GROUP_VALUE_CHARS]
+        text = value
+    else:
+        try:
+            text = rfc8785.dumps(value).decode("utf-8")
+        except Exception:
+            text = repr(type(value).__name__)
+    return text if len(text) <= MAX_GROUP_VALUE_CHARS else _long(text)
 
 
 def canonical(value: Any) -> bytes:

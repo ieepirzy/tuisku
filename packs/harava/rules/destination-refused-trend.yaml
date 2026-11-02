@@ -19,7 +19,7 @@ correlation:
   timespan: 1h
   condition: {gte: {param: destination_trend_threshold}}
 finding:
-  group_by: [attributes.labels.stage]
+  group_by: [source, attributes.labels.stage]
   window: 6h
   max_lifetime: 7d
 incident: none

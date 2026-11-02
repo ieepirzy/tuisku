@@ -13,7 +13,9 @@ One pass (:meth:`Worker.run_once`):
    order**, then evaluates each *(row, rule)* pair under its own ``SAVEPOINT``. Deadlocks,
    serialization failures and lock timeouts are retried without counting as attempts. A pair
    that still fails is rolled back to its savepoint; after 5 counted attempts it is
-   dead-lettered and raises a ``tuisku.meta.evaluation_failed`` meta-detection naming the rule.
+   dead-lettered, raises a ``tuisku.meta.evaluation_failed`` meta-detection naming the rule and
+   sends a notification. Attempts are counted per *(row, rule)* in ``evaluation_attempts``, so
+   lease expiries and crashes never burn them; lock conflicts become counted failures after 20.
    The queue row is deleted once every rule has succeeded or been dead-lettered for it.
 4. **Deliver** the notifications the committed transactions queued.
 
@@ -26,13 +28,14 @@ expires mid-evaluation therefore never writes a second detection or pages twice.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, LiteralString
 
 import psycopg
-from psycopg import AsyncConnection, errors
+from psycopg import AsyncConnection, errors, sql
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from tuisku import db
@@ -40,6 +43,7 @@ from tuisku.adapters import OCSF_VERSION
 from tuisku.rules.fingerprint import lock_key
 from tuisku.rules.match import Match, match
 from tuisku.rules.packs import Correlation, Rule, RuleSet
+from tuisku.rules.predicates import MISSING, FieldPath
 from tuisku.store import meta
 from tuisku.store.ingest import enqueue
 from tuisku.store.lifecycle import set_finding_status
@@ -48,8 +52,9 @@ from tuisku.worker.metrics import compute_deltas
 
 log = logging.getLogger(__name__)
 
-MAX_ATTEMPTS = 5
-MAX_TRANSIENT_RETRIES = 5
+MAX_ATTEMPTS = 5  # counted failures per (row, rule) before the pair is dead-lettered
+MAX_TRANSIENT_RETRIES = 5  # in-process retries of one pair within one evaluation
+MAX_UNCOUNTED_TRANSIENT = 20  # evaluations a pair may lose to lock conflicts before they count
 MAX_EXPLAINED_ROWS = 100
 TRANSIENT = (errors.DeadlockDetected, errors.SerializationFailure, errors.LockNotAvailable)
 
@@ -85,7 +90,18 @@ class Stats:
 
 
 class _Transient(Exception):
-    """A pair kept hitting deadlocks or lock timeouts; retry the row later, uncounted."""
+    """The row's advisory locks could not be taken in time; nothing was evaluated."""
+
+    def __init__(self, rules: Sequence[Rule]) -> None:
+        super().__init__("lock timeout")
+        self.rules = list(rules)
+
+
+@dataclass(frozen=True, slots=True)
+class _Failure:
+    rule: Rule
+    error: str
+    counted: bool  # False for lock conflicts, until MAX_UNCOUNTED_TRANSIENT of them
 
 
 @dataclass(slots=True)
@@ -124,19 +140,106 @@ async def load_row(conn: AsyncConnection[Any], queue_row: Mapping[str, Any]) -> 
     return await db.fetch_one(conn, _DET_COLUMNS + "WHERE t.id = %s", (queue_row["detection_id"],))
 
 
+class WindowTooLarge(Exception):
+    """A correlation window holds more rows than the cap. The pair fails (counted): a partial
+    window is never evaluated."""
+
+
+def _sql_expr(path: FieldPath, layer: str) -> sql.Composable | None:
+    """A text-valued SQL expression for ``path``, or None when it cannot be pushed down."""
+    head, rest = path.segments[0], path.segments[1:]
+    if head == "attributes":
+        if len(rest) == 1 and isinstance(rest[0], str):  # matches the metric expression index
+            return sql.SQL("(t.attributes ->> {})").format(sql.Literal(rest[0]))
+        return sql.SQL("(t.attributes #>> {})").format(sql.Literal([str(k) for k in rest]))
+    if head == "entity_keys":
+        if len(rest) == 1 and isinstance(rest[0], int):
+            return sql.SQL("t.entity_keys[{}]").format(sql.Literal(rest[0] + 1))
+        return None
+    if rest:
+        return None
+    if head == "kind":
+        return sql.SQL("t.kind")
+    if head == "source":
+        return sql.SQL("s.name")
+    if layer == "detection" and head in ("evaluator", "authorship", "identity"):
+        return sql.Identifier("t", head)
+    if layer == "detection" and head == "severity_id":
+        return sql.SQL("t.severity_id::text")
+    return None
+
+
+def _sql_text(value: Any, path: FieldPath) -> str | None:
+    """The text form SQL compares with, only where SQL equality is exactly Python's: strings,
+    and the severity_id integer column. Anything else is left to the Python predicate."""
+    if isinstance(value, str):
+        return value
+    if path.text == "severity_id" and isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return None
+
+
+def window_filters(rule: Rule, env: Mapping[str, Any]) -> list[sql.Composable]:
+    """SQL conditions that every row of ``env``'s group must meet: the rule's static ``eq`` and
+    ``in`` predicates and the group's values. They only narrow the read; the Python predicates
+    still decide, so each condition must hold for every row Python would accept."""
+    layer = rule.select.layer
+    out: list[sql.Composable] = []
+    for p in rule.select.where:
+        expr = _sql_expr(p.path, layer)
+        if expr is None:
+            continue
+        if p.op == "eq":
+            text = _sql_text(p.value, p.path)
+            if text is not None:
+                out.append(sql.SQL("{} = {}").format(expr, sql.Literal(text)))
+        elif p.op == "in":
+            texts = [_sql_text(v, p.path) for v in p.value]
+            if texts and all(t is not None for t in texts):
+                out.append(sql.SQL("{} = ANY({})").format(expr, sql.Literal(texts)))
+    for path in rule.finding.group_by:
+        expr = _sql_expr(path, layer)
+        if expr is None:
+            continue
+        raw = path.resolve(env)
+        if raw is MISSING:
+            out.append(sql.SQL("{} IS NULL").format(expr))
+        else:
+            text = _sql_text(raw, path)
+            if text is not None:
+                out.append(sql.SQL("{} = {}").format(expr, sql.Literal(text)))
+    return out
+
+
 async def _window_rows(
-    conn: AsyncConnection[Any], layer: str, kind: str, lo: datetime, hi: datetime, limit: int
+    conn: AsyncConnection[Any],
+    layer: str,
+    kind: str,
+    lo: datetime,
+    hi: datetime,
+    limit: int,
+    filters: Sequence[sql.Composable] = (),
 ) -> list[dict[str, Any]]:
-    """Current rows of ``kind`` with ``lo < eval_time < hi``, in time order."""
+    """Current rows of ``kind`` with ``lo < eval_time < hi`` meeting ``filters``, in time order.
+
+    Raises :class:`WindowTooLarge` rather than return a truncated window."""
     columns = _OBS_COLUMNS if layer == "observation" else _DET_COLUMNS
-    return await db.fetch_all(
-        conn,
-        columns
-        + "WHERE t.kind = %s AND t.eval_time > %s AND t.eval_time < %s AND "
-        + _CURRENT
-        + " ORDER BY t.eval_time, t.id LIMIT %s",
-        (kind, lo, hi, limit),
+    where = [
+        sql.SQL("t.kind = {}").format(sql.Literal(kind)),
+        sql.SQL("t.eval_time > {}").format(sql.Literal(lo)),
+        sql.SQL("t.eval_time < {}").format(sql.Literal(hi)),
+        sql.SQL(_CURRENT),
+        *filters,
+    ]
+    query = sql.SQL("{} WHERE {} ORDER BY t.eval_time, t.id LIMIT {}").format(
+        sql.SQL(columns), sql.SQL(" AND ").join(where), sql.Literal(limit + 1)
     )
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(query)
+        rows = await cur.fetchall()
+    if len(rows) > limit:
+        raise WindowTooLarge(f"more than {limit} rows in the correlation window")
+    return rows
 
 
 def _row_ref(env: Mapping[str, Any]) -> dict[str, Any]:
@@ -334,18 +437,45 @@ class Worker:
         try:
             async with conn.transaction():
                 await self._evaluate_row(conn, queue_row, stats)
-        except _Transient:
+        except _Transient as exc:
+            # The advisory locks timed out, so the transaction is gone and nothing was
+            # evaluated. Record an uncounted conflict per rule (capped) in a new one.
             stats.retried_later += 1
-            async with conn.transaction():  # give the attempt back and retry soon
-                await conn.execute(
-                    "UPDATE evaluation_queue SET attempts = greatest(attempts - 1, 0), "
-                    "claimed_until = NULL, last_error = 'transient lock conflict' WHERE id = %s",
-                    (queue_row["id"],),
+            async with conn.transaction():
+                env = await load_row(conn, queue_row)
+                failures = [_Failure(r, "lock timeout", counted=False) for r in exc.rules]
+                done = env is not None and await self._record_failures(
+                    conn, queue_row, env, failures, stats
                 )
+                await self._finish(conn, queue_row, done, failures)
 
-    async def _lock(self, conn: AsyncConnection[Any], keys: set[int]) -> None:
+    async def _lock(self, conn: AsyncConnection[Any], keys: Iterable[int]) -> None:
         for key in sorted(keys):  # sorted: two workers can never deadlock on these
             await conn.execute("SELECT pg_advisory_xact_lock(%s)", (key,))
+
+    async def _finish(
+        self,
+        conn: AsyncConnection[Any],
+        queue_row: dict[str, Any],
+        done: bool,
+        failures: Sequence[_Failure],
+    ) -> None:
+        """Delete the queue row once every rule succeeded or was dead-lettered for it;
+        otherwise lease it out again after the backoff."""
+        if done:
+            await conn.execute("DELETE FROM evaluation_queue WHERE id = %s", (queue_row["id"],))
+            await conn.execute(
+                "DELETE FROM evaluation_attempts WHERE queue_id = %s", (queue_row["id"],)
+            )
+            return
+        await conn.execute(
+            "UPDATE evaluation_queue SET last_error = %s, claimed_until = %s WHERE id = %s",
+            (
+                "; ".join(f"{f.rule.ref}: {f.error}" for f in failures)[:1000],
+                self.clock() + self.config.retry_backoff,
+                queue_row["id"],
+            ),
+        )
 
     async def _evaluate_row(
         self, conn: AsyncConnection[Any], queue_row: dict[str, Any], stats: Stats
@@ -358,49 +488,44 @@ class Worker:
         env = await load_row(conn, queue_row)
         if env is None or not env["current"]:
             stats.skipped_stale += 1  # a newer parse attempt supersedes this row
-            await conn.execute("DELETE FROM evaluation_queue WHERE id = %s", (queue_row["id"],))
+            await self._finish(conn, queue_row, True, [])
             return
-        matches = [m for m in (match(r, env) for r in self.rule_set.rules) if m is not None]
+        dead = {
+            str(r["rule_id"])
+            for r in await db.fetch_all(
+                conn,
+                "SELECT rule_id FROM evaluation_dead_letter_rules WHERE queue_id = %s",
+                (queue_row["id"],),
+            )
+        }
+        matches = [
+            m
+            for m in (match(r, env) for r in self.rule_set.rules if r.id not in dead)
+            if m is not None
+        ]
         keys: set[int] = set()
         for m in matches:
-            keys.add(
-                lock_key(
-                    "group", m.rule.id, m.rule.rev, fold.fingerprint_for(m.rule, m.group_values)
-                )
-            )
+            fingerprint = fold.fingerprint_for(m.rule, m.group_values)
+            keys.add(lock_key("group", m.rule.id, m.rule.rev, fingerprint))
             keys.add(lock_key("rule", m.rule.id))
         try:
             await self._lock(conn, keys)
         except TRANSIENT as exc:
-            raise _Transient() from exc
-        failures: list[tuple[Rule, str]] = []
+            raise _Transient([m.rule for m in matches]) from exc
+        failures: list[_Failure] = []
         for m in matches:
-            error = await self._evaluate_pair_with_retries(conn, m, env, stats)
-            if error is not None:
-                failures.append((m.rule, error))
+            failure = await self._evaluate_pair_with_retries(conn, m, env, stats)
+            if failure is not None:
+                failures.append(failure)
         stats.evaluated += 1
-        if not failures:
-            await conn.execute("DELETE FROM evaluation_queue WHERE id = %s", (queue_row["id"],))
-            return
-        stats.failed_pairs += len(failures)
-        if queue_row["attempts"] >= MAX_ATTEMPTS:
-            await self._dead_letter(conn, queue_row, env, failures)
-            stats.dead_lettered += len(failures)
-            return
-        backoff = self.config.retry_backoff * queue_row["attempts"]
-        await conn.execute(
-            "UPDATE evaluation_queue SET last_error = %s, claimed_until = %s WHERE id = %s",
-            (
-                "; ".join(f"{r.ref}: {e}" for r, e in failures)[:1000],
-                self.clock() + backoff,
-                queue_row["id"],
-            ),
-        )
+        done = not failures or await self._record_failures(conn, queue_row, env, failures, stats)
+        await self._finish(conn, queue_row, done, failures)
 
     async def _evaluate_pair_with_retries(
         self, conn: AsyncConnection[Any], m: Match, env: dict[str, Any], stats: Stats
-    ) -> str | None:
-        """None on success, else the (sanitised) error of a counted failure."""
+    ) -> _Failure | None:
+        """None on success, else the failure (counted, or an uncounted lock conflict)."""
+        last = "transient"
         for _ in range(MAX_TRANSIENT_RETRIES):
             try:
                 async with conn.transaction():  # SAVEPOINT for this (row, rule) pair
@@ -412,24 +537,67 @@ class Worker:
                 return None
             except _AlreadyFired:
                 return None  # another evaluation already wrote this firing; nothing to redo
-            except TRANSIENT:
+            except TRANSIENT as exc:
+                last = type(exc).__name__
                 continue  # not counted as an attempt
             except psycopg.Error as exc:
                 if conn.info.transaction_status == psycopg.pq.TransactionStatus.INERROR:
                     raise  # the outer transaction is gone
-                return f"{type(exc).__name__}: {exc.diag.sqlstate or ''}"
+                return _Failure(m.rule, f"{type(exc).__name__}: {exc.diag.sqlstate or ''}", True)
             except Exception as exc:  # a bug in a rule's evaluation must not stop the others
                 log.exception("rule %s failed on %s %s", m.rule.ref, env["layer"], env["id"])
-                return type(exc).__name__
-        raise _Transient()
+                return _Failure(m.rule, type(exc).__name__, True)
+        return _Failure(m.rule, f"transient: {last}", counted=False)
+
+    async def _record_failures(
+        self,
+        conn: AsyncConnection[Any],
+        queue_row: dict[str, Any],
+        env: dict[str, Any],
+        failures: Sequence[_Failure],
+        stats: Stats,
+    ) -> bool:
+        """Count failures per (row, rule) (ADR 0006), dead-letter pairs that reached
+        MAX_ATTEMPTS, and say whether every failing pair is now dead-lettered. Lease expiries and
+        crashes never reach here, so they never burn attempts; lock conflicts count only after
+        MAX_UNCOUNTED_TRANSIENT of them."""
+        dead: list[tuple[Rule, str, int]] = []
+        for f in failures:
+            row = await db.fetch_one(
+                conn,
+                "INSERT INTO evaluation_attempts (queue_id, rule_id, attempts, transient, "
+                "last_error) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (queue_id, rule_id) DO UPDATE "
+                "SET attempts = evaluation_attempts.attempts + EXCLUDED.attempts, "
+                "transient = evaluation_attempts.transient + EXCLUDED.transient, "
+                "last_error = EXCLUDED.last_error RETURNING attempts, transient",
+                (queue_row["id"], f.rule.id, int(f.counted), int(not f.counted), f.error[:1000]),
+            )
+            assert row is not None
+            if not f.counted and row["transient"] >= MAX_UNCOUNTED_TRANSIENT:
+                row = await db.fetch_one(
+                    conn,
+                    "UPDATE evaluation_attempts SET attempts = attempts + 1, transient = 0 "
+                    "WHERE queue_id = %s AND rule_id = %s RETURNING attempts, transient",
+                    (queue_row["id"], f.rule.id),
+                )
+                assert row is not None
+            if row["attempts"] >= MAX_ATTEMPTS:
+                dead.append((f.rule, f.error, row["attempts"]))
+        stats.failed_pairs += len(failures)
+        if dead:
+            await self._dead_letter(conn, queue_row, env, dead)
+            stats.dead_lettered += len(dead)
+        return len(dead) == len(failures)
 
     async def _dead_letter(
         self,
         conn: AsyncConnection[Any],
         queue_row: dict[str, Any],
         env: dict[str, Any],
-        failures: list[tuple[Rule, str]],
+        dead: list[tuple[Rule, str, int]],
     ) -> None:
+        """Dead-letter each pair: a record, a ``tuisku.meta.evaluation_failed`` meta-detection
+        naming the rule, and a notification, so a failing rule is never silent (ADR 0006)."""
         now = self.clock()
         await conn.execute(
             "INSERT INTO evaluation_dead_letter (id, observation_id, detection_id, enqueued_at, "
@@ -440,12 +608,12 @@ class Worker:
                 queue_row["observation_id"],
                 queue_row["detection_id"],
                 queue_row["enqueued_at"],
-                queue_row["attempts"],
-                "; ".join(f"{r.ref}: {e}" for r, e in failures)[:1000],
+                max(a for _, _, a in dead),
+                "; ".join(f"{r.ref}: {e}" for r, e, _ in dead)[:1000],
                 now,
             ),
         )
-        for rule, error in failures:
+        for rule, error, attempts in dead:
             await conn.execute(
                 "INSERT INTO evaluation_dead_letter_rules (queue_id, observation_id, "
                 "detection_id, rule_id, rule_rev, attempts, last_error, moved_at) "
@@ -456,7 +624,7 @@ class Worker:
                     queue_row["detection_id"],
                     rule.id,
                     rule.rev,
-                    queue_row["attempts"],
+                    attempts,
                     error[:1000],
                     now,
                 ),
@@ -470,12 +638,26 @@ class Worker:
                     "rule": rule.ref,
                     "rule_name": rule.name,
                     "row": _row_ref(env),
-                    "attempts": queue_row["attempts"],
+                    "attempts": attempts,
                     "error": error[:200],
                 },
                 now=now,
             )
-        await conn.execute("DELETE FROM evaluation_queue WHERE id = %s", (queue_row["id"],))
+            await notify.emit(
+                conn,
+                dedupe_key=f"dead_letter:{queue_row['id']}:{rule.id}",
+                kind="evaluation_dead_lettered",
+                severity_id=4,
+                payload={
+                    "rule": rule.ref,
+                    "rule_name": rule.name,
+                    "row": _row_ref(env),
+                    "attempts": attempts,
+                    "error": error[:200],
+                    "entity_keys": [f"source:{env['source']}"] if env["source"] else [],
+                },
+                now=now,
+            )
 
     # -- one (row, rule) pair ------------------------------------------------------------------
 
@@ -523,7 +705,13 @@ class Worker:
         assert c is not None
         lo, hi = t - c.lookback, t + c.timespan
         rows = await _window_rows(
-            conn, rule.select.layer, rule.select.kind, lo, hi, self.config.max_window_rows
+            conn,
+            rule.select.layer,
+            rule.select.kind,
+            lo,
+            hi,
+            self.config.max_window_rows,
+            window_filters(rule, env),
         )
         members: list[dict[str, Any]] = []
         for row in rows:
@@ -563,6 +751,28 @@ class Worker:
             (rule.id, rule.rev, fingerprint),
         )
 
+    async def _armed(
+        self, conn: AsyncConnection[Any], rule: Rule, fingerprint: bytes, end: datetime
+    ) -> bool:
+        """A correlation may fire at ``end`` unless a firing for the group whose window overlaps
+        ``(end - timespan, end + timespan)`` still has an attachable finding (ADR 0006
+        "Firing"). Checking every overlapping firing, not only the newest, keeps a late row from
+        firing a second time over evidence an older firing already covers."""
+        c = rule.correlation
+        assert c is not None
+        rows = await db.fetch_all(
+            conn,
+            "SELECT firing_detection_id FROM rule_firings WHERE rule_id = %s AND rule_rev = %s "
+            "AND group_key = %s AND kind IN ('row', 'correlation') "
+            "AND eval_time > %s AND eval_time < %s ORDER BY id",
+            (rule.id, rule.rev, fingerprint, end - c.timespan, end + c.timespan),
+        )
+        for row in rows:
+            finding = await fold.finding_of_detection(conn, row["firing_detection_id"])
+            if finding is not None and fold.attachable_at(finding, end):
+                return False
+        return True
+
     async def _correlate(
         self,
         conn: AsyncConnection[Any],
@@ -586,13 +796,7 @@ class Worker:
             verdict = _decide(c, points, end)
             if verdict is None:
                 continue
-            armed = (
-                last is None
-                or abs(end - last["eval_time"]) >= c.timespan
-                or last_finding is None
-                or not fold.attachable_at(last_finding, end)
-            )
-            if armed:
+            if await self._armed(conn, rule, fingerprint, end):
                 window_rows = [p.env for p in verdict.pop("rows")]
                 await self._fire(
                     conn, m, env, end, fingerprint, window_rows, verdict, late, kind="correlation"
@@ -650,9 +854,11 @@ class Worker:
     ) -> None:
         rule = m.rule
         now = self.clock()
-        entity_keys = sorted({k for r in rows for k in (r["entity_keys"] or [])})[
-            : fold.MAX_ENTITY_KEYS
-        ]
+        # The triggering row's keys first, then the rest in sorted order; cut is recorded.
+        entity_keys, keys_cut = fold.merge_keys(
+            list(env["entity_keys"] or []),
+            [k for r in rows if r is not env for k in (r["entity_keys"] or [])],
+        )
         explanation: dict[str, Any] = {
             "rule": rule.ref,
             "rule_name": rule.name,
@@ -670,12 +876,14 @@ class Worker:
             explanation["correlation"] = correlation
         if late is not None:
             explanation["late"] = late
+        if keys_cut:
+            explanation["entity_keys_truncated"] = True
         det = await db.fetch_one(
             conn,
             "INSERT INTO detections (source_id, evaluator, authorship, kind, identity, title, "
             "severity_id, event_time, received_at, eval_time, ocsf_version, rule_ref, attack, "
-            "entity_keys, explanation) VALUES (%s, 'tuisku', %s, %s, %s, %s, %s, %s, %s, %s, %s, "
-            "%s, %s, %s, %s) RETURNING id, uid",
+            "entity_keys, explanation, flags) VALUES (%s, 'tuisku', %s, %s, %s, %s, %s, %s, %s, "
+            "%s, %s, %s, %s, %s, %s, %s) RETURNING id, uid",
             (
                 env["source_id"],
                 rule.pack.authorship,
@@ -691,6 +899,7 @@ class Worker:
                 list(rule.attack),
                 entity_keys,
                 Jsonb(explanation),
+                ["entity_keys_truncated"] if keys_cut else [],
             ),
         )
         assert det is not None
@@ -747,6 +956,7 @@ class Worker:
                 fingerprint=fingerprint,
                 entity_keys=entity_keys,
                 explanation=explanation,
+                row_count=len(rows),
             ),
             self.limits,
             now,

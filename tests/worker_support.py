@@ -23,7 +23,7 @@ PACKS = REPO_ROOT / "packs"
 
 
 def builtin_rules(params_file: Path | None = None) -> RuleSet:
-    return load_rule_set([PACKS], params_file)
+    return load_rule_set([], params_file, builtin=[PACKS])
 
 
 class Clock:
@@ -154,6 +154,7 @@ def run_worker(
     notifier: RecordingNotifier | None = None,
     *,
     record_packs: bool = False,
+    before_pair: Callable[[Any, Any], None] | None = None,
     **config: Any,
 ) -> Stats:
     worker = Worker(
@@ -161,6 +162,7 @@ def run_worker(
         clock=clock,
         notifier=notifier if notifier is not None else RecordingNotifier(),
         config=WorkerConfig(**config),
+        before_pair=before_pair,
     )
 
     async def work(conn: AsyncConnection[Any]) -> Stats:

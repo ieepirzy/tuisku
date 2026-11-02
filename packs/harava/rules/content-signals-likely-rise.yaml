@@ -21,6 +21,7 @@ correlation:
     factor: {param: likely_baseline_factor}
     floor: {param: likely_baseline_floor}
 finding:
+  group_by: [source]
   window: 6h
   max_lifetime: 7d
 incident: none

@@ -55,33 +55,54 @@ async def emit(
     return row is not None
 
 
+MAX_DELIVERY_FAILURES = 10
+_DRAIN_LOCK = 0x7475_6973_6B75_6E6F  # one drainer at a time; rows are never locked or updated
+
+
 async def drain(
     conn: AsyncConnection[Any], notifier: Notifier, now: datetime, limit: int = 500
 ) -> int:
-    """Deliver undelivered notifications in id order; returns how many were delivered.
+    """Deliver pending notifications in id order; returns how many were delivered.
 
-    Delivery is at-least-once: a crash after delivering and before committing re-delivers.
+    The outbox and the delivery log are append-only: delivery appends a ``delivered`` row, and
+    a notifier error appends a ``failed`` row and moves on, so one bad notification never
+    blocks the others. A notification is retried until it has failed
+    ``MAX_DELIVERY_FAILURES`` times. Delivery is at-least-once: a crash after delivering and
+    before committing re-delivers.
     """
+    delivered = 0
     async with conn.transaction():
+        got = await db.fetch_one(conn, "SELECT pg_try_advisory_xact_lock(%s) AS ok", (_DRAIN_LOCK,))
+        if got is None or not got["ok"]:
+            return 0  # another worker is draining
         rows = await db.fetch_all(
             conn,
-            "SELECT id, uid, kind, severity_id, payload, created_at FROM notifications "
-            "WHERE delivered_at IS NULL ORDER BY id LIMIT %s FOR UPDATE SKIP LOCKED",
-            (limit,),
+            "SELECT n.id, n.uid, n.kind, n.severity_id, n.payload, n.created_at "
+            "FROM notifications n WHERE NOT EXISTS (SELECT 1 FROM notification_deliveries d "
+            "  WHERE d.notification_id = n.id AND d.status = 'delivered') "
+            "AND (SELECT count(*) FROM notification_deliveries d WHERE d.notification_id = n.id "
+            "  AND d.status = 'failed') < %s ORDER BY n.id LIMIT %s",
+            (MAX_DELIVERY_FAILURES, limit),
         )
         for row in rows:
-            notifier.deliver(
-                {
-                    "uid": str(row["uid"]),
-                    "kind": row["kind"],
-                    "severity_id": row["severity_id"],
-                    "created_at": row["created_at"].isoformat(),
-                    **row["payload"],
-                }
-            )
-        if rows:
+            message = {
+                "uid": str(row["uid"]),
+                "kind": row["kind"],
+                "severity_id": row["severity_id"],
+                "created_at": row["created_at"].isoformat(),
+                **row["payload"],
+            }
+            try:
+                notifier.deliver(message)
+            except Exception as exc:  # isolate: record and carry on with the next one
+                log.error("notifier failed for %s: %s", row["uid"], type(exc).__name__)
+                status, error = "failed", type(exc).__name__
+            else:
+                status, error = "delivered", None
+                delivered += 1
             await conn.execute(
-                "UPDATE notifications SET delivered_at = %s WHERE id = ANY(%s)",
-                (now, [r["id"] for r in rows]),
+                "INSERT INTO notification_deliveries (notification_id, status, error) "
+                "VALUES (%s, %s, %s)",
+                (row["id"], status, error),
             )
-    return len(rows)
+    return delivered

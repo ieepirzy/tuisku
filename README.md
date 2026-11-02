@@ -82,7 +82,8 @@ uv run tuisku worker                        # poll the evaluation queue
 ```
 
 Packs are directories with a `pack.yaml` and `rules/*.yaml` (see `packs/` and ADR 0006). The
-built-in packs (`harava`, `sensors-default`) ship generic defaults only. A deployment mounts
+built-in packs (`harava`, `sensors-default`, `tuisku-meta`) ship generic defaults only, and only
+they may declare `authorship: tuisku`. A deployment mounts
 its own packs and params from its configuration repository:
 `TUISKU_RULE_PACK_PATHS=/etc/tuisku/packs` (separated by `:`) and
 `TUISKU_RULE_PARAMS_FILE=/etc/tuisku/params.yaml`, which maps pack ids to param overrides, e.g.
@@ -90,9 +91,13 @@ its own packs and params from its configuration repository:
 `pack_loads` and in each detection's explanation. Each rule ships positive and negative fixtures
 in its pack's `fixtures/`, run through the real adapters by `tests/test_packs.py`.
 
-Notifications go to an outbox and are delivered after each evaluation commits. The only
+Notifications go to an append-only outbox and are delivered after each evaluation commits;
+each delivery or notifier failure appends to the append-only `notification_deliveries` log, so
+one failing notification never blocks the others and none can be deleted unnoticed. The only
 notifier today writes one JSON line per notification to the `tuisku.notify` logger; routing
-them to people is a deployment decision.
+them to people is a deployment decision. A rule that fails 5 times on a row is dead-lettered and
+pages (`evaluation_dead_lettered`), and `tuisku-meta` turns the resulting
+`tuisku.meta.evaluation_failed` meta-detections into a finding that pages on every occurrence.
 
 Operator tokens with `read` list `GET /v1/findings` and `GET /v1/incidents` (filters `status`,
 `entity_key`, `rule_id` for findings; `before`/`limit` paging) and read
@@ -124,11 +129,13 @@ With `TUISKU_APP_ROLE` set, migrations grant it `SELECT, INSERT` on evidence tab
 (`raw_records`, `raw_duplicates`, `parse_attempts`, `observations`, `detections`,
 `detection_observations`, `detection_evidence`, and from revision 0002 `finding_events`,
 `finding_detections`, `finding_overflow_groups`, `incident_events`, `incident_findings`,
-`rule_firings`, `pack_loads`), `SELECT, INSERT, UPDATE, DELETE` on working tables (`sources`,
-`source_tokens`, `operator_tokens`, `evaluation_queue`, `evaluation_dead_letter`,
-`meta_counters`, and from 0002 `findings`, `incidents`, `notifications`,
-`evaluation_dead_letter_rules`) and `USAGE` on sequences. A trigger sets the timestamps of
-`finding_events` and `incident_events` to the database clock. Grants are made by the revision that
+`rule_firings`, `pack_loads`, `notifications`, `notification_deliveries`),
+`SELECT, INSERT, UPDATE, DELETE` on working tables (`sources`, `source_tokens`,
+`operator_tokens`, `evaluation_queue`, `evaluation_dead_letter`, `meta_counters`, and from 0002
+`findings`, `incidents`, `evaluation_dead_letter_rules`, `evaluation_attempts`) and `USAGE` on
+sequences. Triggers set the timestamps of the histories, link tables, firing keys, pack loads
+and deliveries to the database clock, and refuse a firing key that does not point at a
+detection of its own rule. Grants are made by the revision that
 creates each table, so set the variable before the first `tuisku migrate`; for an existing
 database, run the same `GRANT` statements by hand. Left unset, no grants are made: a single
 role does everything, which suits local development only. Independently of roles, triggers

@@ -11,7 +11,8 @@ from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict, Field
+from psycopg import errors
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from tuisku.api.deps import get_clock, get_pool, require_role
 from tuisku.store import lifecycle, triage
@@ -19,6 +20,15 @@ from tuisku.store.admin import OperatorCredential
 from tuisku.store.tokens import Role
 
 router = APIRouter()
+DEADLOCK_RETRIES = 3  # 40P01 / 40001 against a concurrent worker: retry the whole change
+
+
+def _not_blank(value: str | None) -> str | None:
+    if value is not None and not value.strip():
+        raise ValueError("must not be blank")
+    return value
+
+
 Reader = Annotated[OperatorCredential, Depends(require_role(Role.READ))]
 Triager = Annotated[OperatorCredential, Depends(require_role(Role.TRIAGE))]
 Limit = Annotated[int, Query(ge=1, le=triage.MAX_LIMIT)]
@@ -36,12 +46,16 @@ class IncidentStatus(BaseModel):
     ) = None
     reason: str | None = Field(default=None, max_length=1000)
 
+    _reason = field_validator("reason")(_not_blank)
+
 
 class FindingStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
     status: Literal["open", "acknowledged", "resolved", "suppressed"]
     reason: str | None = Field(default=None, max_length=1000)
     suppressed_until: datetime | None = None
+
+    _reason = field_validator("reason")(_not_blank)
 
 
 @router.get("/v1/findings")
@@ -91,24 +105,36 @@ async def get_incident(uid: UUID, request: Request, _: Reader) -> dict[str, Any]
     return incident
 
 
+async def _change(request: Request, work: Any) -> Any:
+    """Run ``work(conn)`` in a transaction, retrying deadlocks and serialization failures."""
+    for attempt in range(DEADLOCK_RETRIES):
+        try:
+            async with get_pool(request).connection() as conn, conn.transaction():
+                return await work(conn)
+        except (errors.DeadlockDetected, errors.SerializationFailure):
+            if attempt == DEADLOCK_RETRIES - 1:
+                raise HTTPException(status_code=503, detail="conflict, retry") from None
+        except lifecycle.TransitionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+
 @router.post("/v1/incidents/{uid}/status")
 async def set_incident_status(
     uid: UUID, body: IncidentStatus, request: Request, operator: Triager
 ) -> dict[str, Any]:
     now = get_clock(request)()
-    try:
-        async with get_pool(request).connection() as conn, conn.transaction():
-            incident = await lifecycle.operator_incident_status(
-                conn,
-                uid,
-                body.status,
-                actor=lifecycle.operator_actor(operator.token_uid),
-                disposition=body.disposition,
-                reason=body.reason,
-                now=now,
-            )
-    except lifecycle.TransitionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
+    incident = await _change(
+        request,
+        lambda conn: lifecycle.operator_incident_status(
+            conn,
+            uid,
+            body.status,
+            actor=lifecycle.operator_actor(operator.token_uid),
+            disposition=body.disposition,
+            reason=body.reason,
+            now=now,
+        ),
+    )
     if incident is None:
         raise HTTPException(status_code=404, detail="no such incident")
     return {"uid": str(incident["uid"]), "status": incident["status"]}
@@ -118,20 +144,21 @@ async def set_incident_status(
 async def set_finding_status(
     uid: UUID, body: FindingStatus, request: Request, operator: Triager
 ) -> dict[str, Any]:
+    if body.suppressed_until is not None and body.suppressed_until.tzinfo is None:
+        raise HTTPException(status_code=400, detail="suppressed_until needs a UTC offset")
     now = get_clock(request)()
-    try:
-        async with get_pool(request).connection() as conn, conn.transaction():
-            finding = await lifecycle.operator_finding_status(
-                conn,
-                uid,
-                body.status,
-                actor=lifecycle.operator_actor(operator.token_uid),
-                reason=body.reason,
-                suppressed_until=body.suppressed_until,
-                now=now,
-            )
-    except lifecycle.TransitionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
+    finding = await _change(
+        request,
+        lambda conn: lifecycle.operator_finding_status(
+            conn,
+            uid,
+            body.status,
+            actor=lifecycle.operator_actor(operator.token_uid),
+            reason=body.reason,
+            suppressed_until=body.suppressed_until,
+            now=now,
+        ),
+    )
     if finding is None:
         raise HTTPException(status_code=404, detail="no such finding")
     return {"uid": str(finding["uid"]), "status": finding["status"]}

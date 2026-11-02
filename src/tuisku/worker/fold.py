@@ -23,12 +23,13 @@ from tuisku.store.lifecycle import (
     REOPENABLE,
     attachable_at,
     finding_event,
+    finding_payload,
     incident_event,
+    notify_thresholds,
     set_finding_status,
 )
 from tuisku.worker import notify
 
-THRESHOLDS = (10, 100, 1000)
 MAX_ENTITY_KEYS = 256
 
 
@@ -50,17 +51,25 @@ class Firing:
     fingerprint: bytes
     entity_keys: list[str]
     explanation: dict[str, Any]
+    row_count: int = 1  # rows the firing stands for: the window's members for a correlation
 
 
-def _payload(finding: dict[str, Any], **extra: Any) -> dict[str, Any]:
-    return {
-        "finding_uid": str(finding["uid"]),
-        "rule": f"{finding['rule_id']}@{finding['rule_rev']}",
-        "title": finding["title"],
-        "entity_keys": list(finding["entity_keys"])[:32],
-        "count": finding["count"],
-        **extra,
-    }
+_payload = finding_payload
+
+
+def merge_keys(
+    first: list[str], others: list[str], cap: int = MAX_ENTITY_KEYS
+) -> tuple[list[str], bool]:
+    """Entity keys in a deterministic order: ``first`` as given (the triggering row's, or the
+    finding's existing keys), then the rest sorted; de-duplicated and cut to ``cap``. Returns
+    the keys and whether anything was cut."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for key in [*first, *sorted(others)]:
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out[:cap], len(out) > cap
 
 
 async def _lock_attachable(conn: AsyncConnection[Any], fingerprint: bytes) -> dict | None:
@@ -167,15 +176,15 @@ async def _link_incident(
         "incident_linked",
         new={"incident_uid": str(incident["uid"])},
     )
+    keys, _ = merge_keys(list(incident["entity_keys"]), list(finding["entity_keys"]))
     updated = await db.fetch_one(
         conn,
         "UPDATE incidents SET finding_count = finding_count + 1, "
-        "severity_id = greatest(severity_id, %s), "
-        "entity_keys = (SELECT coalesce(array_agg(DISTINCT k ORDER BY k), '{}') FROM "
-        "  (SELECT unnest(entity_keys || %s::text[]) AS k) u), updated_at = %s "
+        "severity_id = greatest(severity_id, %s), entity_keys = %s, updated_at = %s "
         "WHERE id = %s RETURNING severity_id",
-        (finding["severity_id"], finding["entity_keys"], now, incident["id"]),
+        (finding["severity_id"], keys, now, incident["id"]),
     )
+    incident["entity_keys"] = keys
     assert updated is not None
     await incident_event(
         conn,
@@ -338,9 +347,10 @@ async def _open_finding(
     finding = await db.fetch_one(
         conn,
         "INSERT INTO findings (fingerprint, rule_id, rule_rev, overflow, title, severity_id, "
-        "first_seen, last_seen, entity_keys, group_values, rule_ref, explanation, "
+        "first_seen, last_seen, count, entity_keys, group_values, rule_ref, explanation, "
         "window_seconds, max_lifetime_seconds, notify, created_at, updated_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "RETURNING *",
         (
             fingerprint,
             rule.id,
@@ -350,6 +360,7 @@ async def _open_finding(
             severity,
             firing.eval_time,
             firing.eval_time,
+            max(1, firing.row_count),
             firing.entity_keys[:MAX_ENTITY_KEYS],
             Jsonb([] if overflow else list(firing.group_values)),
             Jsonb(rule.rule_ref()),
@@ -383,6 +394,7 @@ async def _open_finding(
             _payload(finding, detection_uid=firing.detection_uid),
             now,
         )
+    await notify_thresholds(conn, finding, 1, now)  # a correlation can open past a threshold
     if rule.incident:
         await incident_for_new_finding(conn, rule, finding, limits, now)
     return finding
@@ -400,27 +412,19 @@ async def _bump(
 ) -> tuple[int, int]:
     """Increment count, move last_seen (and first_seen for a late row). Returns the old and new
     counts; updates ``finding`` in place."""
+    keys, cut = merge_keys(list(finding["entity_keys"]), entity_keys)
+    extra: dict[str, Any] = {}
+    if latest is not None:
+        extra["latest"] = latest
+    if cut:
+        extra["entity_keys_truncated"] = True
     row = await db.fetch_one(
         conn,
         "UPDATE findings SET count = count + 1, last_seen = greatest(last_seen, %s), "
         "first_seen = least(first_seen, %s), severity_id = greatest(severity_id, %s), "
-        "entity_keys = (SELECT coalesce(array_agg(k ORDER BY k), '{}') FROM "
-        "  (SELECT DISTINCT unnest(entity_keys || %s::text[]) AS k LIMIT %s) u), "
-        "explanation = CASE WHEN %s::jsonb IS NULL THEN explanation "
-        "  ELSE explanation || jsonb_build_object('latest', %s::jsonb) END, "
-        "updated_at = %s WHERE id = %s RETURNING count, last_seen, first_seen, severity_id, "
-        "entity_keys",
-        (
-            t,
-            t,
-            severity_id,
-            entity_keys,
-            MAX_ENTITY_KEYS,
-            None if latest is None else Jsonb(latest),
-            None if latest is None else Jsonb(latest),
-            now,
-            finding["id"],
-        ),
+        "entity_keys = %s, explanation = explanation || %s, updated_at = %s WHERE id = %s "
+        "RETURNING count, last_seen, first_seen, severity_id, entity_keys",
+        (t, t, severity_id, keys, Jsonb(extra), now, finding["id"]),
     )
     assert row is not None
     old = finding["count"]
@@ -461,16 +465,7 @@ async def _after_attach(
                 now,
             )
     if not quiet:
-        for threshold in THRESHOLDS:
-            if old_count < threshold <= finding["count"]:
-                await _notify(
-                    conn,
-                    f"finding_threshold:{finding['uid']}:{threshold}",
-                    "finding_threshold",
-                    finding["severity_id"],
-                    _payload(finding, threshold=threshold),
-                    now,
-                )
+        await notify_thresholds(conn, finding, old_count, now)
         if finding["notify"] == "each" and not finding["overflow"]:
             await _notify(
                 conn,
@@ -591,9 +586,11 @@ async def fold_firing(
             f"overflow_group:{overflow['uid']}:{firing.fingerprint.hex()}",
             "finding_overflow_group",
             overflow["severity_id"],
+            # The group's hash and the firing's entity keys, never the raw group values.
             _payload(
                 overflow,
-                group_values=list(firing.group_values),
+                group_key=firing.fingerprint.hex(),
+                entity_keys=firing.entity_keys[:32],
                 detection_uid=firing.detection_uid,
                 cap=limits.max_open_findings,
             ),

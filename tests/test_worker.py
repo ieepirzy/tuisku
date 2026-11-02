@@ -204,21 +204,38 @@ def test_deadlocks_are_retried_without_counting(fresh_database_url: str) -> None
     assert fired(url) == ["harava.agent_outbound_refused"]
 
 
-def test_persistent_lock_conflict_gives_the_attempt_back(fresh_database_url: str) -> None:
+def test_lock_conflicts_are_uncounted_until_the_cap(fresh_database_url: str) -> None:
     url = fresh_database_url
 
     def always(rule: Rule, env: Any) -> None:
         raise errors.LockNotAvailable("simulated")
 
     ingest(url, "h", "harava", lines((T, "agents")))
+    clock = Clock(T)
     worker = Worker(
-        rule_set=builtin_rules(), clock=Clock(T), notifier=RecordingNotifier(), before_pair=always
+        rule_set=builtin_rules(), clock=clock, notifier=RecordingNotifier(), before_pair=always
     )
     stats = run_async(url, worker.run_once)
-    assert stats.retried_later == 1
-    assert query(
-        url, "SELECT attempts, claimed_until FROM evaluation_queue WHERE observation_id IS NOT NULL"
-    ) == [(0, None)]
+    assert stats.failed_pairs == 1 and stats.dead_lettered == 0
+    assert query(url, "SELECT attempts, transient FROM evaluation_attempts") == [(0, 1)]
+    for _ in range(engine.MAX_UNCOUNTED_TRANSIENT - 1):
+        clock.advance(minutes=1)
+        run_async(url, worker.run_once)
+    # The twentieth conflict counts as one attempt, so the pair cannot retry forever.
+    assert query(url, "SELECT attempts, transient FROM evaluation_attempts") == [(1, 0)]
+
+
+def test_lease_expiries_never_burn_attempts(fresh_database_url: str) -> None:
+    url = fresh_database_url
+    ingest(url, "h", "harava", lines((T, "agents")))
+    clock = Clock(T)
+    worker = Worker(rule_set=builtin_rules(), clock=clock, notifier=RecordingNotifier())
+    for _ in range(engine.MAX_ATTEMPTS + 2):  # claimed and lost (crash) again and again
+        assert len(run_async(url, worker.claim)) == 2
+        clock.advance(seconds=121)
+    stats = run_worker(url, builtin_rules(), clock)
+    assert stats.dead_lettered == 0 and fired(url) == ["harava.agent_outbound_refused"]
+    assert query(url, "SELECT count(*) FROM evaluation_dead_letter_rules")[0][0] == 0
 
 
 # --- caps ---------------------------------------------------------------------------------------
@@ -375,10 +392,12 @@ def test_rows_between_firings_are_linked_counted_and_paged(
     run_worker(url, rules, Clock(T + timedelta(minutes=20)), notifier)
     assert fired(url) == ["testpack.burst"]  # fired once at the second row
     [(count,)] = query(url, "SELECT count FROM findings")
-    assert count == 10  # the firing plus nine linked rows
+    assert count == 11  # the firing's two window rows plus nine linked rows
     assert query(url, "SELECT count(*) FROM detection_evidence")[0][0] == 9
-    assert notifier.kinds() == ["finding_opened"] + ["finding_occurrence"] * 8 + [
+    # Count reaches 10 on the eighth linked row: the threshold pages before that occurrence.
+    assert notifier.kinds() == ["finding_opened"] + ["finding_occurrence"] * 7 + [
         "finding_threshold",
+        "finding_occurrence",
         "finding_occurrence",
     ]
     # Members of the firing's window are never linked again.

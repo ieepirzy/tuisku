@@ -127,9 +127,9 @@ async def _record(
         conn,
         "INSERT INTO detections (source_id, evaluator, authorship, kind, identity, title, "
         "severity_id, event_time, received_at, eval_time, ocsf_version, rule_ref, "
-        "entity_keys, explanation, subject, bucket_start) "
+        "entity_keys, explanation, subject, bucket_start, attributes) "
         "VALUES (%s, 'tuisku', 'tuisku', %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, "
-        "%s::jsonb, %s, %s) "
+        "%s::jsonb, %s, %s, %s::jsonb) "
         "ON CONFLICT (source_id, kind, subject, bucket_start) WHERE bucket_start IS NOT NULL "
         "DO NOTHING RETURNING id",
         (
@@ -147,6 +147,8 @@ async def _record(
             json.dumps(explanation),
             subject,
             bucket,
+            # Selectable by rules (e.g. group_by attributes.subject): the limit or the rule id.
+            json.dumps({"subject": subject}),
         ),
     )
     if row is None:

@@ -8,8 +8,9 @@ Layer L3 (ADR 0002): findings and incidents are mutable projections; every chang
 a ``finding_events`` or ``incident_events`` row. The histories, the link tables that build
 evidence closures (``finding_detections``, ``incident_findings``), the firing keys
 (``rule_firings``), the overflow groups and ``pack_loads`` are append-only (ADR 0004 section 4),
-guarded by the same grants and triggers as revision 0001. Event timestamps are set to the
-database's ``now()`` by a trigger, so the app role cannot supply them (ADR 0004 section 3).
+guarded by the same grants and triggers as revision 0001, and so are the notification outbox
+and its delivery log. Event, link, firing and pack-load timestamps are set to the database's
+``now()`` by a trigger, so the app role cannot supply them (ADR 0004 section 3).
 """
 
 import re
@@ -36,11 +37,28 @@ EVIDENCE_TABLES = (
     "incident_findings",
     "rule_firings",
     "pack_loads",
+    "notifications",
+    "notification_deliveries",
 )
 # Mutable working tables the app role may change.
-WORKING_TABLES = ("findings", "incidents", "notifications", "evaluation_dead_letter_rules")
-# Histories whose timestamp column the trigger forces to now().
-EVENT_TABLES = ("finding_events", "incident_events")
+WORKING_TABLES = (
+    "findings",
+    "incidents",
+    "evaluation_dead_letter_rules",
+    "evaluation_attempts",
+)
+# Timestamp columns the trigger forces to the database's now(), so the app role cannot supply
+# them: the histories, the links that build evidence closures, the firing keys and pack loads.
+FORCED_TIME_COLUMNS = (
+    ("finding_events", "at"),
+    ("incident_events", "at"),
+    ("finding_detections", "linked_at"),
+    ("incident_findings", "linked_at"),
+    ("finding_overflow_groups", "linked_at"),
+    ("rule_firings", "created_at"),
+    ("pack_loads", "loaded_at"),
+    ("notification_deliveries", "at"),
+)
 
 _ROLE_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
@@ -112,12 +130,19 @@ CREATE TABLE findings (
     notify               text NOT NULL CHECK (notify IN ('each', 'thresholds')),
     suppressed_until     timestamptz,
     suppression_reason   text CHECK (char_length(suppression_reason) <= 1000),
+    -- When the current suppression began and the count then: re-suppressing never extends past
+    -- 30 days from the start, and thresholds crossed while suppressed page when it lifts.
+    suppressed_at        timestamptz,
+    count_at_suppression bigint,
     incident_id          bigint REFERENCES incidents (id),
     created_at           timestamptz NOT NULL,
     updated_at           timestamptz NOT NULL,
     -- Suppression always has an expiry and a reason (ADR 0007); overflow findings never.
     CONSTRAINT findings_suppression_check CHECK (
         (status = 'suppressed') = (suppressed_until IS NOT NULL AND suppression_reason IS NOT NULL)
+    ),
+    CONSTRAINT findings_suppressed_at_check CHECK (
+        (status = 'suppressed') = (suppressed_at IS NOT NULL AND count_at_suppression IS NOT NULL)
     ),
     CONSTRAINT findings_overflow_not_suppressed CHECK (NOT (overflow AND status = 'suppressed')),
     CONSTRAINT findings_seen_order CHECK (first_seen <= last_seen)
@@ -217,7 +242,8 @@ CREATE INDEX rule_firings_group_idx ON rule_firings (rule_id, rule_rev, group_ke
     WHERE kind IN ('row', 'correlation');
 
 -- Notification outbox (ADR 0007): written in the evaluation transaction, delivered after it
--- commits. dedupe_key makes every notification idempotent.
+-- commits. dedupe_key makes every notification idempotent. Append-only, like the delivery log
+-- beside it, so a compromised app process cannot delete or mark away a page unnoticed.
 CREATE TABLE notifications (
     id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     uid          uuid NOT NULL DEFAULT gen_random_uuid() UNIQUE,
@@ -225,10 +251,29 @@ CREATE TABLE notifications (
     kind         text NOT NULL CHECK (char_length(kind) <= 64),
     severity_id  smallint NOT NULL CHECK (severity_id BETWEEN 0 AND 6),
     payload      jsonb NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
-    created_at   timestamptz NOT NULL,
-    delivered_at timestamptz
+    created_at   timestamptz NOT NULL
 );
-CREATE INDEX notifications_undelivered_idx ON notifications (id) WHERE delivered_at IS NULL;
+
+CREATE TABLE notification_deliveries (
+    id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    notification_id bigint NOT NULL REFERENCES notifications (id),
+    at              timestamptz NOT NULL DEFAULT now(),  -- forced to now() by trigger
+    status          text NOT NULL CHECK (status IN ('delivered', 'failed')),
+    error           text CHECK (char_length(error) <= 500)
+);
+CREATE INDEX notification_deliveries_notification_idx
+    ON notification_deliveries (notification_id, status);
+
+-- Failure counts per (queue row, rule) (ADR 0006): lease expiries and crashes never count, and
+-- uncounted transient retries are capped.
+CREATE TABLE evaluation_attempts (
+    queue_id   bigint NOT NULL,
+    rule_id    uuid NOT NULL,
+    attempts   integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    transient  integer NOT NULL DEFAULT 0 CHECK (transient >= 0),
+    last_error text,
+    PRIMARY KEY (queue_id, rule_id)
+);
 
 -- Per-rule dead letters (ADR 0006): one row per (queue row, rule) that failed 5 attempts.
 CREATE TABLE evaluation_dead_letter_rules (
@@ -246,6 +291,9 @@ CREATE TABLE evaluation_dead_letter_rules (
 );
 
 -- Claiming (ADR 0006): unclaimed or lease-expired rows, oldest first.
+-- Correlation windows over metric samples are read per metric name (ADR 0006).
+CREATE INDEX observations_metric_eval_time_idx
+    ON observations ((attributes ->> 'metric'), eval_time) WHERE kind = 'metric.sample';
 CREATE INDEX evaluation_queue_claim_idx ON evaluation_queue (claimed_until NULLS FIRST, id);
 -- Evidence closures walk these links downwards (ADR 0004 section 4).
 CREATE INDEX detection_evidence_observation_id_idx ON detection_evidence (observation_id)
@@ -256,16 +304,41 @@ CREATE INDEX detection_evidence_detection_ref_id_idx ON detection_evidence (dete
 
 # ADR 0004 section 3: "A trigger sets event timestamps to the database's now(), and the app role
 # cannot supply them." Holds are computed from these timestamps.
-EVENT_TIME_FUNCTION_SQL = """
+FORCE_TIME_FUNCTION_SQL = """
 CREATE FUNCTION tuisku_force_event_time() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
 BEGIN
-    NEW.at := now();
+    -- TG_ARGV[0] names the timestamp column of the table.
+    NEW := jsonb_populate_record(NEW, jsonb_build_object(TG_ARGV[0], now()));
     RETURN NEW;
 END
 $$;
+"""
+
+# A firing key must point at a detection of its own rule, so a forged key (for example a
+# 'member' row naming another rule) cannot make the worker skip a row for a rule.
+FIRING_IDENTITY_FUNCTION_SQL = """
+CREATE FUNCTION tuisku_check_firing_identity() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM public.detections d
+        WHERE d.id = NEW.firing_detection_id AND d.evaluator = 'tuisku'
+          AND d.identity = NEW.rule_id::text
+    ) THEN
+        RAISE EXCEPTION 'rule_firings: detection % is not output of rule %',
+            NEW.firing_detection_id, NEW.rule_id
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER rule_firings_identity BEFORE INSERT ON rule_firings
+    FOR EACH ROW EXECUTE FUNCTION tuisku_check_firing_identity();
 """
 
 
@@ -280,12 +353,13 @@ def _app_role() -> str | None:
 
 def upgrade() -> None:
     op.execute(TABLES_SQL)
-    op.execute(EVENT_TIME_FUNCTION_SQL)
-    for table in EVENT_TABLES:
+    op.execute(FORCE_TIME_FUNCTION_SQL)
+    for table, column in FORCED_TIME_COLUMNS:
         op.execute(
             f"CREATE TRIGGER {table}_force_time BEFORE INSERT ON {table} "
-            "FOR EACH ROW EXECUTE FUNCTION tuisku_force_event_time()"
+            f"FOR EACH ROW EXECUTE FUNCTION tuisku_force_event_time('{column}')"
         )
+    op.execute(FIRING_IDENTITY_FUNCTION_SQL)
     # The evidence trigger function comes from revision 0001.
     for table in EVIDENCE_TABLES:
         op.execute(
@@ -307,11 +381,13 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("DROP INDEX evaluation_queue_claim_idx")
+    op.execute("DROP INDEX observations_metric_eval_time_idx")
     op.execute("DROP INDEX detection_evidence_observation_id_idx")
     op.execute("DROP INDEX detection_evidence_detection_ref_id_idx")
     op.execute(
-        "DROP TABLE evaluation_dead_letter_rules, notifications, rule_firings, incident_findings, "
+        "DROP TABLE evaluation_attempts, evaluation_dead_letter_rules, notification_deliveries, "
+        "notifications, rule_firings, incident_findings, "
         "incident_events, finding_overflow_groups, finding_detections, finding_events, findings, "
         "incidents, pack_loads"
     )
-    op.execute("DROP FUNCTION tuisku_force_event_time()")
+    op.execute("DROP FUNCTION tuisku_force_event_time(), tuisku_check_firing_identity()")

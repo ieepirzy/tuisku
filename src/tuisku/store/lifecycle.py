@@ -28,6 +28,7 @@ DISPOSITIONS = (
 )
 REOPENABLE = ("contained", "resolved")
 MAX_SUPPRESSION = timedelta(days=30)
+THRESHOLDS = (10, 100, 1000)
 
 # OCSF status_id (ADR 0007 "Status mapping"): New 1, In Progress 2, Suppressed 3, Resolved 4,
 # Other 99.
@@ -54,6 +55,34 @@ def incident_transition_allowed(old: str, new: str) -> bool:
     if old in REOPENABLE and new == "investigating":
         return True
     return INCIDENT_STATES.index(new) > INCIDENT_STATES.index(old)
+
+
+def finding_payload(finding: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    """Notification payload: ids, title, severity context and entity keys, never L0 bodies."""
+    return {
+        "finding_uid": str(finding["uid"]),
+        "rule": f"{finding['rule_id']}@{finding['rule_rev']}",
+        "title": finding["title"],
+        "entity_keys": list(finding["entity_keys"])[:32],
+        "count": finding["count"],
+        **extra,
+    }
+
+
+async def notify_thresholds(
+    conn: AsyncConnection[Any], finding: dict[str, Any], old_count: int, now: datetime
+) -> None:
+    """One notification per threshold in (old_count, count] (ADR 0007: 10, 100, 1000)."""
+    for threshold in THRESHOLDS:
+        if old_count < threshold <= finding["count"]:
+            await notify.emit(
+                conn,
+                dedupe_key=f"finding_threshold:{finding['uid']}:{threshold}",
+                kind="finding_threshold",
+                severity_id=finding["severity_id"],
+                payload=finding_payload(finding, threshold=threshold),
+                now=now,
+            )
 
 
 def operator_actor(token_uid: Any) -> str:
@@ -126,20 +155,33 @@ async def set_finding_status(
     suppressed_until: datetime | None = None,
     event_kind: str = "status_changed",
 ) -> None:
-    """Change a finding's status and record it. The caller holds the row (FOR UPDATE)."""
+    """Change a finding's status and record it. The caller holds the row (FOR UPDATE).
+
+    Entering suppression records when it began and the count then; re-suppressing keeps both.
+    Leaving it for ``open`` or ``acknowledged`` pages for every threshold crossed meanwhile.
+    """
     old = finding["status"]
     suppressing = new_status == "suppressed"
+    was_suppressed = old == "suppressed"
+    lifted_from = finding.get("count_at_suppression") if was_suppressed else None
+    suppressed_at = count_then = None
+    if suppressing:
+        suppressed_at = finding["suppressed_at"] if was_suppressed else now
+        count_then = finding["count_at_suppression"] if was_suppressed else finding["count"]
     await conn.execute(
         "UPDATE findings SET status = %s, suppressed_until = %s, suppression_reason = %s, "
-        "updated_at = %s WHERE id = %s",
+        "suppressed_at = %s, count_at_suppression = %s, updated_at = %s WHERE id = %s",
         (
             new_status,
             suppressed_until if suppressing else None,
             reason if suppressing else None,
+            suppressed_at,
+            count_then,
             now,
             finding["id"],
         ),
     )
+    finding.update(suppressed_at=suppressed_at, count_at_suppression=count_then)
     new_value: dict[str, Any] = {"status": new_status}
     if suppressing:
         new_value["suppressed_until"] = suppressed_until.isoformat() if suppressed_until else None
@@ -153,6 +195,8 @@ async def set_finding_status(
         reason=reason,
     )
     finding["status"] = new_status
+    if lifted_from is not None and new_status in ("open", "acknowledged"):
+        await notify_thresholds(conn, finding, lifted_from, now)
 
 
 async def lock_finding(conn: AsyncConnection[Any], uid: Any) -> dict[str, Any] | None:
@@ -183,13 +227,22 @@ async def operator_finding_status(
         raise TransitionError(f"cannot set a finding to {new_status!r}")
     if new_status == finding["status"] and new_status != "suppressed":
         raise TransitionError(f"finding is already {new_status}")
+    if reason is not None and not reason.strip():
+        raise TransitionError("a reason must not be blank")
     if new_status == "suppressed":
         if finding["overflow"]:
             raise TransitionError("an overflow finding cannot be suppressed, only resolved")
         if suppressed_until is None or not reason:
             raise TransitionError("suppression needs an expiry and a reason")
-        if not now < suppressed_until <= now + MAX_SUPPRESSION:
-            raise TransitionError("suppression expiry must be in the future, within 30 days")
+        if suppressed_until.tzinfo is None:
+            raise TransitionError("suppression expiry needs a UTC offset")
+        # Re-suppressing never extends past 30 days from when the suppression began.
+        began = finding["suppressed_at"] if finding["status"] == "suppressed" else now
+        if not now < suppressed_until <= began + MAX_SUPPRESSION:
+            raise TransitionError(
+                "suppression expiry must be in the future and within 30 days of when the "
+                "suppression began"
+            )
     await set_finding_status(
         conn,
         finding,
@@ -229,9 +282,21 @@ async def operator_incident_status(
     reason: str | None,
     now: datetime,
 ) -> dict[str, Any] | None:
-    incident = await db.fetch_one(conn, "SELECT * FROM incidents WHERE uid = %s FOR UPDATE", (uid,))
-    if incident is None:
+    if reason is not None and not reason.strip():
+        raise TransitionError("a reason must not be blank")
+    found = await db.fetch_one(conn, "SELECT id FROM incidents WHERE uid = %s", (uid,))
+    if found is None:
         return None
+    # The worker's lock order: findings first, then the incident, so the two cannot deadlock.
+    await conn.execute(
+        "SELECT f.id FROM findings f JOIN incident_findings l ON l.finding_id = f.id "
+        "WHERE l.incident_id = %s ORDER BY f.id FOR UPDATE OF f",
+        (found["id"],),
+    )
+    incident = await db.fetch_one(
+        conn, "SELECT * FROM incidents WHERE id = %s FOR UPDATE", (found["id"],)
+    )
+    assert incident is not None
     old = incident["status"]
     if new_status not in INCIDENT_STATES:
         raise TransitionError(f"unknown incident state {new_status!r}")

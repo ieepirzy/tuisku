@@ -80,7 +80,7 @@ def test_three_refusals_within_the_hour_page_three_times(
     )
     assert len(rows) == 3
     assert {r[1:] for r in rows} == {("tuisku", "f542db3a-6926-4df9-9183-449491345d3c", "harava")}
-    assert query(url, "SELECT count(*) FROM pack_loads")[0][0] == 2
+    assert query(url, "SELECT count(*) FROM pack_loads")[0][0] == 3
     assert query(url, "SELECT count(*) FROM evaluation_queue")[0][0] == 0
 
     # Read it back through the API.
