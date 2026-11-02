@@ -21,6 +21,7 @@ from psycopg import AsyncConnection
 from pydantic import ValidationError
 
 from tuisku.config import ConfigError, Settings
+from tuisku.rules.packs import PackError as PackLoadError
 
 
 class UsageError(Exception):
@@ -129,6 +130,14 @@ def _build_parser() -> argparse.ArgumentParser:
     api.add_argument("--port", type=int, default=8080)
 
     sub.add_parser("migrate", help="apply database migrations (alembic upgrade head)")
+
+    worker = sub.add_parser("worker", help="evaluate queued rows against the rule packs")
+    worker.add_argument(
+        "--once", action="store_true", help="process until the queue is empty, then exit"
+    )
+    worker.add_argument(
+        "--check-packs", action="store_true", help="load and validate the packs, then exit"
+    )
     _add_admin_commands(sub)
     return parser
 
@@ -231,6 +240,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             from tuisku.api.app import create_app
 
             uvicorn.run(create_app(settings), host=args.host, port=args.port)
+        elif args.command == "worker":
+            from tuisku.worker.run import run_worker
+
+            return run_worker(settings, once=args.once, check_only=args.check_packs)
         elif args.command == "migrate":
             from tuisku.migrate import run_migrations
 
@@ -248,6 +261,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         # e.g. a person-bound token requested without connecting as the database owner
         print(f"tuisku: refused by the database: {exc.diag.message_primary}", file=sys.stderr)
         return 1
+    except PackLoadError as exc:
+        print(f"tuisku: rule packs rejected: {exc}", file=sys.stderr)
+        return 2
     except LookupError as exc:  # store.admin.NotFoundError
         print(f"tuisku: {exc}", file=sys.stderr)
         return 1

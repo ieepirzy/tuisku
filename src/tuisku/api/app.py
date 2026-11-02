@@ -16,7 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from tuisku import __version__, db
 from tuisku.adapters import builtin as _builtin_adapters  # noqa: F401  (registers adapters)
-from tuisku.api import ingest, read
+from tuisku.api import ingest, read, triage
 from tuisku.api.deps import Clock, system_clock
 from tuisku.api.ratelimit import RateLimiter
 from tuisku.config import Settings
@@ -50,6 +50,7 @@ def create_app(settings: Settings | None = None, *, clock: Clock | None = None) 
     app.state.parse_limiter = anyio.CapacityLimiter(settings.ingest_parse_threads)
     app.include_router(ingest.router)
     app.include_router(read.router)
+    app.include_router(triage.router)
 
     @app.get("/v1/health")
     async def health() -> dict[str, str]:

@@ -66,6 +66,24 @@ class Settings(BaseSettings):
     # and evaluated at received_at (ADR 0004 section 6).
     clock_skew_tolerance_seconds: float = Field(default=300.0, ge=0)
 
+    # Rule packs (ADR 0006). The built-in directory resolves against the working directory, like
+    # alembic_config. Extra pack directories are separated by os.pathsep (":" on Linux).
+    builtin_packs_dir: str = "packs"
+    rule_pack_paths: str = ""
+    rule_params_file: str | None = None
+
+    # Worker (ADR 0006). The caps are the ADR's hard limits and can only be lowered.
+    worker_batch_size: int = Field(default=100, ge=1, le=10_000)
+    worker_lease_seconds: float = Field(default=120.0, gt=0)
+    worker_poll_seconds: float = Field(default=1.0, gt=0)
+    worker_statement_timeout_seconds: float = Field(default=10.0, gt=0)
+    worker_max_open_findings: int = Field(default=1000, ge=1, le=1000)
+    worker_max_live_incidents: int = Field(default=100, ge=1, le=100)
+    # A counter's first sample counts in full when its start_time is within one export
+    # interval of the source's first receipt (ADR 0006 "Metric samples").
+    worker_export_interval_seconds: float = Field(default=60.0, gt=0)
+    worker_allowed_lateness_seconds: float = Field(default=86400.0, ge=0)
+
     @field_validator("database_url")
     @classmethod
     def _check_scheme(cls, value: SecretStr | None) -> SecretStr | None:

@@ -70,6 +70,45 @@ Operator tokens with the `read` role (or `triage`/`admin`) can read evidence:
 each raw record's newest successful parse attempt unless `all_attempts=true`) and
 `GET /v1/raw/{uid}` (metadata and the body as base64).
 
+## Rules, findings and incidents
+
+`tuisku worker` evaluates every new observation and detection against the rule packs (ADR 0006)
+and folds firings into findings and incidents (ADR 0007). Run it as its own process, connected
+as the app role; `--once` drains the queue and exits, `--check-packs` only validates the packs.
+
+```sh
+uv run tuisku worker --check-packs          # load and validate packs/ plus configured paths
+uv run tuisku worker                        # poll the evaluation queue
+```
+
+Packs are directories with a `pack.yaml` and `rules/*.yaml` (see `packs/` and ADR 0006). The
+built-in packs (`harava`, `sensors-default`) ship generic defaults only. A deployment mounts
+its own packs and params from its configuration repository:
+`TUISKU_RULE_PACK_PATHS=/etc/tuisku/packs` (separated by `:`) and
+`TUISKU_RULE_PARAMS_FILE=/etc/tuisku/params.yaml`, which maps pack ids to param overrides, e.g.
+`harava: {restricted_callers: [agents, crawler]}`. Every pack's SHA-256 is recorded in
+`pack_loads` and in each detection's explanation. Each rule ships positive and negative fixtures
+in its pack's `fixtures/`, run through the real adapters by `tests/test_packs.py`.
+
+Notifications go to an outbox and are delivered after each evaluation commits. The only
+notifier today writes one JSON line per notification to the `tuisku.notify` logger; routing
+them to people is a deployment decision.
+
+Operator tokens with `read` list `GET /v1/findings` and `GET /v1/incidents` (filters `status`,
+`entity_key`, `rule_id` for findings; `before`/`limit` paging) and read
+`GET /v1/incidents/{uid}` (timeline, findings, evidence summary). Tokens with `triage` post
+`POST /v1/incidents/{uid}/status` (`{"status": "closed", "disposition": "false_positive"}`;
+closing or resolving resolves the incident's open findings, so detection re-arms) and
+`POST /v1/findings/{uid}/status` (`acknowledged`, `resolved`, `open`, or `suppressed` with
+`suppressed_until` within 30 days and a `reason`). Every change is an event attributed to
+`operator:<token uid>`.
+
+Worker settings: `TUISKU_WORKER_BATCH_SIZE`, `TUISKU_WORKER_LEASE_SECONDS` (120),
+`TUISKU_WORKER_POLL_SECONDS`, `TUISKU_WORKER_STATEMENT_TIMEOUT_SECONDS` (10),
+`TUISKU_WORKER_MAX_OPEN_FINDINGS` (1000) and `TUISKU_WORKER_MAX_LIVE_INCIDENTS` (100), which
+can only be lowered, `TUISKU_WORKER_EXPORT_INTERVAL_SECONDS` (60) and
+`TUISKU_WORKER_ALLOWED_LATENESS_SECONDS` (86400).
+
 ## Database roles
 
 Evidence tables are append-only (ADR 0004). Run `tuisku migrate` as the owning role and the
@@ -83,9 +122,13 @@ TUISKU_DATABASE_URL=<tuisku_app url> uv run tuisku api
 
 With `TUISKU_APP_ROLE` set, migrations grant it `SELECT, INSERT` on evidence tables
 (`raw_records`, `raw_duplicates`, `parse_attempts`, `observations`, `detections`,
-`detection_observations`, `detection_evidence`), `SELECT, INSERT, UPDATE, DELETE` on working
-tables (`sources`, `source_tokens`, `operator_tokens`, `evaluation_queue`,
-`evaluation_dead_letter`, `meta_counters`) and `USAGE` on sequences. Grants are made by the revision that
+`detection_observations`, `detection_evidence`, and from revision 0002 `finding_events`,
+`finding_detections`, `finding_overflow_groups`, `incident_events`, `incident_findings`,
+`rule_firings`, `pack_loads`), `SELECT, INSERT, UPDATE, DELETE` on working tables (`sources`,
+`source_tokens`, `operator_tokens`, `evaluation_queue`, `evaluation_dead_letter`,
+`meta_counters`, and from 0002 `findings`, `incidents`, `notifications`,
+`evaluation_dead_letter_rules`) and `USAGE` on sequences. A trigger sets the timestamps of
+`finding_events` and `incident_events` to the database clock. Grants are made by the revision that
 creates each table, so set the variable before the first `tuisku migrate`; for an existing
 database, run the same `GRANT` statements by hand. Left unset, no grants are made: a single
 role does everything, which suits local development only. Independently of roles, triggers

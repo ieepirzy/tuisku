@@ -30,11 +30,13 @@ _EPOCH = datetime(2000, 1, 1, tzinfo=UTC)
 LIMIT_EXCEEDED = "tuisku.meta.source_limit_exceeded"
 RATE_LIMITED = "tuisku.meta.source_rate_limited"
 INVALID_ENVELOPE = "tuisku.meta.invalid_envelope"
+EVALUATION_FAILED = "tuisku.meta.evaluation_failed"
 
 _TITLES = {
     LIMIT_EXCEEDED: ("Source exceeded an ingest limit", Severity.MEDIUM),
     RATE_LIMITED: ("Source was rate limited", Severity.LOW),
     INVALID_ENVELOPE: ("Source sent malformed ingest envelopes", Severity.LOW),
+    EVALUATION_FAILED: ("A rule failed to evaluate a row", Severity.MEDIUM),
 }
 
 
@@ -57,12 +59,61 @@ async def record_breach(
 
     Runs in the caller's transaction. Returns True when a detection row was written.
     """
+    return await _record(
+        conn,
+        source.id,
+        source.name,
+        kind,
+        subject,
+        n=n,
+        details=details,
+        now=now,
+        rule_name="ingest_limits",
+    )
+
+
+async def record_evaluation_failed(
+    conn: AsyncConnection[Any],
+    *,
+    source_id: int | None,
+    source_name: str | None,
+    rule_id: str,
+    details: dict[str, Any],
+    now: datetime,
+) -> bool:
+    """A (row, rule) pair was dead-lettered (ADR 0006): the subject is the rule id, so one
+    failing rule cannot hide another."""
+    return await _record(
+        conn,
+        source_id,
+        source_name,
+        EVALUATION_FAILED,
+        rule_id,
+        n=1,
+        details=details,
+        now=now,
+        rule_name="evaluation",
+    )
+
+
+async def _record(
+    conn: AsyncConnection[Any],
+    source_id: int | None,
+    source_name: str | None,
+    kind: str,
+    subject: str,
+    *,
+    n: int,
+    details: dict[str, Any],
+    now: datetime,
+    rule_name: str,
+) -> bool:
     bucket = bucket_start(now)
     await conn.execute(
         "INSERT INTO meta_counters (source_id, kind, subject, bucket_start, count) "
         "VALUES (%s, %s, %s, %s, %s) ON CONFLICT ON CONSTRAINT meta_counters_key "
         "DO UPDATE SET count = meta_counters.count + EXCLUDED.count",
-        (source.id, kind, subject, bucket, n),
+        (source_id, kind, subject, bucket, n),
     )
     title, severity = _TITLES[kind]
     explanation = {
@@ -82,7 +133,7 @@ async def record_breach(
         "ON CONFLICT (source_id, kind, subject, bucket_start) WHERE bucket_start IS NOT NULL "
         "DO NOTHING RETURNING id",
         (
-            source.id,
+            source_id,
             kind,
             kind,
             title,
@@ -91,8 +142,8 @@ async def record_breach(
             now,
             now,
             OCSF_VERSION,
-            json.dumps({"engine": "tuisku", "name": "ingest_limits"}),
-            [f"source:{source.name}"],
+            json.dumps({"engine": "tuisku", "name": rule_name}),
+            [f"source:{source_name}"] if source_name else [],
             json.dumps(explanation),
             subject,
             bucket,

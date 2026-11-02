@@ -1,0 +1,13 @@
+id: 3fea4292-d954-4ce1-82c8-96b74d31dc14
+rev: 1
+name: sensors-default.zeek_notice
+title: Zeek notice
+severity: medium
+select:
+  layer: detection
+  kind: zeek.notice
+finding:
+  group_by: [identity, entity_keys.0]
+  window: 1h
+  max_lifetime: 24h
+incident: none
