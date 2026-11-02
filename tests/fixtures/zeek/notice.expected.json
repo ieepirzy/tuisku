@@ -5,6 +5,9 @@
       {
         "attack": [],
         "attributes": {
+          "flags": [
+            "log_type_inferred"
+          ],
           "unmapped": {
             "community_id": "1:J2yH/q0MfiSWWwgElbeSQG+C6TY=",
             "email_dest": [],
@@ -76,7 +79,8 @@
         ],
         "event_time": "2023-09-18T06:13:40+00:00",
         "flags": [
-          "connection_context"
+          "connection_context",
+          "log_type_inferred"
         ],
         "kind": "network.flow",
         "ocsf_class_uid": 4001,
@@ -90,6 +94,9 @@
       {
         "attack": [],
         "attributes": {
+          "flags": [
+            "log_type_inferred"
+          ],
           "unmapped": {
             "email_dest": [],
             "peer_descr": "zeek",
@@ -132,6 +139,9 @@
       {
         "attack": [],
         "attributes": {
+          "flags": [
+            "log_type_inferred"
+          ],
           "unmapped": {
             "file_desc": "http://www.example.com/a.exe",
             "file_mime_type": "application/x-dosexec",
@@ -205,7 +215,8 @@
         ],
         "event_time": "2023-09-18T06:14:00+00:00",
         "flags": [
-          "connection_context"
+          "connection_context",
+          "log_type_inferred"
         ],
         "kind": "network.flow",
         "ocsf_class_uid": 4001,
@@ -220,7 +231,8 @@
         "attack": [],
         "attributes": {
           "flags": [
-            "log_type_ambiguous"
+            "log_type_ambiguous",
+            "log_type_inferred"
           ],
           "log_type_candidates": [
             "dns",
@@ -291,6 +303,7 @@
         "event_time": "2023-09-18T06:14:01+00:00",
         "flags": [
           "connection_context",
+          "log_type_inferred",
           "log_type_ambiguous"
         ],
         "kind": "network.flow",

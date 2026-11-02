@@ -54,7 +54,8 @@
         ],
         "event_time": "2023-09-18T06:13:33.900000+00:00",
         "flags": [
-          "proto_assumed_tcp"
+          "proto_assumed_tcp",
+          "log_type_inferred"
         ],
         "kind": "http.request",
         "ocsf_class_uid": 4002,
@@ -125,7 +126,8 @@
         ],
         "event_time": "2023-09-18T06:13:45.500000+00:00",
         "flags": [
-          "proto_assumed_tcp"
+          "proto_assumed_tcp",
+          "log_type_inferred"
         ],
         "kind": "http.request",
         "ocsf_class_uid": 4002,

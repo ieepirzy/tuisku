@@ -119,7 +119,7 @@ class TestLogTypeSelection:
         assert result.observations == ()
         det = result.detections[0]
         assert det.identity == "zeek:notice:Weird::Activity"
-        assert det.attributes["flags"] == ["log_type_ambiguous"]
+        assert det.attributes["flags"] == ["log_type_ambiguous", "log_type_inferred"]
         assert det.attributes["log_type_candidates"] == ["notice", "weird"]
 
     def test_site_extended_notice_is_still_a_notice(self) -> None:
@@ -151,6 +151,53 @@ class TestLogTypeSelection:
     def test_krb_and_snmp_are_not_ssl(self, line: int, what: str) -> None:
         obs = parse(fixture_lines("unknown")[line]).observations[0]
         assert obs.kind == "zeek.unknown", what
+
+    @pytest.mark.parametrize(
+        ("line", "log"),
+        [(7, "sip"), (8, "ftp"), (9, "smb_files"), (10, "irc"), (11, "quic"), (12, "old dhcp")],
+    )
+    def test_sibling_logs_are_not_inferred(self, line: int, log: str) -> None:
+        record = fixture_lines("unknown")[line]
+        result = parse(record)
+        assert result.detections == (), log
+        obs = result.observations[0]
+        assert obs.kind == "zeek.unknown", log
+        assert obs.community_id is None, log  # no forged TCP flow id for a UDP sip record
+        assert "log_type_inferred" not in obs.flags
+
+    def test_sip_needs_option_to_be_anything(self) -> None:
+        sip = fixture_lines("unknown")[7]
+        assert "call_id" in sip and "trans_depth" in sip and "method" in sip
+        # http's positive markers alone are not enough once a sip marker is present
+        assert parse(dict(sip, host="x.example")).observations[0].kind == "zeek.unknown"
+
+    def test_positive_markers_required(self) -> None:
+        conn_id = {"id.orig_h": "10.0.0.5", "id.orig_p": 1, "id.resp_h": "10.0.0.6", "id.resp_p": 2}
+        # history alone (quic has one) is not conn; with a counter it is
+        assert parse(dict(conn_id, history="Dd")).observations[0].kind == "zeek.unknown"
+        assert parse(dict(conn_id, history="Dd", orig_pkts=1)).observations[0].kind == (
+            "network.flow"
+        )
+        # trans_id alone (old dhcp.log) is not dns
+        assert parse(dict(conn_id, trans_id=1)).observations[0].kind == "zeek.unknown"
+        assert parse(dict(conn_id, qtype=1)).observations[0].kind == "dns.answer"
+        # method alone is not http
+        assert parse(dict(conn_id, method="GET")).observations[0].kind == "zeek.unknown"
+        assert parse(dict(conn_id, method="GET", uri="/")).observations[0].kind == "http.request"
+        # fuid alone is not files
+        assert parse({"fuid": "Fx"}).observations[0].kind == "zeek.unknown"
+        assert parse({"fuid": "Fx", "source": "HTTP"}).observations[0].kind == "file.transfer"
+        # a flattened sibling record field (smb_files ``times.*``) is a marker too
+        smb_like = {"fuid": "Fx", "source": "SMB", "times.modified": 1695017000.0}
+        assert parse(smb_like).observations[0].kind == "zeek.unknown"
+
+    def test_inferred_flag_only_when_inferred(self) -> None:
+        assert "log_type_inferred" in parse(CONN).observations[0].flags
+        assert "log_type_inferred" not in parse(CONN, log="conn").observations[0].flags
+        assert "log_type_inferred" not in parse(dict(CONN, _path="conn")).observations[0].flags
+        assert "log_type_inferred" in parse(NOTICE).detections[0].attributes["flags"]
+        assert "flags" not in parse(NOTICE, log="notice").detections[0].attributes
+        assert "log_type_inferred" not in parse({"x": 1}).observations[0].flags
 
     def test_ssl_needs_server_name_or_cipher_and_version(self) -> None:
         base = {"ts": 1695017614.0, "uid": "Cx", "id.orig_h": "10.0.0.5"}
@@ -343,6 +390,12 @@ class TestEntityKeysAndCorrelation:
         assert obs.unmapped["sha256"] == "not-a-hash"
         assert not any(k.startswith("sha256:") for k in obs.entity_keys)
 
+    def test_files_uid_wins_over_conn_uids(self) -> None:
+        record = dict(fixture_lines("files")[0], conn_uids=["ColderUid00000001"])
+        obs = parse(record).observations[0]
+        assert obs.correlation["zeek.uid"] == ("CHhAvVGS1DHFjwGM9",)
+        assert obs.unmapped["conn_uids"] == ["ColderUid00000001"]
+
     def test_files_legacy_hosts(self) -> None:
         obs = parse(fixture_lines("files")[1]).observations[0]
         assert obs.entity_keys == ("ip:203.0.113.20", "ip:192.0.2.10")
@@ -374,7 +427,7 @@ class TestCommunityId:
     def test_http_assumes_tcp(self) -> None:
         obs = parse(fixture_lines("http")[0]).observations[0]
         assert obs.community_id == community_id("tcp", "192.0.2.10", 49175, "203.0.113.20", 80)
-        assert obs.flags == ("proto_assumed_tcp",)
+        assert obs.flags == ("proto_assumed_tcp", "log_type_inferred")
         assert "protocol_name" not in obs.attributes["connection_info"]
 
     def test_explicit_proto_is_not_overridden(self) -> None:
@@ -385,18 +438,44 @@ class TestCommunityId:
     def test_tls_version_assumes_tcp(self) -> None:
         obs = parse(fixture_lines("ssl")[0]).observations[0]
         assert obs.community_id == community_id("tcp", "10.0.0.5", 50110, "198.51.100.43", 443)
-        assert obs.flags == ("proto_assumed_tcp",)
+        assert obs.flags == ("proto_assumed_tcp", "log_type_inferred")
 
     def test_dtls_does_not_assume_tcp(self) -> None:
         obs = parse(fixture_lines("ssl")[2]).observations[0]
         assert obs.community_id is None
-        assert obs.flags == ()
+        assert obs.flags == ("log_type_inferred",)
 
     def test_no_version_keeps_reported_as_unverified(self) -> None:
         record = fixture_lines("ssl")[1]
         obs = parse(record).observations[0]
-        assert obs.community_id == record["community_id"]
-        assert obs.flags == ("community_id_unverified",)
+        assert obs.community_id == record["community_id"]  # contract: envelope keeps it, flagged
+        assert obs.flags == ("community_id_unverified", "log_type_inferred")
+        info = obs.attributes["connection_info"]
+        assert "community_uid" not in info  # only a computed id is community_uid
+        assert info["reported_community_uid"] == record["community_id"]
+        assert obs.unmapped["community_id"] == record["community_id"]
+
+    def test_mismatch_keeps_reported_apart(self) -> None:
+        record = fixture_lines("conn")[1]
+        info = parse(record).observations[0].attributes["connection_info"]
+        assert info["community_uid"] == "1:ktGSSHxVRGE5LR0LsXJNJxiLm9A="
+        assert info["reported_community_uid"] == record["community_id"]
+        matched = parse(CONN).observations[0].attributes["connection_info"]
+        assert "reported_community_uid" not in matched
+
+    def test_invalid_reported_is_not_kept_as_an_id(self) -> None:
+        line = (FIXTURES / "malformed.ndjson").read_text(encoding="utf-8").splitlines()[-1]
+        info = parse(line).observations[0].attributes["connection_info"]
+        assert "reported_community_uid" not in info and "community_uid" not in info
+
+    def test_connection_flags_reach_detections(self) -> None:
+        weird = dict(WEIRD, community_id="1:unverifiedSensorValue000000=")  # weird has no proto
+        det = parse(weird).detections[0]
+        assert det.explanation["connection_flags"] == ["community_id_unverified"]
+        notice = dict(NOTICE, community_id="1:AAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+        det = parse(notice).detections[0]
+        assert det.explanation["connection_flags"] == ["community_id_mismatch"]
+        assert "connection_flags" not in parse(NOTICE).detections[0].explanation
 
     def test_malformed_reported_is_invalid_and_not_stored(self) -> None:
         line = (FIXTURES / "malformed.ndjson").read_text(encoding="utf-8").splitlines()[-1]
@@ -681,4 +760,8 @@ def test_fuzz_only_adapter_error_escapes() -> None:
 
 
 def test_fuzz_with_huge_integers() -> None:
-    _fuzz(big_int=True)
+    ok, failed = _fuzz(big_int=True)
+    # huge integers must fail as AdapterError, so more lines fail than without them
+    base_ok, base_failed = _fuzz(big_int=False)
+    assert ok > 500 and failed > base_failed + 100
+    assert ok + failed == base_ok + base_failed

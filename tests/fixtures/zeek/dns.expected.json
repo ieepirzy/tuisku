@@ -51,7 +51,9 @@
           "ip:192.0.2.80"
         ],
         "event_time": "2023-09-18T06:13:33.100000+00:00",
-        "flags": [],
+        "flags": [
+          "log_type_inferred"
+        ],
         "kind": "dns.answer",
         "ocsf_class_uid": 4003,
         "unmapped": {
@@ -108,7 +110,9 @@
           "domain:missing.example"
         ],
         "event_time": "2023-09-18T06:13:41+00:00",
-        "flags": [],
+        "flags": [
+          "log_type_inferred"
+        ],
         "kind": "dns.answer",
         "ocsf_class_uid": 4003,
         "unmapped": {
@@ -162,7 +166,9 @@
           "ip:2001:db8::53"
         ],
         "event_time": "2023-09-18T06:13:33.300000+00:00",
-        "flags": [],
+        "flags": [
+          "log_type_inferred"
+        ],
         "kind": "dns.answer",
         "ocsf_class_uid": 4003,
         "unmapped": {

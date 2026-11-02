@@ -4,7 +4,11 @@
     "detections": [
       {
         "attack": [],
-        "attributes": {},
+        "attributes": {
+          "flags": [
+            "log_type_inferred"
+          ]
+        },
         "authorship": "builtin",
         "entity_keys": [
           "ip:198.51.100.9",
@@ -61,7 +65,8 @@
         ],
         "event_time": "2023-09-18T06:13:41+00:00",
         "flags": [
-          "connection_context"
+          "connection_context",
+          "log_type_inferred"
         ],
         "kind": "network.flow",
         "ocsf_class_uid": 4001,
@@ -74,7 +79,11 @@
     "detections": [
       {
         "attack": [],
-        "attributes": {},
+        "attributes": {
+          "flags": [
+            "log_type_inferred"
+          ]
+        },
         "authorship": "builtin",
         "entity_keys": [],
         "event_time": "2023-09-18T06:14:02.250000+00:00",

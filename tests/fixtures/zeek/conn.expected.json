@@ -39,7 +39,9 @@
           "ip:203.0.113.20"
         ],
         "event_time": "2023-09-18T06:13:33.324862+00:00",
-        "flags": [],
+        "flags": [
+          "log_type_inferred"
+        ],
         "kind": "network.flow",
         "ocsf_class_uid": 4001,
         "unmapped": {
@@ -66,6 +68,7 @@
             "flag_history": "Dd",
             "protocol_name": "udp",
             "protocol_num": 17,
+            "reported_community_uid": "1:AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
             "uid": "C1a2b3c4d5e6f7g8h"
           },
           "dst_endpoint": {
@@ -96,7 +99,8 @@
         ],
         "event_time": "2023-09-18T06:13:40.000001+00:00",
         "flags": [
-          "community_id_mismatch"
+          "community_id_mismatch",
+          "log_type_inferred"
         ],
         "kind": "network.flow",
         "ocsf_class_uid": 4001,
@@ -144,7 +148,9 @@
           "ip:203.0.113.20"
         ],
         "event_time": "2023-09-18T06:15:00+00:00",
-        "flags": [],
+        "flags": [
+          "log_type_inferred"
+        ],
         "kind": "network.flow",
         "ocsf_class_uid": 4001,
         "unmapped": {
@@ -186,7 +192,9 @@
           "ip:2001:db8::2"
         ],
         "event_time": "2023-09-18T06:16:40+00:00",
-        "flags": [],
+        "flags": [
+          "log_type_inferred"
+        ],
         "kind": "network.flow",
         "ocsf_class_uid": 4001,
         "unmapped": {
@@ -221,7 +229,9 @@
           "ip:203.0.113.20"
         ],
         "event_time": "2023-09-18T06:18:20.500000+00:00",
-        "flags": [],
+        "flags": [
+          "log_type_inferred"
+        ],
         "kind": "network.flow",
         "ocsf_class_uid": 4001,
         "unmapped": {

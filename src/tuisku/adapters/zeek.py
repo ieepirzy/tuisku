@@ -10,6 +10,12 @@ unknown; extra fields only add a ``log_type_ambiguous`` flag), then the record's
 fields. A record that matches no type, or several, becomes a ``zeek.unknown`` observation; nothing
 is guessed. ``collector.path`` is receipt metadata and is never used.
 
+**Deployments should set the ``log`` option on every source (one source per log stream) or ship
+records with Zeek's ``_path`` field.** Inference is a best-effort fallback: it needs positive,
+type-specific fields and no marker of a known sibling log (sip, ftp, smb_files, irc, quic, dhcp,
+krb, snmp, signatures), but Zeek has many more logs and sites add fields, so an inferred type can
+still be wrong. Every draft whose type was inferred carries the ``log_type_inferred`` flag.
+
 Field names follow the ``Info`` records of the upstream scripts (``base/protocols/{conn,dns,http,
 ssl}/main.zeek``, ``base/frameworks/files/main.zeek``, ``base/files/hash/main.zeek``,
 ``base/protocols/http/entities.zeek``, ``base/frameworks/notice/{main,weird}.zeek`` and
@@ -70,8 +76,12 @@ _HASH_ALGORITHMS = (
 )
 _HEX = re.compile(r"^[0-9A-Fa-f]{32,64}$")
 
-# Inference markers. signatures.log also has ``note``; krb.log has ``cipher``; snmp.log has a
-# string ``version`` (base/frameworks/signatures/main.zeek, base/protocols/{krb,snmp}/main.zeek).
+# --- inference markers --------------------------------------------------------------------------
+# Inference is a best-effort fallback. A type is inferred only from positive, type-specific fields
+# AND the absence of every known marker of a sibling log that shares some of those fields. The
+# marker lists come from the upstream Info records (zeek/zeek master unless noted).
+
+# signatures.log has ``note`` (base/frameworks/signatures/main.zeek).
 _SIGNATURE_MARKERS = (
     "sig_id",
     "event_msg",
@@ -81,25 +91,75 @@ _SIGNATURE_MARKERS = (
     "src_addr",
     "dst_addr",
 )
-_KRB_MARKERS = (
-    "request_type",
-    "client",
-    "success",
-    "error_msg",
-    "from",
-    "till",
-    "forwardable",
-    "renewable",
-)
-_SNMP_MARKERS = (
-    "community",
-    "get_requests",
-    "get_bulk_requests",
-    "get_responses",
-    "set_requests",
-    "display_string",
-    "up_since",
-)
+_SIBLING_MARKERS: dict[str, tuple[str, ...]] = {
+    # sip.log: trans_depth, method, uri, user_agent, status_code (base/protocols/sip/main.zeek)
+    "sip": (
+        "call_id",
+        "request_from",
+        "request_to",
+        "response_from",
+        "response_to",
+        "reply_to",
+        "seq",
+        "request_path",
+        "response_path",
+        "warning",
+        "subject",
+        "date",
+    ),
+    # ftp.log: fuid, mime_type (base/protocols/ftp/info.zeek)
+    "ftp": (
+        "command",
+        "arg",
+        "reply_code",
+        "reply_msg",
+        "data_channel",
+        "file_size",
+        "user",
+        "password",
+    ),
+    # smb_files.log: fuid, name (base/protocols/smb/main.zeek FileInfo); ``times.*`` too
+    "smb_files": ("action", "path", "prev_name", "times"),
+    # irc.log: addl, fuid (base/protocols/irc/{main,files}.zeek)
+    "irc": ("nick", "value", "dcc_file_name", "dcc_file_size", "dcc_mime_type"),
+    # quic.log: version, server_name, history (base/protocols/quic/main.zeek)
+    "quic": ("client_initial_dcid", "client_scid", "server_scid", "client_protocol"),
+    # dhcp.log, and the pre-2.6 dhcp.log with trans_id (base/protocols/dhcp/main.bro @ v2.5.5)
+    "dhcp": (
+        "mac",
+        "assigned_addr",
+        "assigned_ip",
+        "lease_time",
+        "uids",
+        "client_addr",
+        "server_addr",
+        "requested_addr",
+        "msg_types",
+        "client_fqdn",
+    ),
+    # krb.log: cipher (base/protocols/krb/main.zeek)
+    "krb": (
+        "request_type",
+        "client",
+        "success",
+        "error_msg",
+        "from",
+        "till",
+        "forwardable",
+        "renewable",
+    ),
+    # snmp.log: a string version (base/protocols/snmp/main.zeek)
+    "snmp": (
+        "community",
+        "get_requests",
+        "get_bulk_requests",
+        "get_responses",
+        "set_requests",
+        "display_string",
+        "up_since",
+    ),
+}
+_FOREIGN_MARKERS = frozenset(m for markers in _SIBLING_MARKERS.values() for m in markers)
 # ssl.log also records DTLS (UDP); only these version strings (base/protocols/ssl/consts.zeek)
 # prove TLS over TCP.
 _TCP_TLS_VERSION = re.compile(r"^(?:SSLv[23]|TLSv1[0-3](?:-draft\d{1,3})?)$")
@@ -185,7 +245,9 @@ class _Record:
     def __init__(self, data: dict[str, Any], input_flags: tuple[str, ...] = ()) -> None:
         self.data = data
         self.used: set[str] = set()
-        self.input_flags = input_flags  # e.g. invalid_unicode_replaced from decoding
+        # Record-wide flags carried onto every draft: invalid_unicode_replaced from decoding,
+        # log_type_inferred when the type was inferred.
+        self.input_flags = input_flags
 
     def has(self, key: str) -> bool:
         return key in self.data
@@ -240,10 +302,6 @@ def _has_any(rec: _Record, keys: tuple[str, ...]) -> bool:
     return any(rec.has(k) for k in keys)
 
 
-def _is_signature(rec: _Record) -> bool:
-    return rec.has("note") and _has_any(rec, _SIGNATURE_MARKERS)
-
-
 def _is_valid_note(rec: _Record) -> bool:
     note = rec.data.get("note")
     return isinstance(note, str) and len(note) <= 256 and _NOTE.match(note) is not None
@@ -254,31 +312,52 @@ def _is_valid_weird_name(rec: _Record) -> bool:
     return isinstance(name, str) and len(name) <= 256 and _WEIRD_NAME.match(name) is not None
 
 
+def _has_foreign_marker(rec: _Record) -> bool:
+    """True if the record carries a field that marks an unsupported sibling log."""
+    return any(k in _FOREIGN_MARKERS or k.split(".", 1)[0] in _FOREIGN_MARKERS for k in rec.data)
+
+
+_CONN_COUNTERS = (
+    "orig_bytes",
+    "resp_bytes",
+    "orig_pkts",
+    "resp_pkts",
+    "missed_bytes",
+    "orig_ip_bytes",
+)
+
+
 def _candidates(rec: _Record) -> list[str]:
-    """Every log type whose characteristic required fields the record carries."""
+    """Every log type whose positive markers the record carries, without sibling-log markers.
+
+    notice and weird are verdicts: sites extend those logs, so they only exclude the log that
+    reuses their identifying field (signatures.log's ``note``).
+    """
     found: list[str] = []
-    if (rec.has("conn_state") or rec.has("history")) and _has_conn_id(rec):
-        found.append("conn")
-    if rec.has("query") or rec.has("trans_id"):
-        found.append("dns")
-    if rec.has("trans_depth") and (rec.has("method") or rec.has("status_code")):
-        found.append("http")
-    # ``cipher`` alone is krb.log and ``version`` alone is snmp.log (or http.log's "1.1", or
-    # ssh.log's count), so ssl needs ``server_name`` or both, and no krb/snmp/http markers.
-    ssl_fields = rec.has("server_name") or (
-        rec.has("cipher") and isinstance(rec.data.get("version"), str)
-    )
-    if (
-        ssl_fields
-        and not rec.has("trans_depth")
-        and not _has_any(rec, _KRB_MARKERS)
-        and not _has_any(rec, _SNMP_MARKERS)
-    ):
-        found.append("ssl")
-    # notice.log may carry a ``fuid`` too; ``note`` is notice-only.
-    if rec.has("fuid") and not rec.has("note"):
-        found.append("files")
-    if rec.has("note") and not _is_signature(rec):
+    if not _has_foreign_marker(rec):
+        if _has_conn_id(rec) and (
+            rec.has("conn_state") or (rec.has("history") and _has_any(rec, _CONN_COUNTERS))
+        ):
+            found.append("conn")
+        if rec.has("query") or rec.has("qtype"):
+            found.append("dns")
+        if rec.has("method") and (rec.has("uri") or rec.has("host")):
+            found.append("http")
+        # ``version`` alone is also http's "1.1" and ssh's count, so ssl needs ``server_name``
+        # or ``cipher`` with a string ``version``, and is never an http transaction.
+        ssl_fields = rec.has("server_name") or (
+            rec.has("cipher") and isinstance(rec.data.get("version"), str)
+        )
+        if ssl_fields and not rec.has("trans_depth"):
+            found.append("ssl")
+        # notice.log may carry a ``fuid`` too; ``note`` is notice-only.
+        if (
+            rec.has("fuid")
+            and _has_any(rec, ("source", "analyzers", "depth", "mime_type"))
+            and not rec.has("note")
+        ):
+            found.append("files")
+    if rec.has("note") and not _has_any(rec, _SIGNATURE_MARKERS):
         found.append("notice")
     if rec.has("name") and (rec.has("addl") or isinstance(rec.data.get("notice"), bool)):
         found.append("weird")
@@ -316,7 +395,15 @@ class _Conn:
             computed = community_id(flow_proto, self.orig_h, self.orig_p, self.resp_h, self.resp_p)
         # computed wins; a well-formed reported id is kept as unverified when there is no
         # complete tuple to check it against (e.g. weird.log has no proto).
-        self.community_id, flags = check_reported(computed, rec.data.get("community_id"))
+        reported = rec.data.get("community_id")
+        self.community_id, flags = check_reported(computed, reported)
+        self.computed_community_id = computed
+        # The sensor's value, when Tuisku could not confirm it (unverified or mismatch).
+        self.reported_community_id = (
+            reported if isinstance(reported, str) and reported != computed and flags else None
+        )
+        if "community_id_invalid" in flags:
+            self.reported_community_id = None  # malformed values are never stored as ids
         self.flags = (assumed if computed is not None else ()) + flags
 
     def present(self) -> bool:
@@ -330,7 +417,10 @@ class _Conn:
         _put(info, "uid", self.uid)
         _put(info, "protocol_name", self.proto)
         _put(info, "protocol_num", self.proto_num)
-        _put(info, "community_uid", self.community_id)
+        # Only an id Tuisku computed is ``community_uid``; a sensor value it could not confirm
+        # is kept apart (and verbatim in unmapped).
+        _put(info, "community_uid", self.computed_community_id)
+        _put(info, "reported_community_uid", self.reported_community_id)
         for key, value in (extra_info or {}).items():
             _put(info, key, value)
         _put(attrs, "connection_info", info)
@@ -622,6 +712,9 @@ def _verdict(
     if context is not None and flags:
         context = dataclasses.replace(context, flags=context.flags + flags)
     explanation: dict[str, Any] = {"sensor": "zeek", "log": log, identity_field: name}
+    connection_flags = [f for f in conn.flags if f.startswith("community_id_")]
+    if connection_flags:
+        explanation["connection_flags"] = connection_flags
     keys: list[str | None] = list(conn.entity_keys())
     for field, check in explanation_fields:
         value = rec.take(field, check)
@@ -739,16 +832,19 @@ class ZeekAdapter:
                 log = _PATH_ALIASES.get(path, path)
                 if log not in LOG_TYPES:
                     return _parse_unknown(rec, candidates, path=path)
-            elif "notice" in candidates and _is_valid_note(rec):
-                log = "notice"
-                ambiguous = candidates if len(candidates) > 1 else []
-            elif "weird" in candidates and _is_valid_weird_name(rec):
-                log = "weird"
-                ambiguous = candidates if len(candidates) > 1 else []
-            elif len(candidates) == 1:
-                log = candidates[0]
             else:
-                return _parse_unknown(rec, candidates)
+                if "notice" in candidates and _is_valid_note(rec):
+                    log = "notice"
+                    ambiguous = candidates if len(candidates) > 1 else []
+                elif "weird" in candidates and _is_valid_weird_name(rec):
+                    log = "weird"
+                    ambiguous = candidates if len(candidates) > 1 else []
+                elif len(candidates) == 1:
+                    log = candidates[0]
+                else:
+                    return _parse_unknown(rec, candidates)
+                # Neither the source nor the record said which log this is.
+                rec.input_flags += ("log_type_inferred",)
         if log == "conn":
             return _parse_conn(rec)
         if log == "dns":

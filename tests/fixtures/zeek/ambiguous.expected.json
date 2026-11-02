@@ -47,7 +47,8 @@
         "attack": [],
         "attributes": {
           "flags": [
-            "log_type_ambiguous"
+            "log_type_ambiguous",
+            "log_type_inferred"
           ],
           "log_type_candidates": [
             "notice",

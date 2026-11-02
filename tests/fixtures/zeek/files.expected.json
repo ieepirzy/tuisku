@@ -55,7 +55,9 @@
           "sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
         ],
         "event_time": "2023-09-18T06:13:34.200000+00:00",
-        "flags": [],
+        "flags": [
+          "log_type_inferred"
+        ],
         "kind": "file.transfer",
         "ocsf_class_uid": 1001,
         "unmapped": {
@@ -102,7 +104,9 @@
           "ip:192.0.2.10"
         ],
         "event_time": "2023-09-18T06:13:47+00:00",
-        "flags": [],
+        "flags": [
+          "log_type_inferred"
+        ],
         "kind": "file.transfer",
         "ocsf_class_uid": 1001,
         "unmapped": {

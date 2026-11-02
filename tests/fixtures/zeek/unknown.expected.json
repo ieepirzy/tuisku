@@ -230,5 +230,261 @@
         }
       }
     ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {},
+        "community_id": null,
+        "correlation": {
+          "zeek.uid": [
+            "CsipUid0000000001"
+          ]
+        },
+        "entity_keys": [
+          "ip:192.0.2.10",
+          "ip:203.0.113.60"
+        ],
+        "event_time": "2023-09-18T06:14:25+00:00",
+        "flags": [
+          "log_type_unknown"
+        ],
+        "kind": "zeek.unknown",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "call_id": "a84b4c76e66710@example.com",
+          "id.orig_h": "192.0.2.10",
+          "id.orig_p": 5060,
+          "id.resp_h": "203.0.113.60",
+          "id.resp_p": 5060,
+          "method": "INVITE",
+          "request_body_len": 0,
+          "request_from": "<sip:alice@example.com>",
+          "request_path": [
+            "SIP/2.0/UDP 192.0.2.10:5060"
+          ],
+          "request_to": "<sip:bob@example.com>",
+          "response_body_len": 0,
+          "response_from": "<sip:alice@example.com>",
+          "response_path": [
+            "SIP/2.0/UDP 192.0.2.10:5060"
+          ],
+          "response_to": "<sip:bob@example.com>",
+          "seq": "314159 INVITE",
+          "status_code": 200,
+          "status_msg": "OK",
+          "trans_depth": 0,
+          "ts": 1695017665.0,
+          "uid": "CsipUid0000000001",
+          "uri": "sip:bob@example.com",
+          "user_agent": "ExamplePhone/1.0"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {},
+        "community_id": null,
+        "correlation": {
+          "zeek.uid": [
+            "CftpUid0000000001"
+          ]
+        },
+        "entity_keys": [
+          "ip:192.0.2.10",
+          "ip:203.0.113.21"
+        ],
+        "event_time": "2023-09-18T06:14:26+00:00",
+        "flags": [
+          "log_type_unknown"
+        ],
+        "kind": "zeek.unknown",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "arg": "ftp://203.0.113.21/pub/file.txt",
+          "command": "RETR",
+          "file_size": 120,
+          "fuid": "FftpFile000000001",
+          "id.orig_h": "192.0.2.10",
+          "id.orig_p": 49400,
+          "id.resp_h": "203.0.113.21",
+          "id.resp_p": 21,
+          "mime_type": "text/plain",
+          "password": "<hidden>",
+          "reply_code": 226,
+          "reply_msg": "Transfer complete.",
+          "ts": 1695017666.0,
+          "uid": "CftpUid0000000001",
+          "user": "anonymous"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {},
+        "community_id": null,
+        "correlation": {
+          "zeek.uid": [
+            "CsmbUid0000000001"
+          ]
+        },
+        "entity_keys": [
+          "ip:192.0.2.10",
+          "ip:203.0.113.22"
+        ],
+        "event_time": "2023-09-18T06:14:27+00:00",
+        "flags": [
+          "log_type_unknown"
+        ],
+        "kind": "zeek.unknown",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "action": "SMB::FILE_OPEN",
+          "fuid": "FsmbFile000000001",
+          "id.orig_h": "192.0.2.10",
+          "id.orig_p": 49401,
+          "id.resp_h": "203.0.113.22",
+          "id.resp_p": 445,
+          "name": "report.docx",
+          "path": "\\\\server\\share",
+          "size": 4096,
+          "times.accessed": 1695017000.0,
+          "times.changed": 1695017000.0,
+          "times.created": 1695017000.0,
+          "times.modified": 1695017000.0,
+          "ts": 1695017667.0,
+          "uid": "CsmbUid0000000001"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {},
+        "community_id": null,
+        "correlation": {
+          "zeek.uid": [
+            "CircUid0000000001"
+          ]
+        },
+        "entity_keys": [
+          "ip:192.0.2.10",
+          "ip:203.0.113.23"
+        ],
+        "event_time": "2023-09-18T06:14:28+00:00",
+        "flags": [
+          "log_type_unknown"
+        ],
+        "kind": "zeek.unknown",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "addl": "file.bin",
+          "command": "DCC",
+          "dcc_file_name": "file.bin",
+          "dcc_file_size": 1024,
+          "dcc_mime_type": "application/octet-stream",
+          "fuid": "FircFile000000001",
+          "id.orig_h": "192.0.2.10",
+          "id.orig_p": 49402,
+          "id.resp_h": "203.0.113.23",
+          "id.resp_p": 6667,
+          "nick": "user1",
+          "ts": 1695017668.0,
+          "uid": "CircUid0000000001",
+          "user": "user1",
+          "value": "SEND"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {},
+        "community_id": null,
+        "correlation": {
+          "zeek.uid": [
+            "CquicUid000000001"
+          ]
+        },
+        "entity_keys": [
+          "ip:192.0.2.10",
+          "ip:203.0.113.24"
+        ],
+        "event_time": "2023-09-18T06:14:29+00:00",
+        "flags": [
+          "log_type_unknown"
+        ],
+        "kind": "zeek.unknown",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "client_initial_dcid": "95412c47018cdfe8",
+          "client_protocol": "h3",
+          "client_scid": "",
+          "history": "ISishIH",
+          "id.orig_h": "192.0.2.10",
+          "id.orig_p": 49403,
+          "id.resp_h": "203.0.113.24",
+          "id.resp_p": 443,
+          "server_name": "www.example.com",
+          "server_scid": "",
+          "ts": 1695017669.0,
+          "uid": "CquicUid000000001",
+          "version": "1"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {},
+        "community_id": null,
+        "correlation": {
+          "zeek.uid": [
+            "CdhcpOld000000001"
+          ]
+        },
+        "entity_keys": [
+          "ip:10.0.0.50",
+          "ip:10.0.0.1"
+        ],
+        "event_time": "2023-09-18T06:14:30+00:00",
+        "flags": [
+          "log_type_unknown"
+        ],
+        "kind": "zeek.unknown",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "assigned_ip": "10.0.0.50",
+          "id.orig_h": "10.0.0.50",
+          "id.orig_p": 68,
+          "id.resp_h": "10.0.0.1",
+          "id.resp_p": 67,
+          "lease_time": 3600.0,
+          "mac": "00:00:5e:00:53:02",
+          "trans_id": 1234567,
+          "ts": 1695017670.0,
+          "uid": "CdhcpOld000000001"
+        }
+      }
+    ]
   }
 ]

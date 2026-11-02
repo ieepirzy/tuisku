@@ -36,7 +36,8 @@
         ],
         "event_time": "2023-09-18T06:13:34+00:00",
         "flags": [
-          "proto_assumed_tcp"
+          "proto_assumed_tcp",
+          "log_type_inferred"
         ],
         "kind": "tls.handshake",
         "ocsf_class_uid": 4001,
@@ -56,7 +57,7 @@
       {
         "attributes": {
           "connection_info": {
-            "community_uid": "1:unverifiedSensorValue000000=",
+            "reported_community_uid": "1:unverifiedSensorValue000000=",
             "uid": "CsWnPx3sslUid0002"
           },
           "dst_endpoint": {
@@ -84,7 +85,8 @@
         ],
         "event_time": "2023-09-18T08:13:46+00:00",
         "flags": [
-          "community_id_unverified"
+          "community_id_unverified",
+          "log_type_inferred"
         ],
         "kind": "tls.handshake",
         "ocsf_class_uid": 4001,
@@ -131,7 +133,9 @@
           "ip:198.51.100.45"
         ],
         "event_time": "2023-09-18T06:13:34.500000+00:00",
-        "flags": [],
+        "flags": [
+          "log_type_inferred"
+        ],
         "kind": "tls.handshake",
         "ocsf_class_uid": 4001,
         "unmapped": {
