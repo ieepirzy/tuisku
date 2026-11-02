@@ -182,3 +182,69 @@ def test_app_role_cannot_rebind_a_token_to_a_person(app_db: AppDatabase) -> None
         pytest.raises(psycopg.errors.InsufficientPrivilege),
     ):
         conn.execute("UPDATE operator_tokens SET person = 'Mallory' WHERE person IS NULL")
+
+
+def _uid_of(url: str, token: str) -> str:
+    [(uid,)] = query(
+        url,
+        "SELECT uid::text FROM operator_tokens WHERE token_sha256 = %s",
+        (hashlib.sha256(token.encode()).digest(),),
+    )
+    return uid
+
+
+def test_operator_token_list_and_revoke(
+    env: AppDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    assert main(["operator-token", "add", "--name", "to-revoke", "--role", "read"]) == 0
+    token = _token(capsys)
+    uid = _uid_of(env.owner_url, token)
+    assert main(["operator-token", "list"]) == 0
+    out = capsys.readouterr().out
+    rows = [json.loads(line) for line in out.splitlines()]
+    mine = next(r for r in rows if r["uid"] == uid)
+    assert mine["name"] == "to-revoke" and mine["revoked_at"] is None
+    assert token not in out and "token_sha256" not in out  # never the secret or its hash
+    with client(env.app_url) as c:
+        assert (
+            c.get("/v1/observations", headers={"Authorization": f"Bearer {token}"}).status_code
+            == 200
+        )
+    assert main(["operator-token", "revoke", uid]) == 0
+    capsys.readouterr()
+    with client(env.app_url) as c:
+        assert (
+            c.get("/v1/observations", headers={"Authorization": f"Bearer {token}"}).status_code
+            == 401
+        )
+    [(revoked,)] = query(
+        env.owner_url, "SELECT revoked_at FROM operator_tokens WHERE uid = %s", (uid,)
+    )
+    assert revoked is not None  # revoked, never deleted
+    assert main(["operator-token", "revoke", str(uuid.uuid4())]) == 1
+    capsys.readouterr()
+
+
+def test_approver_revoke_needs_the_database_owner(
+    env: AppDatabase, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("TUISKU_DATABASE_URL", env.owner_url)
+    assert main(["approver", "add", "--person", "Carol Example"]) == 0
+    uid = _uid_of(env.owner_url, _token(capsys))
+    # An approve token is not revoked through operator-token.
+    assert main(["operator-token", "revoke", uid]) == 1
+    assert "approver revoke" in capsys.readouterr().err
+    # As the app role (what the API uses): refused by the database.
+    monkeypatch.setenv("TUISKU_DATABASE_URL", env.app_url)
+    assert main(["approver", "revoke", uid]) == 1
+    assert "database owner" in capsys.readouterr().err
+    # As the owner, out of band: revoked.
+    monkeypatch.setenv("TUISKU_DATABASE_URL", env.owner_url)
+    assert main(["approver", "revoke", uid]) == 0
+    capsys.readouterr()
+    [(revoked,)] = query(
+        env.owner_url, "SELECT revoked_at FROM operator_tokens WHERE uid = %s", (uid,)
+    )
+    assert revoked is not None

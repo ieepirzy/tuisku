@@ -123,7 +123,7 @@ async def get_raw_record(conn: AsyncConnection[Any], uid: UUID) -> dict[str, Any
     row = await db.fetch_one(
         conn,
         "SELECT r.id, r.uid, s.name AS source, t.uid AS token_uid, r.sha256, r.received_at, "
-        "r.transport, r.collector, r.body, r.body_size, "
+        "r.transport, r.collector, r.body, r.body_size, r.truncated, "
         "(SELECT count(*) FROM raw_duplicates d WHERE d.raw_record_id = r.id) AS duplicates "
         "FROM raw_records r JOIN sources s ON s.id = r.source_id "
         "JOIN source_tokens t ON t.id = r.token_id WHERE r.uid = %s",

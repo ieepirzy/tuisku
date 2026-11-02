@@ -65,6 +65,8 @@ class IngestContext:
     received_at: datetime
     clock_skew_tolerance: timedelta
     parse_limiter: CapacityLimiter | None = None  # bounds the adapter worker threads
+    # Each record's parse gets its own deadline (ADR 0005). None: no deadline.
+    parse_timeout: float | None = None
 
 
 def _dumps(value: Any) -> str:
@@ -197,6 +199,33 @@ def _parse(credential: SourceCredential, raw: RawRecord, ctx: IngestContext) -> 
     except Exception as exc:  # any other failure is still a per-record parse failure
         # Other exception messages may echo input, so record the type only.
         return _ParseOutput(adapter.version, error=f"adapter error: {type(exc).__name__}")
+
+
+PARSE_TIME_BUDGET = "time_budget"
+
+
+async def _parse_with_deadline(
+    credential: SourceCredential, raw: RawRecord, ctx: IngestContext
+) -> _ParseOutput:
+    """Run the adapter in a worker thread under the record's own deadline.
+
+    A Python thread cannot be killed, so a parse that overruns is abandoned: its thread runs
+    on, its result is discarded, and its slot in the parse limiter is released. The record
+    stays accepted with a failed parse attempt (``time_budget``) and a ``parse_time`` limit
+    breach, so the rest of the batch and the next requests are not held up.
+    """
+    try:
+        with anyio.fail_after(ctx.parse_timeout):
+            return await anyio.to_thread.run_sync(
+                _parse, credential, raw, ctx, limiter=ctx.parse_limiter, abandon_on_cancel=True
+            )
+    except TimeoutError:
+        adapter = _safe_adapter(credential.source.adapter)
+        return _ParseOutput(
+            adapter.version if adapter is not None else None,
+            error=PARSE_TIME_BUDGET,
+            limit="parse_time",
+        )
 
 
 async def _insert_raw(
@@ -373,9 +402,7 @@ async def ingest_record(
                 received_at=ctx.received_at,
                 collector=dict(collector),
             )
-            out = await anyio.to_thread.run_sync(
-                _parse, credential, record, ctx, limiter=ctx.parse_limiter
-            )
+            out = await _parse_with_deadline(credential, record, ctx)
             attempt_id = await _insert_attempt(
                 conn, raw["id"], adapter_name, out.version, out.error, ctx.received_at
             )
@@ -407,7 +434,8 @@ async def ingest_record(
         async with conn.transaction():
             raw = await _insert_raw(conn, credential, **raw_args)
             if raw is None:
-                return RecordOutcome(status="rejected", reason="store_error")
+                # Another request stored the same record meanwhile: it is a duplicate.
+                return await _record_duplicate(conn, credential, digest, ctx.received_at)
             adapter = _safe_adapter(adapter_name)
             version = adapter.version if adapter is not None else None
             await _insert_attempt(conn, raw["id"], adapter_name, version, error, ctx.received_at)

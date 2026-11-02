@@ -23,7 +23,9 @@ from tests.support import (
     operator_token,
     post_records,
     query,
+    run,
 )
+from tuisku.store import admin
 from tuisku.store.tokens import Role
 
 
@@ -112,10 +114,14 @@ def test_new_observations_and_detections_are_enqueued(
 
 def test_duplicate_is_reported_and_recorded(app_db: AppDatabase, source: tuple[str, str]) -> None:
     name, token = source
+    second = run(app_db.app_url, lambda conn: admin.add_source_token(conn, name, label="b"))
     with client(app_db.app_url) as c:
         first = post_records(c, name, token, ndjson({"msg": "x"}, collector={"offset": 1}))
-        # Same raw, different collector metadata (a re-read of a rotated file): duplicate.
-        again = post_records(c, name, token, ndjson({"msg": "x"}, {"msg": "x"}, collector={"o": 2}))
+        # Same raw, different collector metadata (a re-read of a rotated file), sent with the
+        # source's second token: a duplicate, recorded against the token that re-delivered it.
+        again = post_records(
+            c, name, second.token, ndjson({"msg": "x"}, {"msg": "x"}, collector={"o": 2})
+        )
     assert first.json()["results"][0]["status"] == "accepted"
     assert again.json()["results"] == [
         {"line": 1, "status": "duplicate"},
@@ -128,8 +134,10 @@ def test_duplicate_is_reported_and_recorded(app_db: AppDatabase, source: tuple[s
         _count(
             app_db.owner_url,
             "SELECT count(*) FROM raw_duplicates d JOIN raw_records r ON r.id = d.raw_record_id "
-            "JOIN sources s ON s.id = r.source_id WHERE s.name = %s AND d.token_id = r.token_id",
+            "JOIN sources s ON s.id = r.source_id JOIN source_tokens t ON t.id = d.token_id "
+            "WHERE s.name = %s AND t.uid = %s AND d.token_id <> r.token_id",
             name,
+            second.uid,
         )
         == 2
     )
@@ -457,10 +465,16 @@ def test_meta_detections_are_one_per_subject_and_bucket(
         (name,),
     )
     assert sensor_free and queued
-    later = T0 + timedelta(minutes=5)  # the next bucket
-    with client(app_db.app_url, clock=lambda: later) as c:
-        post_records(c, name, token, ndjson({"limit": "json_depth", "n": 10}))
-    assert len(_meta(app_db.owner_url, name)) == 3
+    # Buckets come from the database clock, never the API's (injectable) clock: the database
+    # accepts the API's meta-detections only for its current bucket (ADR 0011).
+    [(in_db_bucket,)] = query(
+        app_db.owner_url,
+        "SELECT bool_and(d.bucket_start BETWEEN tuisku_current_bucket() - interval '5 minutes' "
+        "AND tuisku_current_bucket()) FROM detections d JOIN sources s ON s.id = d.source_id "
+        "WHERE s.name = %s AND d.evaluator = 'tuisku'",
+        (name,),
+    )
+    assert in_db_bucket
 
 
 def test_wrong_content_type_or_encoding_is_415(
@@ -510,10 +524,17 @@ def test_gzip_bomb_is_413(app_db: AppDatabase, source: tuple[str, str]) -> None:
 def test_time_budget_stops_the_request_with_503(
     app_db: AppDatabase, source: tuple[str, str]
 ) -> None:
+    import time
+
     name, token = source
-    body = ndjson({"sleep": 0.3, "msg": "slow"}, {"msg": "b"}, {"msg": "c"})
-    with client(app_db.app_url, ingest_request_budget_seconds=0.2) as c:
+    # Every record is slow (0.4 s, under the per-record deadline); the request budget is 0.3 s.
+    body = ndjson(*({"sleep": 0.4, "msg": m} for m in "abc"))
+    started = time.monotonic()
+    with client(
+        app_db.app_url, ingest_request_budget_seconds=0.3, ingest_parse_timeout_seconds=5
+    ) as c:
         response = post_records(c, name, token, body)
+    elapsed = time.monotonic() - started
     assert response.status_code == 503
     assert response.headers["Retry-After"] == "1"
     assert response.json()["results"] == [
@@ -521,8 +542,9 @@ def test_time_budget_stops_the_request_with_503(
         {"line": 2, "status": "not_processed", "reason": "time_budget_exceeded"},
         {"line": 3, "status": "not_processed", "reason": "time_budget_exceeded"},
     ]
+    assert elapsed < 1.0  # one parse, not three: the budget stopped the request
     # What was processed is committed; retrying the whole batch is safe.
-    with client(app_db.app_url) as c:
+    with client(app_db.app_url, ingest_parse_timeout_seconds=5) as c:
         retry = post_records(c, name, token, body)
     assert retry.status_code == 200
     assert [r["status"] for r in retry.json()["results"]] == ["duplicate", "accepted", "accepted"]
@@ -668,6 +690,7 @@ def test_read_endpoints(app_db: AppDatabase, source: tuple[str, str]) -> None:
         raw_json["sha256"] == hashlib.sha256(base64.b64decode(raw_json["body_base64"])).hexdigest()
     )
     assert [p["status"] for p in raw_json["parse_attempts"]] == ["ok"]
+    assert raw_json["truncated"] is False
     assert missing.status_code == 404
     assert too_many.status_code == 422
     assert no_token.status_code == 401 and source_token_used.status_code == 401
@@ -744,3 +767,122 @@ def test_readers_return_only_the_current_derivation_by_default(
         "json_keys",
         1,
     )
+
+
+# --- per-record parse deadline -------------------------------------------------------------------
+
+
+def test_a_runaway_parse_is_abandoned_and_the_record_kept(
+    app_db: AppDatabase, source: tuple[str, str]
+) -> None:
+    import time
+
+    name, token = source
+    body = ndjson({"sleep": 3, "msg": "runaway"}, {"msg": "next"})
+    started = time.monotonic()
+    with client(app_db.app_url, ingest_parse_timeout_seconds=0.2) as c:
+        response = post_records(c, name, token, body)
+    elapsed = time.monotonic() - started
+    assert response.status_code == 200
+    assert elapsed < 2.5  # the 3 s parse was not waited for
+    assert response.json()["results"] == [
+        {"line": 1, "status": "accepted", "parse": "failed"},
+        {"line": 2, "status": "accepted", "parse": "ok"},
+    ]
+    rows = query(
+        app_db.owner_url,
+        "SELECT p.status, p.error FROM parse_attempts p JOIN raw_records r "
+        "ON r.id = p.raw_record_id JOIN sources s ON s.id = r.source_id WHERE s.name = %s "
+        "ORDER BY r.id",
+        (name,),
+    )
+    assert rows == [("failed", "time_budget"), ("ok", None)]
+    assert ("tuisku.meta.source_limit_exceeded", "parse_time", 1) in _meta(app_db.owner_url, name)
+
+
+# --- rate-limit refusals are counted in process ----------------------------------------------
+
+
+def test_refusals_are_batched_then_flushed(app_db: AppDatabase, source: tuple[str, str]) -> None:
+    name, token = source
+    settings = {"ingest_rate_per_second": 0.01, "ingest_rate_burst": 1}
+    with client(app_db.app_url, ingest_rate_breach_flush_seconds=3600, **settings) as c:
+        assert post_records(c, name, token, ndjson("a")).status_code == 200
+        for _ in range(5):
+            assert post_records(c, name, token, ndjson("b")).status_code == 429
+        # The first refusal is written at once; the next four wait in process.
+        assert _meta(app_db.owner_url, name) == [
+            ("tuisku.meta.source_rate_limited", "records_per_second", 1)
+        ]
+    # Shutting the app down flushes them.
+    assert _meta(app_db.owner_url, name) == [
+        ("tuisku.meta.source_rate_limited", "records_per_second", 5)
+    ]
+
+
+def test_refusal_counter_flushes_on_its_interval() -> None:
+    from tuisku.api.ratelimit import RefusalCounter
+
+    now = [0.0]
+    counter = RefusalCounter(10, monotonic=lambda: now[0])
+    assert counter.add(1, "s") == ("s", 1)
+    assert counter.add(1, "s") is None and counter.add(1, "s") is None
+    now[0] = 10.0
+    assert counter.add(1, "s") == ("s", 3)
+    assert counter.add(2, "t") == ("t", 1)  # per source
+    assert counter.add(1, "s") is None
+    assert counter.drain() == [("s", 1)]
+
+
+# --- gzip --------------------------------------------------------------------------------------
+
+
+def test_inflater_never_produces_more_than_cap_plus_one_per_step() -> None:
+    from tuisku.api.ingest import _Inflater, _TooLarge
+
+    cap = 1000
+    inflater = _Inflater(cap)
+    real = inflater._d
+    sizes: list[int] = []
+
+    class Spy:
+        def __getattr__(self, name: str) -> object:
+            return getattr(real, name)
+
+        def decompress(self, data: bytes, max_length: int = 0) -> bytes:
+            out = real.decompress(data, max_length)
+            sizes.append(len(out))
+            return out
+
+    inflater._d = Spy()  # type: ignore[assignment]
+    with pytest.raises(_TooLarge):
+        inflater.feed(gzip.compress(b"\0" * 50_000_000))  # a 50 MB bomb in ~50 KB
+    assert sizes and max(sizes) <= cap + 1
+
+
+# --- duplicate race --------------------------------------------------------------------------
+
+
+def test_a_concurrent_duplicate_in_the_fallback_is_recorded_as_a_duplicate(
+    app_db: AppDatabase, source: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The database refuses the adapter's output; while the record is re-stored on its own,
+    another request has stored the same bytes. That is a duplicate, not a store error."""
+    from tuisku.store import ingest as store_ingest
+
+    name, token = source
+    real = store_ingest._insert_raw
+    calls = {"n": 0}
+
+    async def racing(conn, credential, **kw):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        if calls["n"] == 2:  # the fallback: another request wins the race first
+            other = await psycopg.AsyncConnection.connect(app_db.app_url, autocommit=True)
+            async with other:
+                await real(other, credential, **kw)
+        return await real(conn, credential, **kw)
+
+    monkeypatch.setattr(store_ingest, "_insert_raw", racing)
+    with client(app_db.app_url) as c:
+        response = post_records(c, name, token, ndjson({"kind": "x" * 200}))
+    assert response.json()["results"] == [{"line": 1, "status": "duplicate"}]

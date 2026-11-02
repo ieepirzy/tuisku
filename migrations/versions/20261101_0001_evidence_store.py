@@ -54,6 +54,7 @@ WORKING_TABLES = (
 # gets INSERT on detection_evidence, and a trigger keeps tuisku-evaluated detections (and links
 # to them) to the worker, apart from the API's own ingest meta-detections.
 API_INSERT = tuple(t for t in EVIDENCE_TABLES if t != "detection_evidence")
+API_ADMIN = ("sources", "source_tokens")
 WORKER_READ = ("raw_records", "parse_attempts", "observations", "sources")
 WORKER_INSERT = ("detections", "detection_observations", "detection_evidence")
 WORKER_WORKING = ("evaluation_queue", "evaluation_dead_letter", "meta_counters")
@@ -369,15 +370,29 @@ AS $$
         OR current_user IS NOT DISTINCT FROM {worker_literal}::name
 $$;
 
+CREATE FUNCTION tuisku_current_bucket() RETURNS timestamptz
+LANGUAGE sql STABLE
+SET search_path = pg_catalog
+AS $$
+    -- The 5-minute meta-detection bucket containing the transaction's now() (ADR 0005).
+    SELECT to_timestamp(floor(extract(epoch FROM now()) / 300) * 300)
+$$;
+
 CREATE FUNCTION tuisku_detections_worker_only() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
 BEGIN
     IF NEW.evaluator = 'tuisku' AND NOT public.tuisku_is_worker()
-       -- the API's own ingest meta-detections (ADR 0005): identity is the kind, bucketed
-       AND NOT (NEW.kind LIKE 'tuisku.meta.%' AND NEW.identity = NEW.kind
-                AND NEW.bucket_start IS NOT NULL)
+       -- The API's own ingest meta-detections (ADR 0005): only its kinds, for a source, and
+       -- only for the current 5-minute bucket by the database clock, so it cannot pre-claim a
+       -- bucket and silence a later breach. evaluation_failed and notification_undeliverable
+       -- are the worker's.
+       AND NOT (NEW.kind IN ('tuisku.meta.source_limit_exceeded',
+                             'tuisku.meta.source_rate_limited',
+                             'tuisku.meta.invalid_envelope')
+                AND NEW.identity = NEW.kind AND NEW.source_id IS NOT NULL
+                AND NEW.bucket_start = public.tuisku_current_bucket())
     THEN
         RAISE EXCEPTION 'only the worker role writes tuisku-evaluated detections (ADR 0011)'
             USING ERRCODE = 'insufficient_privilege';
@@ -430,7 +445,14 @@ def upgrade() -> None:
         raise ValueError("a separate worker role is required with an app role (ADR 0011)")
     op.execute(f'GRANT SELECT ON {", ".join(EVIDENCE_TABLES)} TO "{app}"')
     op.execute(f'GRANT INSERT ON {", ".join(API_INSERT)} TO "{app}"')
-    op.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON {", ".join(WORKING_TABLES)} TO "{app}"')
+    op.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON {", ".join(API_ADMIN)} TO "{app}"')
+    # Tokens are revoked, never deleted, so their history stays (ADR 0005).
+    op.execute(f'GRANT SELECT, INSERT, UPDATE ON operator_tokens TO "{app}"')
+    # Ingest only enqueues; only the worker claims, updates or deletes queue rows, so the API
+    # cannot drop or park a row before it is evaluated (ADR 0011).
+    op.execute(f'GRANT INSERT ON evaluation_queue TO "{app}"')
+    # Ingest counts breach repeats (an upsert); it never deletes counters.
+    op.execute(f'GRANT SELECT, INSERT, UPDATE ON meta_counters TO "{app}"')
     op.execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "{app}"')
     op.execute(f'GRANT SELECT ON {", ".join(WORKER_READ)} TO "{worker}"')
     op.execute(f'GRANT SELECT, INSERT ON {", ".join(WORKER_INSERT)} TO "{worker}"')
@@ -446,5 +468,6 @@ def downgrade() -> None:
     )
     op.execute(
         "DROP FUNCTION tuisku_reject_evidence_change(), tuisku_person_tokens_owner_only(), "
-        "tuisku_detections_worker_only(), tuisku_rule_links_worker_only(), tuisku_is_worker()"
+        "tuisku_detections_worker_only(), tuisku_rule_links_worker_only(), tuisku_is_worker(), "
+        "tuisku_current_bucket()"
     )

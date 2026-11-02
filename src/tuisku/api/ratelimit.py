@@ -14,6 +14,7 @@ import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(slots=True)
@@ -47,3 +48,36 @@ class RateLimiter:
             return max(1, math.ceil((1 - bucket.tokens) / self.rate))
         bucket.tokens -= n
         return None
+
+
+class RefusalCounter:
+    """Counts refused (429) requests per source in process and says when to flush them.
+
+    A source being refused is often a source sending as fast as it can, so writing a counter
+    upsert on every refusal would turn the rate limit into a database write amplifier. The first
+    refusal of a source is due at once (so its meta-detection is raised promptly); later ones
+    are batched and due once ``interval`` seconds have passed since that source's last flush.
+    """
+
+    def __init__(self, interval: float, monotonic: Callable[[], float] = time.monotonic) -> None:
+        self.interval = interval
+        self._monotonic = monotonic
+        self._pending: dict[int, tuple[Any, int]] = {}
+        self._flushed: dict[int, float] = {}
+
+    def add(self, key: int, source: Any) -> tuple[Any, int] | None:
+        """Count one refusal; return ``(source, count)`` when the batch is due."""
+        _, count = self._pending.get(key, (source, 0))
+        self._pending[key] = (source, count + 1)
+        now = self._monotonic()
+        last = self._flushed.get(key)
+        if last is not None and now - last < self.interval:
+            return None
+        self._flushed[key] = now
+        return self._pending.pop(key)
+
+    def drain(self) -> list[tuple[Any, int]]:
+        """Everything still pending (at shutdown)."""
+        out = list(self._pending.values())
+        self._pending.clear()
+        return out

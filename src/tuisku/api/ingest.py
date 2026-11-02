@@ -26,7 +26,7 @@ from fastapi.responses import JSONResponse
 from tuisku.adapters import AdapterError
 from tuisku.adapters.jsonsafe import loads_object_flagged
 from tuisku.api.deps import Clock, authenticate_source, get_clock, get_pool
-from tuisku.api.ratelimit import RateLimiter
+from tuisku.api.ratelimit import RateLimiter, RefusalCounter
 from tuisku.config import Settings
 from tuisku.store import meta
 from tuisku.store.admin import Source, SourceCredential
@@ -50,6 +50,29 @@ BUDGET_RETRY_AFTER_SECONDS = 1
 
 def _settings(request: Request) -> Settings:
     return request.app.state.settings
+
+
+async def flush_refusals(app: Any) -> None:
+    """Record every refusal still counted in process (at shutdown)."""
+    limiter: RateLimiter = app.state.rate_limiter
+    for source, count in app.state.refusals.drain():
+        try:
+            async with app.state.pool.connection() as conn, conn.transaction():
+                await meta.record_breach(
+                    conn,
+                    source,
+                    meta.RATE_LIMITED,
+                    "records_per_second",
+                    n=count,
+                    details={
+                        "limit": "records_per_second",
+                        "rate": limiter.rate,
+                        "burst": limiter.burst,
+                    },
+                    now=app.state.clock(),
+                )
+        except Exception as exc:
+            log.warning("could not flush rate-limit refusals: %s", type(exc).__name__)
 
 
 async def _record_breach(
@@ -168,14 +191,19 @@ async def _admit(request: Request, credential: SourceCredential, clock: Clock, n
     limiter: RateLimiter = request.app.state.rate_limiter
     retry_after = limiter.take(credential.source.id, n)
     if retry_after is not None:
-        await _record_breach(
-            request,
-            credential.source,
-            meta.RATE_LIMITED,
-            "records_per_second",
-            clock,
-            details={"rate": limiter.rate, "burst": limiter.burst},
-        )
+        refusals: RefusalCounter = request.app.state.refusals
+        due = refusals.add(credential.source.id, credential.source)
+        if due is not None:  # batched: not one database write per refused request
+            source, count = due
+            await _record_breach(
+                request,
+                source,
+                meta.RATE_LIMITED,
+                "records_per_second",
+                clock,
+                n=count,
+                details={"rate": limiter.rate, "burst": limiter.burst},
+            )
         raise HTTPException(
             status_code=429,
             detail="source rate limit exceeded",
@@ -242,6 +270,7 @@ def _context(request: Request, clock: Clock) -> IngestContext:
         received_at=clock(),
         clock_skew_tolerance=timedelta(seconds=settings.clock_skew_tolerance_seconds),
         parse_limiter=request.app.state.parse_limiter,
+        parse_timeout=settings.ingest_parse_timeout_seconds,
     )
 
 

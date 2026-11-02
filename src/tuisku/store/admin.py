@@ -162,6 +162,37 @@ async def create_operator_token(
     return IssuedToken(uid=row["uid"], token=token)
 
 
+async def list_operator_tokens(conn: AsyncConnection[Any]) -> list[dict[str, Any]]:
+    """Every operator and approve token, newest last; never the secrets."""
+    return await db.fetch_all(
+        conn,
+        "SELECT uid, name, person, roles, created_at, expires_at, revoked_at "
+        "FROM operator_tokens ORDER BY id",
+    )
+
+
+async def revoke_operator_token(
+    conn: AsyncConnection[Any], token_uid: UUID, *, approver: bool = False
+) -> None:
+    """Revoke an operator token (``approver=False``) or an approve token (``approver=True``).
+
+    Tokens are revoked, never deleted, so the actor named in past events stays resolvable.
+    Person-bound and approve tokens can be revoked only by the database owner: the same
+    trigger that guards their creation refuses the update for any other role (ADR 0005).
+    """
+    row = await db.fetch_one(conn, "SELECT roles FROM operator_tokens WHERE uid = %s", (token_uid,))
+    if row is None:
+        raise NotFoundError(f"no operator token {token_uid}")
+    is_approve = Role.APPROVE.value in row["roles"]
+    if is_approve != approver:
+        command = "tuisku approver revoke" if is_approve else "tuisku operator-token revoke"
+        raise NotFoundError(f"token {token_uid} is revoked with `{command}`")
+    await conn.execute(
+        "UPDATE operator_tokens SET revoked_at = coalesce(revoked_at, now()) WHERE uid = %s",
+        (token_uid,),
+    )
+
+
 async def authenticate_source_token(
     conn: AsyncConnection[Any], token: str
 ) -> SourceCredential | None:
