@@ -14,6 +14,8 @@ dependencies = [
     "pydantic>=2",
     "pydantic-settings>=2.4",
     "uvicorn[standard]>=0.30",
+    "communityid>=1.5.0",
+    "idna>=3.20",
 ]
 
 [project.scripts]
