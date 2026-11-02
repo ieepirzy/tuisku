@@ -41,6 +41,7 @@ EVIDENCE_TABLES = (
     "detection_evidence",
     "source_admin_requests",
     "token_revocations",
+    "operator_token_revocations",
 )
 # Mutable working tables the app role may change.
 WORKING_TABLES = (
@@ -337,6 +338,14 @@ CREATE TABLE evaluation_dead_letter (
 # current_user is the owner role AND the UPDATE only sets payload columns (body, attributes,
 # unmapped, explanation) to NULL. Until then it rejects every UPDATE, DELETE and TRUNCATE.
 TRIGGER_FUNCTION_SQL = """
+-- Operator tokens are revoked the same way, so a revocation can never be undone: the API role
+-- has no UPDATE on operator_tokens at all (ADR 0011).
+CREATE TABLE operator_token_revocations (
+    id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    token_id   bigint NOT NULL REFERENCES operator_tokens (id),
+    revoked_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE FUNCTION tuisku_reject_evidence_change() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog
@@ -591,6 +600,84 @@ $$;
 CREATE TRIGGER token_revocations_apply AFTER INSERT ON token_revocations
     FOR EACH ROW EXECUTE FUNCTION tuisku_apply_token_revocation();
 
+-- Who may revoke an operator token: like issuing it (ADR 0005), person-bound and approve tokens
+-- only the owner. Runs as the invoker, so current_user is the requesting role.
+CREATE FUNCTION tuisku_operator_revocation_guard() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF TG_RELID NOT IN ('public.operator_token_revocations'::regclass::oid)
+       OR TG_WHEN <> 'BEFORE' OR TG_OP NOT IN ('INSERT') OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF EXISTS (SELECT 1 FROM public.operator_tokens t WHERE t.id = NEW.token_id
+               AND (t.person IS NOT NULL OR 'approve' = ANY (t.roles)))
+       AND current_user <> (SELECT pg_get_userbyid(relowner) FROM pg_class
+                            WHERE oid = 'public.operator_tokens'::regclass) THEN
+        RAISE EXCEPTION 'person-bound and approve operator tokens are revoked only by the '
+            'database owner (ADR 0005)' USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    NEW.revoked_at := now();
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER operator_token_revocations_guard BEFORE INSERT ON operator_token_revocations
+    FOR EACH ROW EXECUTE FUNCTION tuisku_operator_revocation_guard();
+
+-- Applies an operator-token revocation as the owner; a revoked token stays revoked.
+CREATE FUNCTION tuisku_apply_operator_revocation() RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF TG_RELID NOT IN ('public.operator_token_revocations'::regclass::oid)
+       OR TG_WHEN <> 'AFTER' OR TG_OP NOT IN ('INSERT') OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    UPDATE public.operator_tokens SET revoked_at = coalesce(revoked_at, now())
+    WHERE id = NEW.token_id;
+    RETURN NULL;
+END
+$$;
+CREATE TRIGGER operator_token_revocations_apply AFTER INSERT ON operator_token_revocations
+    FOR EACH ROW EXECUTE FUNCTION tuisku_apply_operator_revocation();
+
+-- Rows the API role creates carry the database's time, never one it chose: created_at is now(),
+-- and a revoked_at or disabled_at given at creation is now() too (ADR 0011).
+CREATE FUNCTION tuisku_force_creation_time() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF TG_RELID NOT IN ('public.operator_tokens'::regclass::oid, 'public.sources'::regclass::oid,
+                        'public.source_tokens'::regclass::oid)
+       OR TG_WHEN <> 'BEFORE' OR TG_OP NOT IN ('INSERT') OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF current_user = (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = TG_RELID) THEN
+        RETURN NEW;  -- the owner (CLI, tests) is trusted
+    END IF;
+    NEW.created_at := now();
+    IF TG_TABLE_NAME = 'sources' THEN
+        NEW.disabled_at := CASE WHEN NEW.disabled_at IS NULL THEN NULL ELSE now() END;
+    ELSE
+        NEW.revoked_at := CASE WHEN NEW.revoked_at IS NULL THEN NULL ELSE now() END;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER operator_tokens_force_time BEFORE INSERT ON operator_tokens
+    FOR EACH ROW EXECUTE FUNCTION tuisku_force_creation_time();
+CREATE TRIGGER sources_force_time BEFORE INSERT ON sources
+    FOR EACH ROW EXECUTE FUNCTION tuisku_force_creation_time();
+CREATE TRIGGER source_tokens_force_time BEFORE INSERT ON source_tokens
+    FOR EACH ROW EXECUTE FUNCTION tuisku_force_creation_time();
+
 CREATE FUNCTION tuisku_current_bucket() RETURNS timestamptz
 LANGUAGE sql STABLE
 SET search_path = pg_catalog
@@ -734,9 +821,9 @@ def upgrade() -> None:
     op.execute(f'GRANT SELECT, INSERT, UPDATE ON source_token_usage TO "{app}"')
     # Tokens are revoked, never deleted, so their history stays (ADR 0005).
     # Non-person read/triage/admin tokens only (the person trigger refuses the rest to any role
-    # but the owner); afterwards only revoked, never otherwise changed.
+    # but the owner); afterwards only revoked, through operator_token_revocations, so no UPDATE
+    # at all and a revocation cannot be undone.
     op.execute(f'GRANT SELECT, INSERT ON operator_tokens TO "{app}"')
-    op.execute(f'GRANT UPDATE (revoked_at) ON operator_tokens TO "{app}"')
     # Ingest only enqueues; only the worker claims, updates or deletes queue rows, so the API
     # cannot drop or park a row before it is evaluated (ADR 0011).
     op.execute(
@@ -797,7 +884,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute(
-        "DROP TABLE source_token_usage, token_revocations, source_admin_requests, "
+        "DROP TABLE source_token_usage, operator_token_revocations, token_revocations, "
+        "source_admin_requests, "
         "meta_counters, evaluation_dead_letter, evaluation_queue, detection_evidence, "
         "detection_observations, detections, observations, parse_attempts, raw_duplicates, "
         "raw_records, operator_tokens, source_tokens, sources"
@@ -808,5 +896,6 @@ def downgrade() -> None:
         "tuisku_current_bucket(), tuisku_derivation_same_transaction(), "
         "tuisku_xmin_is_current(xid), tuisku_queue_same_transaction(), tuisku_raw_source_name(), "
         "tuisku_meta_counters_guard(), tuisku_apply_source_request(), "
-        "tuisku_apply_token_revocation()"
+        "tuisku_apply_token_revocation(), tuisku_operator_revocation_guard(), "
+        "tuisku_apply_operator_revocation(), tuisku_force_creation_time()"
     )

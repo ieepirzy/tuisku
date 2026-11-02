@@ -41,7 +41,9 @@ uv run tuisku operator-token add --name lead --role triage --person "A. Person"
 ```
 
 Tokens are revoked, never deleted, so past actors stay resolvable; the API role has no `DELETE`
-on `operator_tokens`. Revoking an approve token or a person-bound token, like issuing one, needs
+or `UPDATE` on `operator_tokens`. It revokes by inserting into the append-only
+`operator_token_revocations`, which an owner trigger applies, so a revocation cannot be undone.
+Revoking an approve token or a person-bound token, like issuing one, needs
 the database owner.
 
 Approve tokens and person-bound operator tokens can be issued only by the database owner; a
@@ -111,10 +113,11 @@ row lock (which needs `UPDATE`) on anything the worker references. It disables a
 revokes a token by inserting into the append-only `source_admin_requests` or
 `token_revocations`, which an owner trigger applies at once. It records token use in its own
 `source_token_usage` table. Renames go through the owner CLI, and each raw record keeps the
-source name it arrived with in `source_name`. They grant `SELECT, INSERT` and column-level
-`UPDATE` on `operator_tokens (revoked_at)` and `meta_counters (count)`, the API's own tables,
-and
-`INSERT (observation_id, detection_id, enqueued_at)` on `evaluation_queue` (a trigger accepts
+source name it arrived with in `source_name`. For `operator_tokens`, `sources` and
+`source_tokens` the API role creates, a trigger sets `created_at` (and any `revoked_at` or
+`disabled_at` given) to the database's `now()`. They grant `SELECT, INSERT` on
+`operator_tokens`, `SELECT, INSERT` and column-level `UPDATE` on `meta_counters (count)`, the
+API's own counters, and `INSERT (observation_id, detection_id, enqueued_at)` on `evaluation_queue` (a trigger accepts
 only observations and detections inserted in the same transaction), plus `USAGE` on
 sequences. A trigger sets each raw record's `source_name` from `sources`, whatever the writer
 supplied. Only the worker role claims, updates or deletes queue rows, or touches

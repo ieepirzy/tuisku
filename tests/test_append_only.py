@@ -25,6 +25,7 @@ EVIDENCE_TABLES = [
     "detection_evidence",
     "source_admin_requests",
     "token_revocations",
+    "operator_token_revocations",
 ]
 
 
@@ -51,7 +52,11 @@ def populated(app_db: AppDatabase) -> AppDatabase:
 
         [token] = await admin.list_source_tokens(conn, other)
         await admin.revoke_source_token(conn, other, token["uid"])
+        from tuisku.store.tokens import Role
+
         await admin.disable_source(conn, other)
+        issued = await admin.create_operator_token(conn, name="gone", roles=[Role.READ])
+        await admin.revoke_operator_token(conn, issued.uid)
 
     run(app_db.app_url, requests)
     for table in EVIDENCE_TABLES:
@@ -81,6 +86,7 @@ _UPDATE_COLUMN = {
     "detection_evidence": "linked_at",
     "source_admin_requests": "action",
     "token_revocations": "revoked_at",
+    "operator_token_revocations": "revoked_at",
 }
 
 
@@ -128,7 +134,6 @@ def test_app_role_does_not_own_evidence_tables(populated: AppDatabase) -> None:
 
 def test_app_role_can_change_working_tables(populated: AppDatabase) -> None:
     assert _attempt(populated.app_url, "UPDATE meta_counters SET count = count") is None
-    assert _attempt(populated.app_url, "UPDATE operator_tokens SET revoked_at = revoked_at") is None
 
 
 @pytest.mark.parametrize(
@@ -147,6 +152,9 @@ def test_app_role_can_change_working_tables(populated: AppDatabase) -> None:
         "UPDATE operator_tokens SET name = name",
         "UPDATE operator_tokens SET roles = '{admin}'",
         "UPDATE operator_tokens SET expires_at = NULL",
+        # Round ten: revoked only through operator_token_revocations, so never un-revoked.
+        "UPDATE operator_tokens SET revoked_at = NULL",
+        "UPDATE operator_tokens SET revoked_at = now()",
     ],
 )
 def test_app_role_cannot_touch_the_queue_or_delete_counters_and_tokens(
@@ -365,7 +373,7 @@ def test_app_role_takes_no_row_lock_on_what_the_worker_uses(populated: AppDataba
         "WHERE grantee = %s AND privilege_type = 'UPDATE' ORDER BY 1",
         (populated.app_role,),
     )
-    assert [t for (t,) in updatable] == ["meta_counters", "operator_tokens", "source_token_usage"]
+    assert [t for (t,) in updatable] == ["meta_counters", "source_token_usage"]
     readable = [
         t
         for (t,) in query(
@@ -375,7 +383,7 @@ def test_app_role_takes_no_row_lock_on_what_the_worker_uses(populated: AppDataba
             "AND has_table_privilege(%s, c.oid, 'SELECT')",
             (populated.app_role,),
         )
-        if t not in ("meta_counters", "operator_tokens", "source_token_usage")
+        if t not in ("meta_counters", "source_token_usage")
     ]
     assert "sources" in readable and "source_tokens" in readable
     for table in readable:
@@ -538,6 +546,11 @@ def test_runtime_roles_cannot_create_temp_tables(populated: AppDatabase, role: s
         "tuisku_raw_source_name",
         "tuisku_detections_worker_only",
         "tuisku_rule_links_worker_only",
+        "tuisku_apply_source_request",
+        "tuisku_apply_token_revocation",
+        "tuisku_operator_revocation_guard",
+        "tuisku_apply_operator_revocation",
+        "tuisku_force_creation_time",
     ],
 )
 def test_trigger_functions_refuse_to_run_on_other_tables(
@@ -634,3 +647,88 @@ def test_the_counter_trigger_holds_without_row_level_security(populated: AppData
                 "SELECT id, 'tuisku.meta.backlog', 'x', now(), 1 FROM sources LIMIT 1"
             )
         conn.rollback()
+
+
+def test_an_operator_revocation_cannot_be_undone(populated: AppDatabase) -> None:
+    """Round ten: the API role revokes an operator token by request only; nothing it can do
+    brings the token back, and authentication refuses it."""
+    import hashlib
+
+    from tuisku.store import admin
+    from tuisku.store.tokens import Role
+
+    async def issue(conn):  # type: ignore[no-untyped-def]
+        return await admin.create_operator_token(conn, name="t", roles=[Role.TRIAGE])
+
+    issued = run(populated.app_url, issue)
+
+    async def check(conn):  # type: ignore[no-untyped-def]
+        return await admin.authenticate_operator_token(conn, issued.token)
+
+    assert run(populated.app_url, check) is not None
+
+    async def revoke(conn):  # type: ignore[no-untyped-def]
+        await admin.revoke_operator_token(conn, issued.uid)
+
+    run(populated.app_url, revoke)
+    for statement in [
+        "UPDATE operator_tokens SET revoked_at = NULL WHERE uid = %(uid)s",
+        "DELETE FROM operator_token_revocations",
+        "UPDATE operator_token_revocations SET token_id = 0",
+    ]:
+        with psycopg.connect(populated.app_url) as conn:
+            with pytest.raises(errors.InsufficientPrivilege):
+                conn.execute(statement, {"uid": issued.uid})  # type: ignore[arg-type]
+    assert run(populated.app_url, check) is None
+    [(revoked,)] = query(
+        populated.owner_url, "SELECT revoked_at FROM operator_tokens WHERE uid = %s", (issued.uid,)
+    )
+    assert revoked is not None
+    # Person-bound tokens are revoked only by the owner, as they are issued (ADR 0005).
+    person = str(uuid.uuid4())
+    with psycopg.connect(populated.owner_url) as conn:
+        conn.execute(
+            "INSERT INTO operator_tokens (uid, name, person, roles, token_sha256) "
+            "VALUES (%s, 'p', 'A. Person', '{triage}', %s)",
+            (person, hashlib.sha256(person.encode()).digest()),
+        )
+    with psycopg.connect(populated.app_url) as conn:
+        with pytest.raises(errors.InsufficientPrivilege, match="only by the database owner"):
+            conn.execute(
+                "INSERT INTO operator_token_revocations (token_id) SELECT id FROM "
+                "operator_tokens WHERE uid = %s",
+                (person,),
+            )
+
+
+@pytest.mark.parametrize(
+    ("statement", "check"),
+    [
+        (
+            "INSERT INTO operator_tokens (name, roles, token_sha256, created_at, revoked_at) "
+            "VALUES ('old', '{triage}', %s, '2020-01-01', '2020-02-01') "
+            "RETURNING created_at = now() AND revoked_at = now()",
+            True,
+        ),
+        (
+            "INSERT INTO sources (name, adapter, created_at, disabled_at) "
+            "VALUES ('b' || md5(%s::text), 'falco', '2019-01-01', '2019-01-02') "
+            "RETURNING created_at = now() AND disabled_at = now()",
+            True,
+        ),
+        (
+            "INSERT INTO source_tokens (source_id, token_sha256, created_at) "
+            "SELECT id, %s, '2019-01-01' FROM sources LIMIT 1 RETURNING created_at = now()",
+            True,
+        ),
+    ],
+)
+def test_the_api_role_cannot_backdate_what_it_creates(
+    populated: AppDatabase, statement: str, check: bool
+) -> None:
+    import os
+
+    with psycopg.connect(populated.app_url) as conn:
+        [(forced,)] = conn.execute(statement, (os.urandom(32),)).fetchall()  # type: ignore[arg-type]
+        conn.rollback()
+    assert forced is check

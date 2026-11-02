@@ -180,8 +180,9 @@ async def revoke_operator_token(
     """Revoke an operator token (``approver=False``) or an approve token (``approver=True``).
 
     Tokens are revoked, never deleted, so the actor named in past events stays resolvable.
-    Person-bound and approve tokens can be revoked only by the database owner: the same
-    trigger that guards their creation refuses the update for any other role (ADR 0005).
+    A revocation is a row in the append-only operator_token_revocations, applied by an owner
+    trigger, so it cannot be undone. Person-bound and approve tokens can be revoked only by
+    the database owner: a trigger refuses the request for any other role (ADR 0005).
     """
     row = await db.fetch_one(conn, "SELECT roles FROM operator_tokens WHERE uid = %s", (token_uid,))
     if row is None:
@@ -190,8 +191,10 @@ async def revoke_operator_token(
     if is_approve != approver:
         command = "tuisku approver revoke" if is_approve else "tuisku operator-token revoke"
         raise NotFoundError(f"token {token_uid} is revoked with `{command}`")
+    # A revocation, applied at once by an owner trigger and never undone (ADR 0011).
     await conn.execute(
-        "UPDATE operator_tokens SET revoked_at = coalesce(revoked_at, now()) WHERE uid = %s",
+        "INSERT INTO operator_token_revocations (token_id) SELECT id FROM operator_tokens "
+        "WHERE uid = %s",
         (token_uid,),
     )
 
@@ -236,7 +239,8 @@ async def authenticate_operator_token(
         conn,
         "SELECT id, uid, name, person, roles FROM operator_tokens "
         "WHERE token_sha256 = %s AND revoked_at IS NULL "
-        "AND (expires_at IS NULL OR expires_at > now())",
+        "AND (expires_at IS NULL OR expires_at > now()) AND NOT EXISTS (SELECT 1 FROM "
+        "operator_token_revocations r WHERE r.token_id = operator_tokens.id)",
         (token_sha256(token),),
     )
     if row is None:
