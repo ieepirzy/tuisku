@@ -491,3 +491,25 @@ def test_value_count_ignores_missing_values(fresh_database_url: str, tmp_path: P
     ingest(url, "h", "harava", lines((T + timedelta(minutes=2), "y")))
     run_worker(url, rules, Clock(T + timedelta(minutes=6)))
     assert fired(url) == ["testpack.burst"]
+
+
+def test_delivery_backoff_never_waits_longer_than_the_cap(fresh_database_url: str) -> None:
+    import time
+
+    url = fresh_database_url
+    ingest(url, "h", "harava", lines((T, "svc")))  # one finding_opened notification
+
+    class Down(RecordingNotifier):
+        def deliver(self, notification: dict[str, Any]) -> None:
+            raise ConnectionError("down")
+
+    notifier = Down()
+    backoff = notify.Backoff(base_seconds=0.05, cap_seconds=0.1, alert_after=1000)
+    run_worker(
+        url, builtin_rules(), Clock(T + timedelta(minutes=5)), notifier, notify_backoff=backoff
+    )
+    for _ in range(6):
+        time.sleep(0.15)  # past the cap; uncapped waits would reach 0.2, 0.4, 0.8 s ...
+        run_async(url, lambda conn: notify.drain(conn, notifier, T, backoff=backoff))
+    [(failed,)] = query(url, "SELECT count(*) FROM notification_deliveries WHERE status = 'failed'")
+    assert failed >= 7  # the first failure plus one retry after every capped wait

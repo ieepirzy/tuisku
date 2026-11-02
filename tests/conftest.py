@@ -119,11 +119,14 @@ def empty_database_url(admin_database_url: str) -> Iterator[str]:
 
 @dataclass(frozen=True)
 class AppDatabase:
-    """A database migrated by the owner role with TUISKU_APP_ROLE set (ADR 0004 roles)."""
+    """A database migrated by the owner role with TUISKU_APP_ROLE and TUISKU_WORKER_ROLE set
+    (ADR 0004 roles, ADR 0011 worker role)."""
 
     owner_url: str  # the migrating role: owns the tables
-    app_url: str  # connects as the app role: SELECT/INSERT on evidence tables only
+    app_url: str  # the API role: ingest and triage only
     app_role: str
+    worker_url: str  # the worker role: rule output, firing keys, findings and incidents
+    worker_role: str
 
 
 def _with_user(url: str, user: str, password: str) -> str:
@@ -135,22 +138,31 @@ def _with_user(url: str, user: str, password: str) -> str:
 
 @pytest.fixture(scope="session")
 def app_db(admin_database_url: str) -> Iterator[AppDatabase]:
-    """A test-only login role (cluster-wide, so uniquely named and dropped afterwards)."""
-    role = f"tuisku_app_test_{uuid.uuid4().hex[:8]}"
+    """Test-only login roles (cluster-wide, so uniquely named and dropped afterwards)."""
+    suffix = uuid.uuid4().hex[:8]
+    role, worker = f"tuisku_app_test_{suffix}", f"tuisku_worker_test_{suffix}"
     password = uuid.uuid4().hex  # throwaway, for this test session only
     with psycopg.connect(admin_database_url, autocommit=True) as admin:
-        admin.execute(
-            sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
-                sql.Identifier(role), sql.Literal(password)
+        for name in (role, worker):
+            admin.execute(
+                sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                    sql.Identifier(name), sql.Literal(password)
+                )
             )
-        )
     try:
         with _temporary_database(admin_database_url) as url:
-            run_migrations(make_settings(url, app_role=role))
-            yield AppDatabase(owner_url=url, app_url=_with_user(url, role, password), app_role=role)
+            run_migrations(make_settings(url, app_role=role, worker_role=worker))
+            yield AppDatabase(
+                owner_url=url,
+                app_url=_with_user(url, role, password),
+                app_role=role,
+                worker_url=_with_user(url, worker, password),
+                worker_role=worker,
+            )
     finally:
         with psycopg.connect(admin_database_url, autocommit=True) as admin:
-            admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
+            for name in (role, worker):
+                admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(name)))
 
 
 @pytest.fixture(scope="session")

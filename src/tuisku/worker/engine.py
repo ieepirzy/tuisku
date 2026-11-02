@@ -907,21 +907,8 @@ class Worker:
             ),
         )
         assert det is not None
-        window_start = t - rule.correlation.timespan if rule.correlation and kind != "row" else None
-        key = await self._insert_firing_key(
-            conn,
-            rule,
-            env,
-            kind=kind,
-            fingerprint=fingerprint,
-            window_start=window_start,
-            t=t,
-            firing_detection_id=det["id"],
-        )
-        if key is None:
-            raise _AlreadyFired()
-        # Link what satisfied it, downwards (ADR 0002 rule 2), and mark the window's other rows
-        # as members so none of them is counted again as a linked row.
+        # Link what satisfied it, downwards (ADR 0002 rule 2), before any firing key: the
+        # database accepts a key only for a row linked to its detection in this transaction.
         obs = sorted({r["id"] for r in rows if r["layer"] == "observation"})
         if obs:
             await conn.execute(
@@ -936,6 +923,20 @@ class Worker:
                 "SELECT %s, unnest(%s::bigint[]), %s",
                 (det["id"], dets, now),
             )
+        window_start = t - rule.correlation.timespan if rule.correlation and kind != "row" else None
+        key = await self._insert_firing_key(
+            conn,
+            rule,
+            env,
+            kind=kind,
+            fingerprint=fingerprint,
+            window_start=window_start,
+            t=t,
+            firing_detection_id=det["id"],
+        )
+        if key is None:
+            raise _AlreadyFired()
+        # Mark the window's other rows as members so none of them is counted again as linked.
         for r in rows:
             if r is not env:
                 await self._insert_firing_key(

@@ -40,13 +40,17 @@ EVIDENCE_TABLES = (
     "notifications",
     "notification_deliveries",
 )
-# Mutable working tables the app role may change.
+# Mutable working tables (ADR 0011: the worker role creates findings and incidents; the API
+# role only triages them).
 WORKING_TABLES = (
     "findings",
     "incidents",
     "evaluation_dead_letter_rules",
     "evaluation_attempts",
 )
+# What the API role (ingest and triage) may write here; it reads everything (ADR 0011).
+API_INSERT = ("finding_events", "incident_events", "notifications")
+API_UPDATE = ("findings", "incidents")
 # Timestamp columns the trigger forces to the database's now(), so the app role cannot supply
 # them: the histories, the links that build evidence closures, the firing keys and pack loads.
 FORCED_TIME_COLUMNS = (
@@ -317,60 +321,59 @@ END
 $$;
 """
 
-# A firing key must be consistent with what the worker wrote, so a forged key cannot make the
-# worker skip a row for a rule:
-# - every key points at a tuisku detection whose identity is the key's rule;
-# - a 'member' or 'link' key's row is already linked to that detection, through
-#   detection_observations or detection_evidence;
-# - a 'row' or 'correlation' key's detection was inserted by this very transaction. A row whose
-#   inserting transaction is still in progress and that we can see can only be our own (another
-#   session's uncommitted rows are invisible), so pg_xact_status() of its xmin, widened to 64
-#   bits with the current epoch, must be 'in progress'.
+# A firing key must be consistent with what the worker wrote in the same transaction, so a
+# forged key cannot make the worker skip a row for a rule (ADR 0011 adds the role split; this is
+# the second line of defence):
+# - it points at a tuisku detection whose identity is the key's rule;
+# - for every kind, the detection is linked to the key's row (detection_observations or
+#   detection_evidence) by a link inserted in this very transaction. A row whose inserting
+#   transaction is still in progress and that we can see can only be our own (another session's
+#   uncommitted rows are invisible), so its xmin, widened to 64 bits with the current epoch,
+#   must have pg_xact_status() 'in progress'.
 FIRING_IDENTITY_FUNCTION_SQL = """
+CREATE FUNCTION tuisku_xmin_is_current(x xid) RETURNS boolean
+LANGUAGE plpgsql STABLE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    cur      bigint := pg_current_xact_id()::text::bigint;
+    full_xid bigint := ((cur >> 32) << 32) + x::text::bigint;
+BEGIN
+    IF full_xid - cur > 2147483648 THEN
+        full_xid := full_xid - 4294967296;  -- the xid is from the previous epoch
+    END IF;
+    RETURN full_xid >= 3 AND pg_xact_status(full_xid::text::xid8) = 'in progress';
+END
+$$;
+
 CREATE FUNCTION tuisku_check_firing_identity() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
-DECLARE
-    det_xmin bigint;
-    cur      bigint;
-    full_xid bigint;
 BEGIN
-    SELECT d.xmin::text::bigint INTO det_xmin FROM public.detections d
-    WHERE d.id = NEW.firing_detection_id AND d.evaluator = 'tuisku'
-      AND d.identity = NEW.rule_id::text;
-    IF NOT FOUND THEN
+    IF NOT EXISTS (
+        SELECT 1 FROM public.detections d
+        WHERE d.id = NEW.firing_detection_id AND d.evaluator = 'tuisku'
+          AND d.identity = NEW.rule_id::text
+    ) THEN
         RAISE EXCEPTION 'rule_firings: detection % is not output of rule %',
             NEW.firing_detection_id, NEW.rule_id
             USING ERRCODE = 'check_violation';
     END IF;
-    IF NEW.kind IN ('member', 'link') THEN
-        IF NOT EXISTS (
-            SELECT 1 FROM public.detection_observations l
-            WHERE l.detection_id = NEW.firing_detection_id
-              AND l.observation_id = NEW.observation_id
-        ) AND NOT EXISTS (
-            SELECT 1 FROM public.detection_evidence e
-            WHERE e.detection_id = NEW.firing_detection_id
-              AND (e.observation_id = NEW.observation_id
-                   OR e.detection_ref_id = NEW.detection_id)
-        ) THEN
-            RAISE EXCEPTION 'rule_firings: % key for a row not linked to detection %',
-                NEW.kind, NEW.firing_detection_id
-                USING ERRCODE = 'check_violation';
-        END IF;
-    ELSE
-        cur := pg_current_xact_id()::text::bigint;
-        full_xid := ((cur >> 32) << 32) + det_xmin;
-        IF full_xid - cur > 2147483648 THEN
-            full_xid := full_xid - 4294967296;  -- the xid is from the previous epoch
-        END IF;
-        IF full_xid < 3 OR pg_xact_status(full_xid::text::xid8) IS DISTINCT FROM 'in progress'
-        THEN
-            RAISE EXCEPTION 'rule_firings: % key for detection % not written by this transaction',
-                NEW.kind, NEW.firing_detection_id
-                USING ERRCODE = 'check_violation';
-        END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM public.detection_observations l
+        WHERE l.detection_id = NEW.firing_detection_id
+          AND l.observation_id = NEW.observation_id
+          AND public.tuisku_xmin_is_current(l.xmin)
+    ) AND NOT EXISTS (
+        SELECT 1 FROM public.detection_evidence e
+        WHERE e.detection_id = NEW.firing_detection_id
+          AND (e.observation_id = NEW.observation_id OR e.detection_ref_id = NEW.detection_id)
+          AND public.tuisku_xmin_is_current(e.xmin)
+    ) THEN
+        RAISE EXCEPTION 'rule_firings: % key for a row not linked to detection % in this '
+            'transaction', NEW.kind, NEW.firing_detection_id
+            USING ERRCODE = 'check_violation';
     END IF;
     RETURN NEW;
 END
@@ -380,12 +383,12 @@ CREATE TRIGGER rule_firings_identity BEFORE INSERT ON rule_firings
 """
 
 
-def _app_role() -> str | None:
-    role = context.config.attributes.get("app_role")
+def _role(name: str) -> str | None:
+    role = context.config.attributes.get(name)
     if not role:
         return None
     if not isinstance(role, str) or not _ROLE_NAME.fullmatch(role):
-        raise ValueError("app_role must be a lowercase Postgres role name")
+        raise ValueError(f"{name} must be a lowercase Postgres role name")
     return role
 
 
@@ -409,12 +412,21 @@ def upgrade() -> None:
             "FOR EACH STATEMENT EXECUTE FUNCTION tuisku_reject_evidence_change()"
         )
 
-    role = _app_role()
-    if role is None:
-        return  # single-role setup: the migrating role is also the app role
-    op.execute(f'GRANT SELECT, INSERT ON {", ".join(EVIDENCE_TABLES)} TO "{role}"')
-    op.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON {", ".join(WORKING_TABLES)} TO "{role}"')
-    op.execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "{role}"')
+    app, worker = _role("app_role"), _role("worker_role")
+    if app is None:
+        return  # single-role setup: the migrating role does everything
+    if worker is None:
+        raise ValueError("a separate worker role is required with an app role (ADR 0011)")
+    # The worker writes rule output, firing keys, links, findings and incidents (ADR 0011).
+    op.execute(f'GRANT SELECT, INSERT ON {", ".join(EVIDENCE_TABLES)} TO "{worker}"')
+    op.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON {", ".join(WORKING_TABLES)} TO "{worker}"')
+    op.execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "{worker}"')
+    # The API reads all of it and writes only triage: status updates, operator events and
+    # escalation notifications.
+    op.execute(f'GRANT SELECT ON {", ".join(EVIDENCE_TABLES + WORKING_TABLES)} TO "{app}"')
+    op.execute(f'GRANT INSERT ON {", ".join(API_INSERT)} TO "{app}"')
+    op.execute(f'GRANT UPDATE ON {", ".join(API_UPDATE)} TO "{app}"')
+    op.execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "{app}"')
 
 
 def downgrade() -> None:
@@ -428,4 +440,7 @@ def downgrade() -> None:
         "incident_events, finding_overflow_groups, finding_detections, finding_events, findings, "
         "incidents, pack_loads"
     )
-    op.execute("DROP FUNCTION tuisku_force_event_time(), tuisku_check_firing_identity()")
+    op.execute(
+        "DROP FUNCTION tuisku_force_event_time(), tuisku_check_firing_identity(), "
+        "tuisku_xmin_is_current(xid)"
+    )

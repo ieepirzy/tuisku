@@ -102,6 +102,7 @@ def run_migrations(settings: Settings, revision: str = "head") -> None:
             cfg.attributes["skip_logging_config"] = True
             # Revisions read the app role from here to decide whether to GRANT (ADR 0004).
             cfg.attributes["app_role"] = settings.app_role
+            cfg.attributes["worker_role"] = settings.worker_role
             command.upgrade(cfg, revision)
             conn.commit()
     finally:

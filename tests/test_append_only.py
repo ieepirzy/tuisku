@@ -34,7 +34,7 @@ def populated(app_db: AppDatabase) -> AppDatabase:
     with client(app_db.app_url) as c:
         post_records(c, name, token, ndjson({"detect": 1}))
         post_records(c, name, token, ndjson({"detect": 1}))  # duplicate receipt
-    with psycopg.connect(app_db.app_url) as conn:  # the app role may INSERT links
+    with psycopg.connect(app_db.worker_url) as conn:  # only the worker links (ADR 0011)
         conn.execute(
             "INSERT INTO detection_evidence (detection_id, observation_id, linked_at) "
             "SELECT d.id, l.observation_id, now() FROM detections d "

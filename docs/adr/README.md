@@ -16,6 +16,7 @@ change one only with new evidence, by writing a new ADR that names the one it re
 | [0008](0008-identifiers-and-interchange.md) | Identifiers, vocabularies, and interchange with Loimi and Apogee | Accepted |
 | [0009](0009-agent-runtime-and-authority.md) | Agent runtime interface and response authority | Accepted (design; not built yet) |
 | [0010](0010-deployment-topology.md) | Deployment topology for the first target | Accepted |
+| [0011](0011-separate-worker-database-role.md) | Separate worker database role (amends 0004 §3) | Accepted |
 
 Status words: *Accepted* (in force), *Superseded by NNNN*, *Proposed* (not in force).
 

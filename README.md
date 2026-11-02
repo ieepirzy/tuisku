@@ -74,7 +74,8 @@ each raw record's newest successful parse attempt unless `all_attempts=true`) an
 
 `tuisku worker` evaluates every new observation and detection against the rule packs (ADR 0006)
 and folds firings into findings and incidents (ADR 0007). Run it as its own process, connected
-as the app role; `--once` drains the queue and exits, `--check-packs` only validates the packs.
+as the worker role (ADR 0011); `--once` drains the queue and exits, `--check-packs` only
+validates the packs.
 
 ```sh
 uv run tuisku worker --check-packs          # load and validate packs/ plus configured paths
@@ -119,27 +120,39 @@ can only be lowered, `TUISKU_WORKER_EXPORT_INTERVAL_SECONDS` (60) and
 
 ## Database roles
 
-Evidence tables are append-only (ADR 0004). Run `tuisku migrate` as the owning role and the
-API as a separate, non-owning app role, named by `TUISKU_APP_ROLE` when migrating:
+Evidence tables are append-only (ADR 0004). Run `tuisku migrate` as the owning role, the API as
+a non-owning app role (`TUISKU_APP_ROLE`), and `tuisku worker` as a separate worker role
+(`TUISKU_WORKER_ROLE`, default `tuisku_worker`, ADR 0011), named when migrating:
 
 ```sh
-# as a superuser, once:  CREATE ROLE tuisku_app LOGIN PASSWORD '...';
-TUISKU_APP_ROLE=tuisku_app TUISKU_DATABASE_URL=<owner url> uv run tuisku migrate
+# as a superuser, once:
+#   CREATE ROLE tuisku_app LOGIN PASSWORD '...';
+#   CREATE ROLE tuisku_worker LOGIN PASSWORD '...';
+TUISKU_APP_ROLE=tuisku_app TUISKU_WORKER_ROLE=tuisku_worker \
+  TUISKU_DATABASE_URL=<owner url> uv run tuisku migrate
 TUISKU_DATABASE_URL=<tuisku_app url> uv run tuisku api
+TUISKU_DATABASE_URL=<tuisku_worker url> uv run tuisku worker
 ```
 
-With `TUISKU_APP_ROLE` set, migrations grant it `SELECT, INSERT` on evidence tables
+With `TUISKU_APP_ROLE` set, the API role gets `SELECT, INSERT` on the ingest evidence tables
 (`raw_records`, `raw_duplicates`, `parse_attempts`, `observations`, `detections`,
-`detection_observations`, `detection_evidence`, and from revision 0002 `finding_events`,
-`finding_detections`, `finding_overflow_groups`, `incident_events`, `incident_findings`,
-`rule_firings`, `pack_loads`, `notifications`, `notification_deliveries`),
-`SELECT, INSERT, UPDATE, DELETE` on working tables (`sources`, `source_tokens`,
-`operator_tokens`, `evaluation_queue`, `evaluation_dead_letter`, `meta_counters`, and from 0002
-`findings`, `incidents`, `evaluation_dead_letter_rules`, `evaluation_attempts`) and `USAGE` on
-sequences. Triggers set the timestamps of the histories, link tables, firing keys, pack loads
-and deliveries to the database clock, and refuse a firing key that does not point at a
-detection of its own rule. Grants are made by the revision that
-creates each table, so set the variable before the first `tuisku migrate`; for an existing
-database, run the same `GRANT` statements by hand. Left unset, no grants are made: a single
-role does everything, which suits local development only. Independently of roles, triggers
-reject `UPDATE`, `DELETE` and `TRUNCATE` on evidence tables for every role, owner included.
+`detection_observations`), `SELECT, INSERT, UPDATE, DELETE` on `sources`, `source_tokens`,
+`operator_tokens`, `evaluation_queue`, `evaluation_dead_letter` and `meta_counters`, and for
+triage `SELECT` on findings, incidents and their tables, `UPDATE` on `findings` and `incidents`,
+and `INSERT` on `finding_events`, `incident_events` (operator actors only) and `notifications`.
+
+Only the worker role writes rule output: `tuisku`-evaluated detections and their links,
+`detection_evidence`, `rule_firings`, `findings`, `incidents`, `finding_detections`,
+`incident_findings`, `finding_overflow_groups`, `pack_loads`, `notification_deliveries`,
+`evaluation_attempts` and `evaluation_dead_letter_rules`, and events with `system` or `rule:`
+actors. Triggers enforce the parts that share a table with ingest. A compromised API process
+therefore cannot forge rule output or firing keys (ADR 0011). A firing key is also accepted
+only for a row linked to its detection in the same transaction.
+
+Triggers set the timestamps of the histories, link tables, firing keys, pack loads and
+deliveries to the database clock. Grants are made by the revision that creates each table, and
+revision 0003 adds the worker role on revision 0001's tables, so set both variables before the
+first `tuisku migrate`. For an existing database, run the same `GRANT` statements by hand. With
+`TUISKU_APP_ROLE` unset no grants are made, and the owning role does everything; that suits
+local development only. Independently of roles, triggers reject `UPDATE`, `DELETE` and
+`TRUNCATE` on evidence tables for every role, owner included.
