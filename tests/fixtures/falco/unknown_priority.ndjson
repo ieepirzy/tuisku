@@ -1,0 +1,3 @@
+{"hostname":"node-1","output":"Odd priority","priority":"Spicy","rule":"Synthetic odd priority rule","source":"syscall","tags":[],"time":"2026-10-30T12:30:00Z","output_fields":{"evt.time":1793363400000000000,"proc.name":"bash","proc.pid":77}}
+{"hostname":"node-1","output":"Mixed case","priority":"EMERGENCY","rule":"Synthetic emergency rule","source":"syscall","tags":["T1611"],"time":"2026-10-30T12:31:00Z","output_fields":{"evt.time":1793363460000000000,"evt.type":"mount","proc.name":"mount","proc.pid":78}}
+{"hostname":"node-1","output":"Debug","priority":"Debug","rule":"Synthetic debug rule","source":"syscall","time":"2026-10-30T12:32:00Z","output_fields":{"evt.time":1793363520000000000}}

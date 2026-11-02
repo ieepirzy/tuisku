@@ -1,0 +1,287 @@
+[
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "activity_id": 1,
+          "connection_info": {
+            "protocol_name": "udp",
+            "protocol_num": 17,
+            "protocol_ver_id": 4
+          },
+          "dst_endpoint": {
+            "ip": "10.0.0.2",
+            "port": 53
+          },
+          "query": {
+            "hostname": "www.Example.COM.",
+            "opcode_id": 0,
+            "packet_uid": 45444,
+            "type": "A"
+          },
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 53211
+          }
+        },
+        "community_id": "1:ktGSSHxVRGE5LR0LsXJNJxiLm9A=",
+        "correlation": {
+          "suricata.flow_id": "90"
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:10.0.0.2",
+          "domain:www.example.com"
+        ],
+        "event_time": "2023-09-18T06:13:40+00:00",
+        "flags": [],
+        "kind": "dns.query",
+        "ocsf_class_uid": 4003,
+        "unmapped": {
+          "dns": {
+            "tx_id": 0
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "activity_id": 2,
+          "answers": [
+            {
+              "rdata": "192.0.2.10",
+              "rrname": "www.example.com",
+              "ttl": 300,
+              "type": "A"
+            }
+          ],
+          "connection_info": {
+            "protocol_name": "udp",
+            "protocol_num": 17,
+            "protocol_ver_id": 4
+          },
+          "dst_endpoint": {
+            "ip": "10.0.0.2",
+            "port": 53
+          },
+          "query": {
+            "hostname": "www.example.com",
+            "opcode_id": 0,
+            "packet_uid": 45444,
+            "type": "A"
+          },
+          "rcode": "NOERROR",
+          "rcode_id": 0,
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 53211
+          }
+        },
+        "community_id": "1:ktGSSHxVRGE5LR0LsXJNJxiLm9A=",
+        "correlation": {
+          "suricata.flow_id": "90"
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:10.0.0.2",
+          "domain:www.example.com"
+        ],
+        "event_time": "2023-09-18T06:13:40.012000+00:00",
+        "flags": [],
+        "kind": "dns.answer",
+        "ocsf_class_uid": 4003,
+        "unmapped": {
+          "dns": {
+            "flags": "8180",
+            "grouped": {
+              "A": [
+                "192.0.2.10"
+              ]
+            },
+            "qr": true,
+            "ra": true,
+            "rd": true,
+            "version": 2
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "activity_id": 1,
+          "connection_info": {
+            "protocol_name": "udp",
+            "protocol_num": 17,
+            "protocol_ver_id": 4
+          },
+          "dst_endpoint": {
+            "ip": "10.0.0.2",
+            "port": 53
+          },
+          "query": {
+            "hostname": "api.example.net",
+            "opcode_id": 0,
+            "packet_uid": 7,
+            "type": "AAAA"
+          },
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 53300
+          }
+        },
+        "community_id": "1:zNt6Nq9dP8cPJYID57u6osQZ0s0=",
+        "correlation": {
+          "suricata.flow_id": "91"
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:10.0.0.2",
+          "domain:api.example.net"
+        ],
+        "event_time": "2025-06-01T08:00:00+00:00",
+        "flags": [],
+        "kind": "dns.query",
+        "ocsf_class_uid": 4003,
+        "unmapped": {
+          "dns": {
+            "flags": "100",
+            "rcode": "NOERROR",
+            "rd": true,
+            "tx_id": 0,
+            "version": 3
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "activity_id": 2,
+          "answers": [
+            {
+              "rdata": "edge.example.org",
+              "rrname": "api.example.net",
+              "ttl": 60,
+              "type": "CNAME"
+            },
+            {
+              "rdata": "2001:db8::50",
+              "rrname": "edge.example.org",
+              "ttl": 60,
+              "type": "AAAA"
+            }
+          ],
+          "connection_info": {
+            "protocol_name": "udp",
+            "protocol_num": 17,
+            "protocol_ver_id": 4
+          },
+          "dst_endpoint": {
+            "ip": "10.0.0.2",
+            "port": 53
+          },
+          "query": {
+            "hostname": "api.example.net",
+            "opcode_id": 0,
+            "packet_uid": 7,
+            "type": "AAAA"
+          },
+          "rcode": "NOERROR",
+          "rcode_id": 0,
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 53300
+          }
+        },
+        "community_id": "1:zNt6Nq9dP8cPJYID57u6osQZ0s0=",
+        "correlation": {
+          "suricata.flow_id": "91"
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:10.0.0.2",
+          "domain:api.example.net",
+          "domain:edge.example.org"
+        ],
+        "event_time": "2025-06-01T08:00:00.020000+00:00",
+        "flags": [],
+        "kind": "dns.answer",
+        "ocsf_class_uid": 4003,
+        "unmapped": {
+          "dns": {
+            "flags": "8180",
+            "qr": true,
+            "ra": true,
+            "rd": true,
+            "tx_id": 0,
+            "version": 3
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "activity_id": 2,
+          "connection_info": {
+            "protocol_name": "udp",
+            "protocol_num": 17,
+            "protocol_ver_id": 4
+          },
+          "dst_endpoint": {
+            "ip": "10.0.0.2",
+            "port": 53
+          },
+          "query": {
+            "hostname": "192.0.2.1",
+            "packet_uid": 8,
+            "type": "PTR"
+          },
+          "rcode": "NXDOMAIN",
+          "rcode_id": 3,
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 53301
+          }
+        },
+        "community_id": "1:vcwf/Z+tcBmmCLd9hWdqFDUhdjI=",
+        "correlation": {
+          "suricata.flow_id": "92"
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:10.0.0.2"
+        ],
+        "event_time": "2025-06-01T08:00:01+00:00",
+        "flags": [],
+        "kind": "dns.answer",
+        "ocsf_class_uid": 4003,
+        "unmapped": {
+          "dns": {
+            "version": 3
+          }
+        }
+      }
+    ]
+  }
+]

@@ -1,0 +1,111 @@
+[
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {
+          "flags": [
+            "log_type_inferred"
+          ]
+        },
+        "authorship": "builtin",
+        "entity_keys": [
+          "ip:198.51.100.9",
+          "ip:10.0.0.5"
+        ],
+        "event_time": "2023-09-18T06:13:41+00:00",
+        "explanation": {
+          "addl": "",
+          "log": "weird",
+          "name": "inappropriate_FIN",
+          "notice": false,
+          "peer": "zeek",
+          "sensor": "zeek",
+          "source": "TCP"
+        },
+        "identity": "zeek:weird:inappropriate_FIN",
+        "kind": "zeek.weird",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "engine": "zeek",
+          "log": "weird",
+          "name": "inappropriate_FIN"
+        },
+        "severity": 1,
+        "title": "Zeek weird: inappropriate_FIN"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "uid": "CHhAvVGS1DHFjwGM9"
+          },
+          "dst_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 22
+          },
+          "src_endpoint": {
+            "ip": "198.51.100.9",
+            "port": 4444
+          }
+        },
+        "community_id": null,
+        "correlation": {
+          "zeek.uid": [
+            "CHhAvVGS1DHFjwGM9"
+          ]
+        },
+        "entity_keys": [
+          "ip:198.51.100.9",
+          "ip:10.0.0.5"
+        ],
+        "event_time": "2023-09-18T06:13:41+00:00",
+        "flags": [
+          "connection_context",
+          "log_type_inferred"
+        ],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {}
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {
+          "flags": [
+            "log_type_inferred"
+          ]
+        },
+        "authorship": "builtin",
+        "entity_keys": [],
+        "event_time": "2023-09-18T06:14:02.250000+00:00",
+        "explanation": {
+          "log": "weird",
+          "name": "truncated_header",
+          "notice": true,
+          "peer": "zeek",
+          "sensor": "zeek"
+        },
+        "identity": "zeek:weird:truncated_header",
+        "kind": "zeek.weird",
+        "observation_refs": [],
+        "rule_ref": {
+          "engine": "zeek",
+          "log": "weird",
+          "name": "truncated_header"
+        },
+        "severity": 1,
+        "title": "Zeek weird: truncated_header"
+      }
+    ],
+    "observations": []
+  }
+]

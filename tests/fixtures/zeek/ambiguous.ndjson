@@ -1,0 +1,2 @@
+{"ts":1695017650.0,"uid":"CambiguousUid0001","id.orig_h":"192.0.2.10","id.orig_p":49175,"id.resp_h":"203.0.113.20","id.resp_p":53,"proto":"udp","conn_state":"SF","query":"both.example.com"}
+{"ts":1695017651.0,"note":"Weird::Activity","name":"odd","addl":"x","msg":"a notice that also looks like a weird"}

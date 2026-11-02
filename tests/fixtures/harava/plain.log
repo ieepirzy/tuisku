@@ -1,0 +1,18 @@
+2026-11-01 09:14:03,512 WARNING harava.api outbound data refused: caller=agents urls=1 findings=email/query/percent
+2026-11-01 09:14:07,031 WARNING harava.api outbound data refused: caller=agents urls=2 findings=personal_id/path/base64,phone/host/plain,userinfo/userinfo/plain
+2026-11-01 09:20:11,880 WARNING harava.api outbound data refused: caller=sidos urls=0 findings=sensitive_value/crawl_scope/plain
+2026-11-01 09:21:00,100 WARNING harava.api outbound data refused: caller=agents urls=1 findings=email/query/rot13,ssn/path/plain,email/query/plain,broken
+2026-11-01 09:15:40,207 WARNING harava.api destination refused: caller=agents classes=capture_sink
+2026-11-01 09:16:02,644 WARNING harava.api destination refused: caller=agents classes=ip_literal,overlay,tunnel
+2026-11-01 09:16:30,000 WARNING harava.api destination refused: caller=loimi classes=overlay,wormhole
+2026-11-01 09:30:00,001 ERROR harava.mcp MCP refuses to serve: the MCP's API caller is not restricted: add it to HARAVA_RESTRICTED_CALLERS
+2026-11-01 09:30:05,410 WARNING harava.mcp MCP could not verify its API credential: ConnectError
+2026-11-01 08:00:00,002 INFO harava.telemetry telemetry export off (OTEL_EXPORTER_OTLP_ENDPOINT unset)
+2026-11-01 09:14:03,512 WARNING harava.api outbound data refused: caller=agents urls=one findings=email/query/percent
+INFO:     Started server process [1]
+Traceback (most recent call last):
+2026-13-01 09:14:03,512 WARNING harava.api destination refused: caller=agents classes=tunnel
+2026-11-01 09:14:03,512 NOTICE harava.api destination refused: caller=agents classes=tunnel
+2026-11-01 09:40:00,250 WARNING harava.api destination refused: caller=edge user classes=tunnel
+  File "/app/src/harava/worker.py", line 212, in run
+httpx2.ReadTimeout: timed out

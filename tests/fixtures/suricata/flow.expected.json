@@ -1,0 +1,168 @@
+[
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "app_name": "tls",
+          "connection_info": {
+            "protocol_name": "tcp",
+            "protocol_num": 6,
+            "protocol_ver_id": 4
+          },
+          "dst_endpoint": {
+            "ip": "203.0.113.10",
+            "port": 443
+          },
+          "duration": 10000,
+          "end_time_dt": "2023-09-18T06:13:43.324862+00:00",
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 49175
+          },
+          "start_time_dt": "2023-09-18T06:13:33.324862+00:00",
+          "traffic": {
+            "bytes_in": 8044,
+            "bytes_out": 1616,
+            "packets_in": 12,
+            "packets_out": 13
+          }
+        },
+        "community_id": "1:1WGJD3/A+XuRifa7N17irB4R6ZQ=",
+        "correlation": {
+          "suricata.flow_id": "1676750115612680"
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:203.0.113.10"
+        ],
+        "event_time": "2023-09-18T06:14:00.100000+00:00",
+        "flags": [],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "flow": {
+            "alerted": true,
+            "reason": "timeout",
+            "state": "closed"
+          },
+          "in_iface": "eth0",
+          "tcp": {
+            "ack": true,
+            "fin": true,
+            "psh": true,
+            "state": "closed",
+            "syn": true,
+            "tcp_flags": "1b"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "app_name": "failed",
+          "connection_info": {
+            "protocol_name": "tcp",
+            "protocol_num": 6,
+            "protocol_ver_id": 6
+          },
+          "dst_endpoint": {
+            "ip": "2001:db8:1::443",
+            "port": 443
+          },
+          "duration": 0,
+          "end_time_dt": "2023-09-18T06:13:01+00:00",
+          "src_endpoint": {
+            "ip": "2001:db8::10",
+            "port": 51000
+          },
+          "start_time_dt": "2023-09-18T06:13:01+00:00",
+          "traffic": {
+            "bytes_in": 0,
+            "bytes_out": 74,
+            "packets_in": 0,
+            "packets_out": 1
+          }
+        },
+        "community_id": "1:OvCwEyFXaMNkibqEE02znA1zepA=",
+        "correlation": {
+          "suricata.flow_id": "77"
+        },
+        "entity_keys": [
+          "ip:2001:db8::10",
+          "ip:2001:db8:1::443"
+        ],
+        "event_time": "2023-09-18T06:14:01+00:00",
+        "flags": [],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "flow": {
+            "alerted": false,
+            "reason": "timeout",
+            "state": "new"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "protocol_name": "icmp",
+            "protocol_num": 1,
+            "protocol_ver_id": 4
+          },
+          "dst_endpoint": {
+            "ip": "198.51.100.7"
+          },
+          "duration": 3000,
+          "end_time_dt": "2023-09-18T06:14:01+00:00",
+          "src_endpoint": {
+            "ip": "10.0.0.5"
+          },
+          "start_time_dt": "2023-09-18T06:13:58+00:00",
+          "traffic": {
+            "bytes_in": 392,
+            "bytes_out": 392,
+            "packets_in": 4,
+            "packets_out": 4
+          }
+        },
+        "community_id": "1:bjfBzAS5TYfh8CRuLM040o4ESvE=",
+        "correlation": {
+          "suricata.flow_id": "78"
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:198.51.100.7"
+        ],
+        "event_time": "2023-09-18T06:14:02+00:00",
+        "flags": [],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "flow": {
+            "alerted": false,
+            "reason": "timeout",
+            "state": "established"
+          },
+          "icmp_code": 0,
+          "icmp_type": 8,
+          "response_icmp_code": 0,
+          "response_icmp_type": 0
+        }
+      }
+    ]
+  }
+]

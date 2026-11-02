@@ -1,0 +1,14 @@
+{not json
+["an","array"]
+{"rule":42,"priority":"Notice","time":"2026-10-30T12:00:00Z"}
+{"rule":"   ","priority":"Notice","time":"2026-10-30T12:00:00Z"}
+{"time":"2026-10-30T12:00:00Z","hostname":"node-9","msg":"no rule key at all"}
+{"rule":"Wrong types everywhere","priority":5,"source":["syscall"],"tags":"T1059","hostname":12,"uuid":"not a uuid!","output":{"x":1},"time":"yesterday","output_fields":"proc.name=sh"}
+{"rule":"Wrong field types","priority":"Warning","source":"syscall","time":"2026-10-30T13:00:00Z","output_fields":{"evt.time":"13:00:00.000000000","evt.type":"execve","proc.pid":"4242","proc.ppid":true,"user.uid":-5,"proc.name":["sh"],"fd.cip":"999.1.1.1","fd.cport":70000,"k8s.ns.name":"Bad_NS","k8s.pod.name":"x","container.image.repository":"bad image name","container.id":"host"}}
+{"rule":"Tag tricks","priority":"Notice","source":"syscall","time":"2026-10-30T13:00:00Z","tags":["T１０５９","T1059\n","t1059","T10590","T1059.01","mitre_","mitre_Execution",7,null,"T1059.004","T1059.004"],"output_fields":{"evt.time":5}}
+{"rule":"Out of range time","priority":"Notice","time":"1970-01-01T00:00:00Z","output_fields":{"evt.time":99999999999999999999999}}
+{"rule":"NaN","priority":"Notice","time":NaN}
+{"rule": "Rule with\ncontrol\u0007chars\u0085", "priority": "info", "source": "syscall", "time": "2026-10-30T13:30:00Z", "output_fields": {"evt.time": 1793367000000000000}}
+{"rule": "Non-exec process event", "priority": "Notice", "source": "syscall", "time": "2026-10-30T13:31:00Z", "uuid": "5D0B0F8E-1B7A-4C1E-9D2A-2F0E6C1A9B0", "output_fields": {"evt.time": 1793367060000000000, "evt.type": "ptrace", "proc.name": "gdb", "proc.pid": 4100}}
+{"rule":"Unicode \u0000 and \ud800 in rule","priority":"Notice","source":"syscall","time":"2026-10-30 13:40:00","output_fields":{"proc.name":"a\u0000b"}}
+{"rule": "Back\\slash A\\x01 and \u202ebidi", "priority": "Notice", "source": "syscall", "time": "2026-10-30T13:50:00Z", "output_fields": {"evt.time": 1793367000000000000, "evt.type": "connect", "fd.type": "unix", "fd.name": "/run/example.sock", "proc.name": "curl", "proc.pid": 5}}

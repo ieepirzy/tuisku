@@ -1,0 +1,131 @@
+[
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [
+          "T1071.001"
+        ],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [
+          "host:node-2",
+          "k8s:payments/api-7d9f8c6b5-x2x9q",
+          "k8s-ns:payments",
+          "image:registry.example.com/team/api",
+          "ip:10.0.0.5",
+          "ip:203.0.113.7"
+        ],
+        "event_time": "2026-10-30T12:10:00.500000+00:00",
+        "explanation": {
+          "attack_tags": [
+            "T1071.001"
+          ],
+          "matched_rule": "Outbound Connection to C2 Servers",
+          "mitre_tactics": [
+            "mitre_command_and_control"
+          ],
+          "output": "12:10:00.500000000: Notice Disallowed outbound connection destination (connection=10.0.0.5:51234->203.0.113.7:443 lport=51234 rport=443 fd_type=ipv4 fd_proto=tcp evt_type=connect user=app user_uid=1000 process=curl command=curl https://203.0.113.7/ container_id=9f1c2b3a4d5e container_image=registry.example.com/team/api)",
+          "priority": "Notice",
+          "source": "syscall",
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Outbound Connection to C2 Servers",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "Notice",
+          "rule": "Outbound Connection to C2 Servers",
+          "source": "syscall",
+          "tags": [
+            "TA0011",
+            "T1071.001",
+            "container",
+            "host",
+            "mitre_command_and_control",
+            "network"
+          ]
+        },
+        "severity": 2,
+        "title": "Outbound Connection to C2 Servers"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "actor": {
+            "user": {
+              "name": "app",
+              "uid": "1000"
+            }
+          },
+          "connection_info": {
+            "protocol_name": "tcp"
+          },
+          "container": {
+            "image": {
+              "name": "registry.example.com/team/api"
+            },
+            "uid": "9f1c2b3a4d5e"
+          },
+          "device": {
+            "hostname": "node-2"
+          },
+          "dst_endpoint": {
+            "ip": "203.0.113.7",
+            "port": 443
+          },
+          "event_time_ns": 1793362200500000000,
+          "k8s": {
+            "namespace": "payments",
+            "pod": "api-7d9f8c6b5-x2x9q"
+          },
+          "process": {
+            "cmd_line": "curl https://203.0.113.7/",
+            "name": "curl",
+            "pid": 5150
+          },
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 51234
+          }
+        },
+        "community_id": "1:CBicJdZj0b8kPjK5Zy8MRAYdz94=",
+        "correlation": {
+          "falco.uuid": "0e8c4c1a-7f43-4bd4-a0b6-3f1b0c9b2d55"
+        },
+        "entity_keys": [
+          "host:node-2",
+          "k8s:payments/api-7d9f8c6b5-x2x9q",
+          "k8s-ns:payments",
+          "image:registry.example.com/team/api",
+          "ip:10.0.0.5",
+          "ip:203.0.113.7"
+        ],
+        "event_time": "2026-10-30T12:10:00.500000+00:00",
+        "flags": [],
+        "kind": "falco.event",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "output_fields": {
+            "evt.time": 1793362200500000000,
+            "evt.type": "connect",
+            "fd.lip": "10.0.0.5",
+            "fd.lport": 51234,
+            "fd.name": "10.0.0.5:51234->203.0.113.7:443",
+            "fd.rip": "203.0.113.7",
+            "fd.rport": 443,
+            "fd.type": "ipv4"
+          },
+          "record": {
+            "time": "2026-10-30T12:10:00.500000000Z"
+          }
+        }
+      }
+    ]
+  }
+]

@@ -1,0 +1,1 @@
+{"hostname":"node-3","output":"12:40:00.000000000: Error Something matched","priority":"Error","rule":"Synthetic rule without fields","source":"syscall","tags":["maturity_sandbox"],"time":"2026-10-30T12:40:00.987654321Z"}

@@ -1,0 +1,115 @@
+[
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "protocol_name": "tcp",
+            "protocol_num": 6,
+            "protocol_ver_id": 4
+          },
+          "dst_endpoint": {
+            "ip": "198.51.100.30",
+            "port": 8080
+          },
+          "http_request": {
+            "http_method": "GET",
+            "referrer": "http://www.example.com/",
+            "url": {
+              "hostname": "www.example.com",
+              "path": "/download/update.bin",
+              "port": 8080,
+              "query_string": "v=2"
+            },
+            "user_agent": "curl/8.0",
+            "version": "HTTP/1.1"
+          },
+          "http_response": {
+            "code": 200,
+            "content_type": "application/octet-stream",
+            "length": 1024
+          },
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 49200
+          }
+        },
+        "community_id": "1:o8tTJGQYQeSTfYEh2SPsraAUh5I=",
+        "correlation": {
+          "suricata.flow_id": "100"
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:198.51.100.30",
+          "domain:www.example.com"
+        ],
+        "event_time": "2023-09-18T06:13:41+00:00",
+        "flags": [],
+        "kind": "http.request",
+        "ocsf_class_uid": 4002,
+        "unmapped": {
+          "http": {
+            "request_headers": [
+              {
+                "name": "Host",
+                "value": "www.example.com:8080"
+              }
+            ]
+          },
+          "tx_id": 0
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "suricata@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "protocol_name": "tcp",
+            "protocol_num": 6,
+            "protocol_ver_id": 4
+          },
+          "dst_endpoint": {
+            "ip": "203.0.113.80",
+            "port": 80
+          },
+          "http_request": {
+            "http_method": "CONNECT",
+            "url": {
+              "hostname": "203.0.113.80",
+              "url_string": "http://proxy.example/abs"
+            },
+            "version": "HTTP/1.0"
+          },
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 49201
+          }
+        },
+        "community_id": "1:f3ShAQ1ltRhQKiSN1/S9BzPaFsM=",
+        "correlation": {
+          "suricata.flow_id": "101"
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:203.0.113.80"
+        ],
+        "event_time": "2023-09-18T06:13:42+00:00",
+        "flags": [],
+        "kind": "http.request",
+        "ocsf_class_uid": 4002,
+        "unmapped": {
+          "http": {
+            "status": "200"
+          },
+          "tx_id": 0
+        }
+      }
+    ]
+  }
+]

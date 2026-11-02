@@ -1,0 +1,132 @@
+[
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "uid": "CHhAvVGS1DHFjwGM9"
+          },
+          "dst_endpoint": {
+            "ip": "203.0.113.20",
+            "port": 80
+          },
+          "file": {
+            "hashes": [
+              {
+                "algorithm": "MD5",
+                "algorithm_id": 1,
+                "value": "0cc175b9c0f1b6a831c399e269772661"
+              },
+              {
+                "algorithm": "SHA-1",
+                "algorithm_id": 2,
+                "value": "86f7e437faa5a7fce15d1ddcb9eaeaea377667b8"
+              },
+              {
+                "algorithm": "SHA-256",
+                "algorithm_id": 3,
+                "value": "CA978112CA1BBDCAFAC231B39A23DC4DA786EFF8147C4E72B9807785AFEE48BB"
+              }
+            ],
+            "mime_type": "text/xml",
+            "name": "report.xml",
+            "size": 212,
+            "uid": "F2xow8TIkvHG4Zz41"
+          },
+          "src_endpoint": {
+            "ip": "192.0.2.10",
+            "port": 49175
+          }
+        },
+        "community_id": null,
+        "correlation": {
+          "zeek.fuid": [
+            "F2xow8TIkvHG4Zz41"
+          ],
+          "zeek.uid": [
+            "CHhAvVGS1DHFjwGM9"
+          ]
+        },
+        "entity_keys": [
+          "ip:192.0.2.10",
+          "ip:203.0.113.20",
+          "sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
+        ],
+        "event_time": "2023-09-18T06:13:34.200000+00:00",
+        "flags": [
+          "log_type_inferred"
+        ],
+        "kind": "file.transfer",
+        "ocsf_class_uid": 1001,
+        "unmapped": {
+          "analyzers": [
+            "SHA256",
+            "MD5",
+            "SHA1"
+          ],
+          "depth": 0,
+          "duration": 0.0,
+          "is_orig": false,
+          "local_orig": false,
+          "missing_bytes": 0,
+          "overflow_bytes": 0,
+          "seen_bytes": 212,
+          "source": "HTTP",
+          "timedout": false
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "file": {
+            "mime_type": "application/octet-stream",
+            "uid": "FlegacyFile000001"
+          }
+        },
+        "community_id": null,
+        "correlation": {
+          "zeek.fuid": [
+            "FlegacyFile000001"
+          ],
+          "zeek.uid": [
+            "ClegacyConn000001"
+          ]
+        },
+        "entity_keys": [
+          "ip:203.0.113.20",
+          "ip:192.0.2.10"
+        ],
+        "event_time": "2023-09-18T06:13:47+00:00",
+        "flags": [
+          "log_type_inferred"
+        ],
+        "kind": "file.transfer",
+        "ocsf_class_uid": 1001,
+        "unmapped": {
+          "analyzers": [],
+          "conn_uids": [
+            "ClegacyConn000001"
+          ],
+          "depth": 0,
+          "rx_hosts": [
+            "192.0.2.10",
+            "bogus"
+          ],
+          "seen_bytes": 10,
+          "sha256": "not-a-hash",
+          "source": "HTTP",
+          "tx_hosts": [
+            "203.0.113.20"
+          ]
+        }
+      }
+    ]
+  }
+]

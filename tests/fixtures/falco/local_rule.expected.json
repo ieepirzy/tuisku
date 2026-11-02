@@ -1,0 +1,166 @@
+[
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [
+          "T1204.002"
+        ],
+        "attributes": {},
+        "authorship": "local",
+        "entity_keys": [
+          "host:node-4"
+        ],
+        "event_time": "2026-10-30T12:50:00+00:00",
+        "explanation": {
+          "attack_tags": [
+            "T1204.002"
+          ],
+          "authorship_reason": "rule listed in adapter option local_rules",
+          "matched_rule": "Example estate tool executed",
+          "mitre_tactics": [
+            "mitre_execution"
+          ],
+          "output": "12:50:00.000000000: Critical Estate-specific binary run (process=example-tool)",
+          "priority": "Critical",
+          "source": "syscall",
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Example estate tool executed",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "Critical",
+          "rule": "Example estate tool executed",
+          "source": "syscall",
+          "tags": [
+            "T1204.002",
+            "mitre_execution"
+          ]
+        },
+        "severity": 5,
+        "title": "Example estate tool executed"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "actor": {
+            "user": {
+              "name": "root",
+              "uid": "0"
+            }
+          },
+          "device": {
+            "hostname": "node-4"
+          },
+          "event_time_ns": 1793364600000000000,
+          "process": {
+            "file": {
+              "path": "/opt/example/bin/example-tool"
+            },
+            "name": "example-tool",
+            "pid": 9001
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [
+          "host:node-4"
+        ],
+        "event_time": "2026-10-30T12:50:00+00:00",
+        "flags": [],
+        "kind": "process.exec",
+        "ocsf_class_uid": 1007,
+        "unmapped": {
+          "output_fields": {
+            "evt.time": 1793364600000000000,
+            "evt.type": "execve"
+          },
+          "record": {
+            "time": "2026-10-30T12:50:00Z"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [
+          "T1059"
+        ],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [
+          "host:node-4"
+        ],
+        "event_time": "2026-10-30T12:51:00+00:00",
+        "explanation": {
+          "attack_tags": [
+            "T1059"
+          ],
+          "matched_rule": "Terminal shell in container",
+          "output": "Notice A shell was spawned",
+          "priority": "Notice",
+          "source": "syscall",
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Terminal shell in container",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "Notice",
+          "rule": "Terminal shell in container",
+          "source": "syscall",
+          "tags": [
+            "T1059"
+          ]
+        },
+        "severity": 2,
+        "title": "Terminal shell in container"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "device": {
+            "hostname": "node-4"
+          },
+          "event_time_ns": 1793364660000000000,
+          "process": {
+            "name": "sh",
+            "pid": 9002
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [
+          "host:node-4"
+        ],
+        "event_time": "2026-10-30T12:51:00+00:00",
+        "flags": [],
+        "kind": "process.exec",
+        "ocsf_class_uid": 1007,
+        "unmapped": {
+          "output_fields": {
+            "evt.time": 1793364660000000000,
+            "evt.type": "execve"
+          },
+          "record": {
+            "time": "2026-10-30T12:51:00Z"
+          }
+        }
+      }
+    ]
+  }
+]
