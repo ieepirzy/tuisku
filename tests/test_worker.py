@@ -11,7 +11,7 @@ import psycopg
 import pytest
 from psycopg import AsyncConnection, errors
 
-from tests.support import query
+from tests.support import auth, client, operator_token, query
 from tests.worker_support import (
     QUIET_BACKLOG,
     Clock,
@@ -25,6 +25,7 @@ from tests.worker_support import (
 )
 from tuisku.rules.packs import Rule, load_rule_set
 from tuisku.store.ingest import Transport
+from tuisku.store.tokens import Role
 from tuisku.worker import engine
 from tuisku.worker.engine import Worker, WorkerConfig, _window_rows
 from tuisku.worker.metrics import compute_deltas
@@ -254,6 +255,75 @@ def test_lease_expiries_never_burn_attempts(fresh_database_url: str) -> None:
 # --- caps ---------------------------------------------------------------------------------------
 
 
+def test_overflow_finding_at_the_open_findings_cap(fresh_database_url: str) -> None:
+    url = fresh_database_url
+    callers = ["svc-a", "svc-b", "svc-c", "svc-d"]
+    ingest(
+        url, "h", "harava", lines(*[(T + timedelta(minutes=i), c) for i, c in enumerate(callers)])
+    )
+    clock = Clock(T + timedelta(minutes=10))
+    notifier = RecordingNotifier()
+    run_worker(url, builtin_rules(), clock, notifier, max_open_findings=2)
+    rows = query(
+        url,
+        "SELECT overflow, count, severity_id, group_values FROM findings "
+        "WHERE rule_ref->>'name' = %s ORDER BY id",
+        (SERVICE_RULE,),
+    )
+    assert rows == [
+        (False, 1, 3, ["svc-a"]),
+        (False, 1, 3, ["svc-b"]),
+        (True, 2, 4, []),
+    ]
+    groups = query(
+        url, "SELECT group_values FROM finding_overflow_groups ORDER BY linked_at, group_values"
+    )
+    assert sorted(g[0][0] for g in groups) == ["svc-c", "svc-d"]
+    kinds = [n["kind"] for n in notifier.sent if n.get("rule", "").startswith("0ce68af0")]
+    # Delivered most severe first: the overflow pages (high) before the openings (medium).
+    assert kinds == [
+        "finding_overflow_group",
+        "finding_overflow_group",
+        "finding_opened",
+        "finding_opened",
+    ]
+    # Detection kept working: every refusal fired.
+    assert fired(url).count(SERVICE_RULE) == 4
+    # A repeat from a folded group attaches but is not a new group: no page.
+    ingest(url, "h", "harava", lines((T + timedelta(minutes=11), "svc-c")))
+    clock.advance(minutes=5)
+    notifier.sent.clear()
+    run_worker(url, builtin_rules(), clock, notifier, max_open_findings=2)
+    assert notifier.sent == []
+    assert query(url, "SELECT count FROM findings WHERE overflow") == [(3,)]
+
+    # It cannot be suppressed, only resolved, which re-arms the rule.
+    [(uid,)] = query(url, "SELECT uid::text FROM findings WHERE overflow")
+    triager = operator_token(url, Role.TRIAGE)
+    with client(url, clock=clock) as c:
+        r = c.post(
+            f"/v1/findings/{uid}/status",
+            json={
+                "status": "suppressed",
+                "reason": "noisy",
+                "suppressed_until": (clock.now + timedelta(hours=1)).isoformat(),
+            },
+            headers=auth(triager),
+        )
+        assert r.status_code == 409
+        r = c.post(f"/v1/findings/{uid}/status", json={"status": "resolved"}, headers=auth(triager))
+        assert r.status_code == 200
+    ingest(url, "h", "harava", lines((T + timedelta(minutes=16), "svc-e")))
+    clock.advance(minutes=5)
+    notifier.sent.clear()
+    run_worker(url, builtin_rules(), clock, notifier, max_open_findings=2)
+    assert [n["kind"] for n in notifier.sent] == ["finding_overflow_group"]
+    assert query(url, "SELECT status FROM findings WHERE overflow ORDER BY id") == [
+        ("resolved",),
+        ("open",),
+    ]
+
+
 def test_overflow_incident_at_the_live_incident_cap(
     fresh_database_url: str, tmp_path: Path
 ) -> None:
@@ -353,6 +423,30 @@ def test_rows_between_firings_are_linked_counted_and_paged(
     ]
 
 
+def test_resolving_a_finding_rearms_the_correlation(
+    fresh_database_url: str, tmp_path: Path
+) -> None:
+    url = fresh_database_url
+    rules = load_rule_set([write_pack(tmp_path, [_count_rule(R1, gte=2, timespan="1h")])])
+    clock = Clock(T + timedelta(minutes=5))
+    ingest(url, "h", "harava", lines((T, "x"), (T + timedelta(minutes=1), "x")))
+    run_worker(url, rules, clock)
+    [(uid,)] = query(url, "SELECT uid::text FROM findings")
+    triager = operator_token(url, Role.TRIAGE)
+    with client(url, clock=clock) as c:
+        r = c.post(
+            f"/v1/findings/{uid}/status",
+            json={"status": "resolved", "reason": "ok"},
+            headers=auth(triager),
+        )
+        assert r.status_code == 200
+    ingest(url, "h", "harava", lines((T + timedelta(minutes=10), "x")))
+    clock.advance(minutes=10)
+    run_worker(url, rules, clock)
+    assert fired(url) == ["testpack.burst", "testpack.burst"]
+    assert query(url, "SELECT status FROM findings ORDER BY id") == [("resolved",), ("open",)]
+
+
 # --- findings lifecycle -------------------------------------------------------------------------
 
 
@@ -375,6 +469,72 @@ def test_expiry_and_lifetime_open_new_findings(fresh_database_url: str) -> None:
         "SELECT actor, new_value->>'status' FROM finding_events WHERE kind = 'status_changed'",
     )
     assert (actor, kind) == ("system", "expired")
+
+
+def test_suppressed_finding_collects_evidence_silently(fresh_database_url: str) -> None:
+    url = fresh_database_url
+    clock = Clock(T)
+    ingest(url, "h", "harava", lines((T, "agents")))
+    notifier = RecordingNotifier()
+    run_worker(url, builtin_rules(), clock, notifier)
+    [(uid,)] = query(url, "SELECT uid::text FROM findings")
+    triager = operator_token(url, Role.TRIAGE)
+    with client(url, clock=clock) as c:
+        body = {"status": "suppressed", "reason": "maintenance"}
+        assert (
+            c.post(f"/v1/findings/{uid}/status", json=body, headers=auth(triager)).status_code
+            == 409
+        )
+        body["suppressed_until"] = (T + timedelta(minutes=30)).isoformat()
+        assert (
+            c.post(f"/v1/findings/{uid}/status", json=body, headers=auth(triager)).status_code
+            == 200
+        )
+    notifier.sent.clear()
+    clock.advance(minutes=5)
+    ingest(url, "h", "harava", lines((clock.now, "agents")))
+    run_worker(url, builtin_rules(), clock, notifier)
+    assert notifier.sent == []
+    assert query(url, "SELECT status, count FROM findings") == [("suppressed", 2)]
+    [(actor, reason)] = query(
+        url, "SELECT actor, reason FROM finding_events WHERE kind = 'suppressed'"
+    )
+    assert actor.startswith("operator:") and reason == "maintenance"
+    # The suppression expires; paging resumes.
+    clock.advance(minutes=30)
+    ingest(url, "h", "harava", lines((clock.now, "agents")))
+    run_worker(url, builtin_rules(), clock, notifier)
+    assert query(url, "SELECT status, count FROM findings") == [("open", 3)]
+    # One summary of what the suppression held back (round ten), then paging resumes.
+    assert notifier.kinds() == ["finding_suppression_ended", "finding_occurrence"]
+    [summary] = [n for n in notifier.sent if n["kind"] == "finding_suppression_ended"]
+    assert (summary["count_while_suppressed"], summary["ended_as"]) == (1, "open")
+
+
+def test_new_evidence_reopens_a_contained_incident(fresh_database_url: str) -> None:
+    url = fresh_database_url
+    clock = Clock(T)
+    ingest(url, "h", "harava", lines((T, "agents")))
+    notifier = RecordingNotifier()
+    run_worker(url, builtin_rules(), clock, notifier)
+    [(uid,)] = query(url, "SELECT uid::text FROM incidents")
+    triager = operator_token(url, Role.TRIAGE)
+    with client(url, clock=clock) as c:
+        r = c.post(
+            f"/v1/incidents/{uid}/status", json={"status": "contained"}, headers=auth(triager)
+        )
+        assert r.status_code == 200
+        # Backwards is refused except a reopen to investigating.
+        r = c.post(f"/v1/incidents/{uid}/status", json={"status": "triaged"}, headers=auth(triager))
+        assert r.status_code == 409
+    notifier.sent.clear()
+    clock.advance(minutes=5)
+    ingest(url, "h", "harava", lines((clock.now, "agents")))
+    run_worker(url, builtin_rules(), clock, notifier)
+    assert query(url, "SELECT status FROM incidents") == [("investigating",)]
+    assert sorted(notifier.kinds()) == ["finding_occurrence", "incident_escalated"]
+    kinds = query(url, "SELECT kind FROM incident_events ORDER BY id")
+    assert [k for (k,) in kinds] == ["opened", "finding_attached", "status_changed", "reopened"]
 
 
 # --- metric deltas ------------------------------------------------------------------------------
