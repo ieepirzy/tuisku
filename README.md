@@ -114,7 +114,13 @@ record keeps the source name it arrived with in `source_name`. They grant
 only observations and detections inserted in the same transaction), plus `USAGE` on
 sequences. A trigger sets each raw record's `source_name` from `sources`, whatever the writer
 supplied. Only the worker role claims, updates or deletes queue rows, or touches
-`evaluation_dead_letter`.
+`evaluation_dead_letter`. No `tuisku_*` database function is executable by PUBLIC. Only the
+read-only helpers `tuisku_is_worker()`, `tuisku_xmin_is_current()` and
+`tuisku_current_bucket()` are granted to the runtime roles. Every trigger function refuses to
+run on any table but its own, and PUBLIC has no `TEMP` on the database, so no role can attach
+Tuisku's trigger functions to a table of its own. The migrating role must therefore own the
+database, or the migration stops and asks for the `REVOKE TEMP` to be run by its owner. Operator
+tokens can be created without a person (read, triage, admin) and only revoked afterwards.
 
 The worker role alone writes rule output, so a compromised API process cannot forge it. Only the
 worker role gets `INSERT` on `detection_evidence`. A trigger lets only the worker role insert

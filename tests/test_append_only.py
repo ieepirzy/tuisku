@@ -113,7 +113,7 @@ def test_app_role_does_not_own_evidence_tables(populated: AppDatabase) -> None:
 def test_app_role_can_change_working_tables(populated: AppDatabase) -> None:
     assert _attempt(populated.app_url, "UPDATE sources SET disabled_at = disabled_at") is None
     assert _attempt(populated.app_url, "UPDATE meta_counters SET count = count") is None
-    assert _attempt(populated.app_url, "UPDATE operator_tokens SET name = name") is None
+    assert _attempt(populated.app_url, "UPDATE operator_tokens SET revoked_at = revoked_at") is None
 
 
 @pytest.mark.parametrize(
@@ -127,8 +127,11 @@ def test_app_role_can_change_working_tables(populated: AppDatabase) -> None:
         "INSERT INTO evaluation_dead_letter (id, observation_id, enqueued_at, attempts) "
         "SELECT 0, max(id), now(), 0 FROM observations",
         "DELETE FROM meta_counters",
-        # Tokens are revoked, never deleted.
+        # Tokens are revoked, never deleted or otherwise changed.
         "DELETE FROM operator_tokens",
+        "UPDATE operator_tokens SET name = name",
+        "UPDATE operator_tokens SET roles = '{admin}'",
+        "UPDATE operator_tokens SET expires_at = NULL",
     ],
 )
 def test_app_role_cannot_touch_the_queue_or_delete_counters_and_tokens(
@@ -394,3 +397,70 @@ def test_raw_source_name_is_set_by_the_database(populated: AppDatabase) -> None:
         ).fetchall()
         conn.rollback()
     assert stored == actual != "forged-name"
+
+
+# --- round seven: no function for PUBLIC, no TEMP, triggers only where they belong -------------
+
+
+def test_no_tuisku_function_is_executable_by_public(populated: AppDatabase) -> None:
+    rows = query(
+        populated.owner_url,
+        "SELECT p.oid::regprocedure::text FROM pg_proc p JOIN pg_namespace n "
+        "ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname LIKE 'tuisku\\_%%' "
+        "AND (p.proacl IS NULL OR EXISTS (SELECT 1 FROM aclexplode(p.proacl) a "
+        "WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE'))",
+    )
+    assert rows == []
+    [(n,)] = query(
+        populated.owner_url,
+        "SELECT count(*) FROM pg_proc WHERE proname LIKE 'tuisku\\_%%'",
+    )
+    assert n >= 10  # the enumeration found the functions it checks
+
+
+def test_the_app_role_executes_only_the_helpers(populated: AppDatabase) -> None:
+    rows = query(
+        populated.owner_url,
+        "SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+        "WHERE n.nspname = 'public' AND p.proname LIKE 'tuisku\\_%%' "
+        "AND has_function_privilege(%s, p.oid, 'EXECUTE') ORDER BY 1",
+        (populated.app_role,),
+    )
+    assert [r[0] for r in rows] == [
+        "tuisku_current_bucket",
+        "tuisku_is_worker",
+        "tuisku_xmin_is_current",
+    ]
+
+
+@pytest.mark.parametrize("role", ["app", "worker"])
+def test_runtime_roles_cannot_create_temp_tables(populated: AppDatabase, role: str) -> None:
+    url = populated.app_url if role == "app" else populated.worker_url
+    exc = _attempt(url, "CREATE TEMP TABLE t (i int)")
+    assert isinstance(exc, errors.InsufficientPrivilege), exc
+
+
+@pytest.mark.parametrize(
+    "function",
+    [
+        "tuisku_person_tokens_owner_only",
+        "tuisku_derivation_same_transaction",
+        "tuisku_queue_same_transaction",
+        "tuisku_raw_source_name",
+        "tuisku_detections_worker_only",
+        "tuisku_rule_links_worker_only",
+    ],
+)
+def test_trigger_functions_refuse_to_run_on_other_tables(
+    populated: AppDatabase, function: str
+) -> None:
+    """Even for a role that may execute them (the owner), on a table of its own."""
+    with psycopg.connect(populated.owner_url) as conn:
+        conn.execute("CREATE TEMP TABLE elsewhere (i int)")
+        conn.execute(  # type: ignore[arg-type]
+            f"CREATE TRIGGER t BEFORE INSERT ON elsewhere FOR EACH ROW "
+            f"EXECUTE FUNCTION public.{function}()"
+        )
+        with pytest.raises(errors.InsufficientPrivilege, match="used out of place"):
+            conn.execute("INSERT INTO elsewhere VALUES (1)")
+        conn.rollback()

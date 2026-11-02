@@ -335,6 +335,11 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
 BEGIN
+    IF TG_RELID NOT IN ('public.operator_tokens'::regclass::oid) OR TG_WHEN <> 'BEFORE' OR TG_OP NOT IN ('INSERT', 'UPDATE')
+       OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
     IF (NEW.person IS NOT NULL OR 'approve' = ANY (NEW.roles))
        AND current_user <> (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = TG_RELID)
     THEN
@@ -402,6 +407,11 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
 BEGIN
+    IF TG_RELID NOT IN ('public.parse_attempts'::regclass::oid, 'public.observations'::regclass::oid, 'public.detections'::regclass::oid) OR TG_WHEN <> 'BEFORE' OR TG_OP NOT IN ('INSERT')
+       OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
     IF public.tuisku_is_worker() THEN
         RETURN NEW;
     END IF;
@@ -446,6 +456,11 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
 BEGIN
+    IF TG_RELID NOT IN ('public.evaluation_queue'::regclass::oid) OR TG_WHEN <> 'BEFORE' OR TG_OP NOT IN ('INSERT')
+       OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
     IF public.tuisku_is_worker() THEN
         RETURN NEW;
     END IF;
@@ -471,6 +486,11 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
 BEGIN
+    IF TG_RELID NOT IN ('public.raw_records'::regclass::oid) OR TG_WHEN <> 'BEFORE' OR TG_OP NOT IN ('INSERT')
+       OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
     SELECT s.name INTO NEW.source_name FROM public.sources s WHERE s.id = NEW.source_id;
     RETURN NEW;
 END
@@ -491,6 +511,11 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
 BEGIN
+    IF TG_RELID NOT IN ('public.detections'::regclass::oid) OR TG_WHEN <> 'BEFORE' OR TG_OP NOT IN ('INSERT')
+       OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
     IF NEW.evaluator = 'tuisku' AND NOT public.tuisku_is_worker()
        -- The API's own ingest meta-detections (ADR 0005): only its kinds, for a source, and
        -- only for the current 5-minute bucket by the database clock, so it cannot pre-claim a
@@ -516,6 +541,11 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
 BEGIN
+    IF TG_RELID NOT IN ('public.detection_observations'::regclass::oid) OR TG_WHEN <> 'BEFORE' OR TG_OP NOT IN ('INSERT')
+       OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
     IF public.tuisku_is_worker() THEN
         RETURN NEW;
     END IF;
@@ -545,6 +575,41 @@ CREATE TRIGGER detection_observations_worker_only BEFORE INSERT ON detection_obs
 """
 
 
+# ADR 0011: no tuisku_* function is callable by PUBLIC. Firing a trigger needs no EXECUTE
+# privilege, so revoking it costs nothing there, and nobody can attach these functions to a
+# table of their own. Only the read-only helpers that trigger bodies and ingest call directly
+# are granted back, to the app and worker roles.
+REVOKE_FUNCTIONS_SQL = """
+DO $$
+DECLARE
+    f regprocedure;
+BEGIN
+    FOR f IN
+        SELECT p.oid::regprocedure FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public' AND p.proname LIKE 'tuisku\\_%'
+    LOOP
+        EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC', f);
+    END LOOP;
+END
+$$;
+"""
+HELPER_FUNCTIONS = (
+    "tuisku_is_worker()",
+    "tuisku_xmin_is_current(xid)",
+    "tuisku_current_bucket()",
+)
+
+# No TEMP for PUBLIC: a temporary table is the only table a role without CREATE could make, and
+# so the only place it could attach a trigger of its own (ADR 0011). Needs the database owner.
+REVOKE_TEMP_SQL = """
+DO $$
+BEGIN
+    EXECUTE format('REVOKE TEMP ON DATABASE %I FROM PUBLIC', current_database());
+END
+$$;
+"""
+
+
 def upgrade() -> None:
     op.execute(TABLES_SQL)
     op.execute(TRIGGER_FUNCTION_SQL)
@@ -561,6 +626,8 @@ def upgrade() -> None:
 
     app, worker = _role("app_role"), _role("worker_role")
     op.execute(_worker_functions_sql(worker if app else None))
+    op.execute(REVOKE_FUNCTIONS_SQL)
+    op.execute(REVOKE_TEMP_SQL)
     if app is None:
         return  # single-role setup: the migrating role (the owner) does everything
     if worker is None:
@@ -573,7 +640,10 @@ def upgrade() -> None:
     op.execute(f'GRANT UPDATE (disabled_at) ON sources TO "{app}"')
     op.execute(f'GRANT UPDATE (revoked_at, last_used_at) ON source_tokens TO "{app}"')
     # Tokens are revoked, never deleted, so their history stays (ADR 0005).
-    op.execute(f'GRANT SELECT, INSERT, UPDATE ON operator_tokens TO "{app}"')
+    # Non-person read/triage/admin tokens only (the person trigger refuses the rest to any role
+    # but the owner); afterwards only revoked, never otherwise changed.
+    op.execute(f'GRANT SELECT, INSERT ON operator_tokens TO "{app}"')
+    op.execute(f'GRANT UPDATE (revoked_at) ON operator_tokens TO "{app}"')
     # Ingest only enqueues; only the worker claims, updates or deletes queue rows, so the API
     # cannot drop or park a row before it is evaluated (ADR 0011).
     op.execute(
@@ -586,6 +656,19 @@ def upgrade() -> None:
     op.execute(f'GRANT SELECT, INSERT ON {", ".join(WORKER_INSERT)} TO "{worker}"')
     op.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON {", ".join(WORKER_WORKING)} TO "{worker}"')
     op.execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "{worker}"')
+    for helper in HELPER_FUNCTIONS:
+        op.execute(f'GRANT EXECUTE ON FUNCTION {helper} TO "{app}", "{worker}"')
+    # Both runtime roles must be left without TEMP: refuse to finish if PUBLIC's could not be
+    # revoked (the migrating role does not own the database).
+    op.execute(
+        f"""DO $$ BEGIN
+            IF has_database_privilege('{app}', current_database(), 'TEMP')
+               OR has_database_privilege('{worker}', current_database(), 'TEMP') THEN
+                RAISE EXCEPTION 'run REVOKE TEMP ON DATABASE % FROM PUBLIC as the database '
+                    'owner, then migrate again (ADR 0011)', current_database();
+            END IF;
+        END $$;"""
+    )
 
 
 def downgrade() -> None:
