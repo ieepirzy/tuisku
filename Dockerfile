@@ -24,11 +24,14 @@ COPY --from=build /opt/venv /opt/venv
 WORKDIR /app
 COPY alembic.ini ./
 COPY migrations ./migrations
+# Built-in rule packs (ADR 0006); deployments add their own via TUISKU_RULE_PACK_PATHS.
+COPY packs ./packs
 ARG TUISKU_BUILD_REVISION=unknown
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     TUISKU_ALEMBIC_CONFIG=/app/alembic.ini \
+    TUISKU_BUILTIN_PACKS_DIR=/app/packs \
     TUISKU_BUILD_REVISION=$TUISKU_BUILD_REVISION
 USER 10001:10001
 EXPOSE 8080

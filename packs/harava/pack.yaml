@@ -1,0 +1,16 @@
+pack: harava
+version: 1.0.0
+authorship: tuisku
+license: MIT
+description: >-
+  Agent-safety signals from Harava. Defaults follow Harava's own defaults; a deployment sets
+  its own callers and thresholds in TUISKU_RULE_PARAMS_FILE.
+params:
+  # Harava's default restricted caller (HARAVA_RESTRICTED_CALLERS).
+  restricted_callers: [agents]
+  # Destination refusals outside admission, per stage, per hour. Generic starting points.
+  destination_trend_threshold: 10
+  # Rise in `likely` content signals: the last hour against the mean of the previous hours.
+  likely_baseline_windows: 24
+  likely_baseline_factor: 3
+  likely_baseline_floor: 5

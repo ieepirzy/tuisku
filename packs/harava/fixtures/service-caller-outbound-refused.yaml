@@ -1,0 +1,20 @@
+rule: harava.service_caller_outbound_refused
+cases:
+  - name: a non-restricted caller's outbound refusal fires
+    source: {adapter: harava}
+    records:
+      - at: "2026-11-01T09:20:12Z"
+        raw: "2026-11-01 09:20:11,880 WARNING harava.api outbound data refused: caller=sidos urls=0 findings=sensitive_value/crawl_scope/plain"
+    fires: [harava.service_caller_outbound_refused]
+  - name: a caller Harava did not name plainly is not in the allowlist either
+    source: {adapter: harava}
+    records:
+      - at: "2026-11-01T09:20:12Z"
+        raw: "2026-11-01 09:20:11,880 WARNING harava.api outbound data refused: caller=two words urls=1 findings=email/query/plain"
+    fires: [harava.service_caller_outbound_refused]
+  - name: a restricted caller is the agent rule's business
+    source: {adapter: harava}
+    records:
+      - at: "2026-11-01T09:14:04Z"
+        raw: "2026-11-01 09:14:03,512 WARNING harava.api outbound data refused: caller=agents urls=1 findings=email/query/percent"
+    fires: [harava.agent_outbound_refused]

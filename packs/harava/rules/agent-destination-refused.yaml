@@ -1,0 +1,21 @@
+id: 57004605-e3e6-4965-bc22-61ce21647f42
+rev: 1
+name: harava.agent_destination_refused
+title: Agent caller had a destination refused at admission
+description: >-
+  Harava refused a destination class (overlay networks, request catchers, tunnels, local
+  names) at the admission stage, for a restricted (agent) caller. Pages on every occurrence.
+severity: high
+select:
+  layer: observation
+  kind: harava.refusal
+  where:
+    - {field: attributes.type, op: eq, value: destination}
+    - {field: attributes.stage, op: eq, value: admission}
+    - {field: attributes.caller, op: in, value: {param: restricted_callers}}
+finding:
+  group_by: [attributes.caller]
+  window: 1h
+  max_lifetime: 24h
+  notify: each
+incident: open

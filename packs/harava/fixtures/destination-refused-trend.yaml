@@ -1,0 +1,26 @@
+# Cumulative counters as OTLP/JSON exports through the real harava adapter. `start` is the
+# counter's start_time; the source's first receipt is the first record's `at`.
+rule: harava.destination_refused_trend
+cases:
+  - name: hop refusals add up past the threshold within an hour
+    source: {adapter: harava}
+    records:
+      - at: "2026-11-01T10:00:05Z"
+        otlp_sum: {metric: harava.destination.refused, labels: {class: tunnel, stage: hop}, start: "2026-11-01T09:59:30Z", time: "2026-11-01T10:00:00Z", value: 4}
+      - at: "2026-11-01T10:30:05Z"
+        otlp_sum: {metric: harava.destination.refused, labels: {class: tunnel, stage: hop}, start: "2026-11-01T09:59:30Z", time: "2026-11-01T10:30:00Z", value: 12}
+    fires: [harava.destination_refused_trend]
+  - name: admission refusals are logged lines, not this trend
+    source: {adapter: harava}
+    records:
+      - at: "2026-11-01T10:00:05Z"
+        otlp_sum: {metric: harava.destination.refused, labels: {class: tunnel, stage: admission}, start: "2026-11-01T09:59:30Z", time: "2026-11-01T10:00:00Z", value: 40}
+    fires: []
+  - name: connecting to a long-running process is a baseline, not a spike
+    source: {adapter: harava}
+    records:
+      - at: "2026-11-01T10:00:05Z"
+        otlp_sum: {metric: harava.destination.refused, labels: {class: tunnel, stage: hop}, start: "2026-10-01T00:00:00Z", time: "2026-11-01T10:00:00Z", value: 900}
+      - at: "2026-11-01T10:30:05Z"
+        otlp_sum: {metric: harava.destination.refused, labels: {class: tunnel, stage: hop}, start: "2026-10-01T00:00:00Z", time: "2026-11-01T10:30:00Z", value: 903}
+    fires: []

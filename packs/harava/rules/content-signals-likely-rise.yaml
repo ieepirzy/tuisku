@@ -1,0 +1,27 @@
+id: 863883df-964f-47db-a78a-3de8558f9968
+rev: 1
+name: harava.content_signals_likely_rise
+title: Rise in content Harava judged likely to carry instructions
+description: >-
+  The hourly sum of harava.content.signals{verdict="likely"} against a multiple of the mean of
+  the previous hours, never below a floor.
+severity: medium
+select:
+  layer: observation
+  kind: metric.sample
+  where:
+    - {field: attributes.metric, op: eq, value: harava.content.signals}
+    - {field: attributes.labels.verdict, op: eq, value: likely}
+correlation:
+  type: baseline
+  field: delta
+  timespan: 1h
+  baseline:
+    windows: {param: likely_baseline_windows}
+    factor: {param: likely_baseline_factor}
+    floor: {param: likely_baseline_floor}
+finding:
+  group_by: [source]
+  window: 6h
+  max_lifetime: 7d
+incident: none

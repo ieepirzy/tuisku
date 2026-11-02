@@ -1,0 +1,17 @@
+id: 9d0c5b6e-2f3a-4d1b-8c7e-5a4f3e2d1c0b
+rev: 1
+name: tuisku-meta.evaluation_failed
+title: A rule keeps failing to evaluate rows
+description: >-
+  Selects tuisku.meta.evaluation_failed meta-detections, one per source, failing rule and
+  5-minute bucket. Grouped by the failing rule's id; pages on every occurrence.
+severity: high
+select:
+  layer: detection
+  kind: tuisku.meta.evaluation_failed
+finding:
+  group_by: [attributes.subject]
+  window: 6h
+  max_lifetime: 7d
+  notify: each
+incident: none

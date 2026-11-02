@@ -1,0 +1,8 @@
+pack: sensors-default
+version: 1.0.0
+authorship: tuisku
+license: MIT
+description: >-
+  Sensor verdicts that become findings by default: Suricata alerts with severity 1, Falco
+  Critical and above, and every Zeek notice. Grouped by the sensor's rule identity plus the main
+  entity (the first entity key), so different signatures never merge.
