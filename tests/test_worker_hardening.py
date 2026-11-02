@@ -9,12 +9,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 from psycopg import errors
 
 from tests.conftest import REPO_ROOT, make_settings
 from tests.support import auth, client, operator_token, query
-from tests.test_worker import R1, _count_rule, _metric, lines, write_pack
+from tests.test_worker import R1, _count_rule, _metric, lines, rule_doc, write_pack
 from tests.worker_support import (
     Clock,
     RecordingNotifier,
@@ -513,3 +514,45 @@ def test_delivery_backoff_never_waits_longer_than_the_cap(fresh_database_url: st
         run_async(url, lambda conn: notify.drain(conn, notifier, T, backoff=backoff))
     [(failed,)] = query(url, "SELECT count(*) FROM notification_deliveries WHERE status = 'failed'")
     assert failed >= 7  # the first failure plus one retry after every capped wait
+
+
+# --- round five: a superseded row is never dropped silently -----------------------------------
+
+
+def test_a_superseded_row_pages_and_raises_a_meta_detection(fresh_database_url: str) -> None:
+    url = fresh_database_url
+    ingest(url, "h", "harava", lines((T, "agents")))
+    # Only the owner (or a reprocessing run, which does not exist yet) can supersede a record.
+    with psycopg.connect(url) as conn:
+        conn.execute(
+            "INSERT INTO parse_attempts (raw_record_id, adapter, adapter_version, status, "
+            "created_at) SELECT id, 'harava', '9.9.9', 'ok', now() FROM raw_records"
+        )
+    notifier = RecordingNotifier()
+    stats = run_worker(url, builtin_rules(), Clock(T + timedelta(minutes=5)), notifier)
+    assert stats.superseded >= 1
+    assert "harava.agent_outbound_refused" in fired(url)  # evaluated anyway: it paged
+    assert "finding_opened" in notifier.kinds()
+    metas = query(
+        url,
+        "SELECT subject FROM detections WHERE kind = 'tuisku.meta.evaluation_failed'",
+    )
+    assert ("superseded_derivation",) in metas
+    assert "tuisku-meta.evaluation_failed" in fired(url)
+
+
+# --- round five: rules match the name a record arrived with ------------------------------------
+
+
+def test_rules_match_the_source_name_a_record_arrived_with(
+    fresh_database_url: str, tmp_path: Path
+) -> None:
+    url = fresh_database_url
+    doc = rule_doc("named", R1)
+    doc["select"]["where"].append({"field": "source", "op": "eq", "value": "edge-a"})
+    rules = load_rule_set([write_pack(tmp_path, [doc])])
+    ingest(url, "edge-a", "harava", lines((T, "x")))
+    with psycopg.connect(url) as conn:  # renamed out of band before the worker ran
+        conn.execute("UPDATE sources SET name = 'edge-b' WHERE name = 'edge-a'")
+    run_worker(url, rules, Clock(T + timedelta(minutes=5)))
+    assert fired(url) == ["testpack.named"]

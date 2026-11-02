@@ -89,6 +89,7 @@ def test_queue_rows_cannot_be_dropped_or_parked(app_db: AppDatabase, statement: 
 
 
 def _agent_rules(tmp_path: Path, caller: str) -> RuleSet:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     params = tmp_path / "params.yaml"
     params.write_text(json.dumps({"harava": {"restricted_callers": ["agents", caller]}}))
     return builtin_rules(params)
@@ -313,3 +314,146 @@ def test_the_trigger_refuses_non_triage_changes_even_with_a_wider_grant(
         with pytest.raises(errors.InsufficientPrivilege, match="triage may change only"):
             conn.execute(f"UPDATE {table} " + change, {"uid": uid})  # type: ignore[arg-type]
         conn.rollback()
+
+
+# --- round five: superseding a record's derivation ------------------------------------------
+
+
+def test_a_victims_derivation_cannot_be_superseded(app_db: AppDatabase) -> None:
+    victim, victim_uid = _falco_victim(app_db)
+    exc = _refused(
+        app_db.app_url,
+        "INSERT INTO parse_attempts (raw_record_id, adapter, adapter_version, status, "
+        "created_at) SELECT raw_record_id, 'falco', 'x', 'ok', now() FROM detections "
+        "WHERE id = %s",
+        (victim,),
+    )
+    assert "with its raw record" in str(exc)
+    notifier = RecordingNotifier()
+    run_worker(app_db.worker_url, builtin_rules(), Clock(AT + timedelta(minutes=1)), notifier)
+    assert _paged_for(app_db, notifier, victim_uid)
+
+
+# --- round five: lifting and re-suppressing ------------------------------------------------------
+
+
+def _suppress(conn: psycopg.Connection, uid: str, until: str) -> None:
+    _run_all(
+        conn,
+        _OPERATOR_EVENT
+        + "UPDATE findings SET status = 'suppressed', suppressed_until = "
+        + until
+        + ", suppression_reason = 'x' WHERE uid = %(uid)s",
+        {"uid": uid},
+    )
+
+
+_LIFT = (
+    "INSERT INTO finding_events (finding_id, actor, kind, new_value) SELECT id, "
+    "'operator:00000000-0000-4000-8000-000000000000', 'status_changed', "
+    '\'{"status": "open"}\' FROM findings WHERE uid = %(uid)s; '
+    "UPDATE findings SET status = 'open', suppressed_until = NULL, suppression_reason = NULL, "
+    "suppressed_at = NULL, count_at_suppression = NULL WHERE uid = %(uid)s"
+)
+
+
+def test_a_lift_must_page_the_thresholds_crossed_while_suppressed(
+    app_db: AppDatabase, tmp_path: Path
+) -> None:
+    uid, caller, rules, source = _agent_finding(app_db, tmp_path)
+    with psycopg.connect(app_db.app_url) as conn:
+        _suppress(conn, uid, "now() + interval '1 day'")
+        conn.commit()
+    ingest(
+        app_db.app_url,
+        source,
+        "harava",
+        [_refusal(AT + timedelta(minutes=2 + i), caller) for i in range(10)],
+    )
+    run_worker(app_db.worker_url, rules, Clock(AT + timedelta(minutes=20)))
+    [(count,)] = query(app_db.owner_url, "SELECT count FROM findings WHERE uid = %s", (uid,))
+    assert count == 11  # crossed 10 while suppressed, silently
+    exc = _refused(app_db.app_url, _LIFT, {"uid": uid})  # the probe's bounce: no page
+    assert "threshold 10" in str(exc)
+    # A page written in an earlier transaction does not count: it must come with the lift.
+    with psycopg.connect(app_db.owner_url) as conn:
+        conn.execute(
+            "INSERT INTO notifications (dedupe_key, kind, severity_id, payload, created_at) "
+            "VALUES (%s, 'finding_threshold', 4, '{}', now())",
+            (f"triage_threshold:{uid}:10",),
+        )
+    exc = _refused(app_db.app_url, _LIFT, {"uid": uid})
+    assert "threshold 10" in str(exc)
+    # With its page in the same transaction, the lift is accepted (another finding, as this
+    # one's key is now taken).
+    uid2, caller2, rules2, source2 = _agent_finding(app_db, tmp_path / "second")
+    with psycopg.connect(app_db.app_url) as conn:
+        _suppress(conn, uid2, "now() + interval '1 day'")
+        conn.commit()
+    ingest(
+        app_db.app_url,
+        source2,
+        "harava",
+        [_refusal(AT + timedelta(minutes=2 + i), caller2) for i in range(10)],
+    )
+    run_worker(app_db.worker_url, rules2, Clock(AT + timedelta(minutes=20)))
+    with psycopg.connect(app_db.app_url) as conn:
+        conn.execute(
+            "INSERT INTO notifications (dedupe_key, kind, severity_id, payload, created_at) "
+            "VALUES (%s, 'finding_threshold', 4, '{}', now())",
+            (f"triage_threshold:{uid2}:10",),
+        )
+        _run_all(conn, _LIFT, {"uid": uid2})
+        conn.rollback()
+
+
+def test_a_bounce_does_not_restart_the_thirty_days(app_db: AppDatabase, tmp_path: Path) -> None:
+    uid, *_ = _agent_finding(app_db, tmp_path)
+    with psycopg.connect(app_db.app_url) as conn:
+        _suppress(conn, uid, "now() + interval '1 day'")
+        conn.commit()
+        _run_all(conn, _LIFT, {"uid": uid})  # nothing crossed: no page needed
+        conn.commit()
+    # Re-suppressed in a later transaction: 30 days from now would end after 30 days from the
+    # first suppression, so it is refused; 29 days fits.
+    exc = _refused(
+        app_db.app_url,
+        _OPERATOR_EVENT + "UPDATE findings SET status = 'suppressed', suppressed_until = now() + "
+        "interval '30 days', suppression_reason = 'y' WHERE uid = %(uid)s",
+        {"uid": uid},
+    )
+    assert "30 days" in str(exc)
+    with psycopg.connect(app_db.app_url) as conn:
+        _suppress(conn, uid, "now() + interval '29 days'")
+        [(kept,)] = conn.execute(
+            "SELECT suppressed_at < now() FROM findings WHERE uid = %s", (uid,)
+        ).fetchall()
+        conn.rollback()
+    assert kept  # the original start, not this transaction's
+
+
+def test_triage_cannot_expire_or_retouch_the_suppression_count(
+    app_db: AppDatabase, tmp_path: Path
+) -> None:
+    uid, *_ = _agent_finding(app_db, tmp_path)
+    exc = _refused(
+        app_db.app_url,
+        "INSERT INTO finding_events (finding_id, actor, kind, new_value) SELECT id, "
+        "'operator:00000000-0000-4000-8000-000000000000', 'status_changed', "
+        '\'{"status": "expired"}\' FROM findings WHERE uid = %(uid)s; '
+        "UPDATE findings SET status = 'expired' WHERE uid = %(uid)s",
+        {"uid": uid},
+    )
+    assert "cannot set a finding to expired" in str(exc)
+    with psycopg.connect(app_db.app_url) as conn:  # the probe: zero the count after suppressing
+        _suppress(conn, uid, "now() + interval '1 day'")
+        _run_all(
+            conn,
+            _OPERATOR_EVENT + "UPDATE findings SET count_at_suppression = 0 WHERE uid = %(uid)s",
+            {"uid": uid},
+        )
+        [(count_then, count)] = conn.execute(
+            "SELECT count_at_suppression, count FROM findings WHERE uid = %s", (uid,)
+        ).fetchall()
+        conn.rollback()
+    assert count_then == count  # the database keeps the count it recorded

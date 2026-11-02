@@ -191,6 +191,10 @@ async def set_finding_status(
         new=new_value,
         reason=reason,
     )
+    if lifted_from is not None and new_status in ("open", "acknowledged"):
+        # Before the update: the database refuses the API role's lift without these pages.
+        prefix = "triage_threshold" if actor.startswith("operator:") else "finding_threshold"
+        await notify_thresholds(conn, finding, lifted_from, now, prefix=prefix)
     row = await db.fetch_one(
         conn,
         "UPDATE findings SET status = %s, suppressed_until = %s, suppression_reason = %s, "
@@ -209,9 +213,6 @@ async def set_finding_status(
     assert row is not None
     finding.update(row)  # the database may set when the suppression began (ADR 0011)
     finding["status"] = new_status
-    if lifted_from is not None and new_status in ("open", "acknowledged"):
-        prefix = "triage_threshold" if actor.startswith("operator:") else "finding_threshold"
-        await notify_thresholds(conn, finding, lifted_from, now, prefix=prefix)
 
 
 async def lock_finding(conn: AsyncConnection[Any], uid: Any) -> dict[str, Any] | None:
@@ -251,8 +252,20 @@ async def operator_finding_status(
             raise TransitionError("suppression needs an expiry and a reason")
         if suppressed_until.tzinfo is None:
             raise TransitionError("suppression expiry needs a UTC offset")
-        # Re-suppressing never extends past 30 days from when the suppression began.
-        began = finding["suppressed_at"] if finding["status"] == "suppressed" else now
+        # Never past 30 days from the finding's first suppression, even after a lift and a
+        # re-suppression: the database enforces the same (ADR 0011).
+        first = await db.fetch_one(
+            conn,
+            "SELECT min(at) AS at FROM finding_events "
+            "WHERE finding_id = %s AND kind = 'suppressed'",
+            (finding["id"],),
+        )
+        candidates = [now]
+        if first is not None and first["at"] is not None:
+            candidates.append(first["at"])
+        if finding["status"] == "suppressed" and finding["suppressed_at"] is not None:
+            candidates.append(finding["suppressed_at"])
+        began = min(candidates)
         if not now < suppressed_until <= began + MAX_SUPPRESSION:
             raise TransitionError(
                 "suppression expiry must be in the future and within 30 days of when the "

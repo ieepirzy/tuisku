@@ -401,3 +401,20 @@ def test_api_role_cannot_hide_a_page(app_db: AppDatabase, bypass: str) -> None:
     assert any(
         n["kind"] == "finding_opened" and n["rule"] == f"{FALCO_CRITICAL}@1" for n in notifier.sent
     )
+
+
+def test_a_detection_observations_link_from_an_earlier_transaction_does_not_count(
+    worked: AppDatabase,
+) -> None:
+    """Like the detection_evidence case, through the other link table."""
+    with psycopg.connect(worked.worker_url) as conn:
+        [(det,)] = conn.execute(_FRESH_DETECTION).fetchall()
+        obs = _an_observation(conn)
+        conn.execute(
+            "INSERT INTO detection_observations (detection_id, observation_id) VALUES (%s, %s)",
+            (det, obs),
+        )
+        conn.commit()  # an old link, left behind
+        with pytest.raises(errors.CheckViolation, match="not linked"):
+            conn.execute(_ROW_KEY, ("member", obs, det))  # type: ignore[arg-type]
+        conn.rollback()

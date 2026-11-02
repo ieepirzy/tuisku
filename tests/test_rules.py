@@ -489,7 +489,7 @@ def test_window_filters_push_static_predicates_and_group_values() -> None:
     rendered = [f.as_string(None) for f in window_filters(trend, env)]  # type: ignore[arg-type]
     assert rendered == [
         "(t.attributes ->> 'metric') = 'harava.destination.refused'",
-        "s.name = 'edge'",
+        "coalesce(r.source_name, s.name) = 'edge'",
         "(t.attributes #>> '{labels,stage}') = 'hop'",
     ]
     assert isinstance(window_filters(trend, env)[0], sql.Composable)

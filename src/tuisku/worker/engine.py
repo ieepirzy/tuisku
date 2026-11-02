@@ -80,7 +80,7 @@ class WorkerConfig:
 class Stats:
     claimed: int = 0
     evaluated: int = 0
-    skipped_stale: int = 0
+    superseded: int = 0
     fired: int = 0
     linked: int = 0
     failed_pairs: int = 0
@@ -117,19 +117,27 @@ _CURRENT: LiteralString = (
     "(t.parse_attempt_id IS NULL OR t.parse_attempt_id = (SELECT c.id FROM parse_attempts c "
     "WHERE c.raw_record_id = t.raw_record_id AND c.status = 'ok' ORDER BY c.id DESC LIMIT 1))"
 )
+# A row's `source` is the name its raw record arrived with (ADR 0011): renaming a source later
+# never changes which rules match its evidence. Rows without a raw record (rule output,
+# meta-detections) fall back to the source's current name.
+_SOURCE: LiteralString = "coalesce(r.source_name, s.name)"
+_JOINS: LiteralString = (
+    "LEFT JOIN sources s ON s.id = t.source_id LEFT JOIN raw_records r ON r.id = t.raw_record_id "
+)
 _OBS_COLUMNS: LiteralString = (
-    "SELECT 'observation' AS layer, t.id, t.uid, t.kind, t.source_id, s.name AS source, "
+    "SELECT 'observation' AS layer, t.id, t.uid, t.kind, t.source_id, " + _SOURCE + " AS source, "
     "NULL::text AS evaluator, NULL::text AS authorship, NULL::text AS identity, "
     "NULL::smallint AS severity_id, t.entity_keys, t.attributes, t.event_time, t.received_at, "
     "t.eval_time, t.raw_record_id, t.parse_attempt_id, t.flags, " + _CURRENT + " AS current "
-    "FROM observations t LEFT JOIN sources s ON s.id = t.source_id "
+    "FROM observations t " + _JOINS
 )
 _DET_COLUMNS: LiteralString = (
-    "SELECT 'detection' AS layer, t.id, t.uid, t.kind, t.source_id, s.name AS source, "
+    "SELECT 'detection' AS layer, t.id, t.uid, t.kind, t.source_id, " + _SOURCE + " AS source, "
     "t.evaluator, t.authorship, t.identity, t.severity_id, t.entity_keys, t.attributes, "
     "t.event_time, t.received_at, t.eval_time, t.raw_record_id, t.parse_attempt_id, t.flags, "
     + _CURRENT
-    + " AS current FROM detections t LEFT JOIN sources s ON s.id = t.source_id "
+    + " AS current FROM detections t "
+    + _JOINS
 )
 
 
@@ -162,7 +170,7 @@ def _sql_expr(path: FieldPath, layer: str) -> sql.Composable | None:
     if head == "kind":
         return sql.SQL("t.kind")
     if head == "source":
-        return sql.SQL("s.name")
+        return sql.SQL(_SOURCE)
     if layer == "detection" and head in ("evaluator", "authorship", "identity"):
         return sql.Identifier("t", head)
     if layer == "detection" and head == "severity_id":
@@ -489,10 +497,11 @@ class Worker:
             (f"{self.config.statement_timeout_ms}ms", f"{self.config.lock_timeout_ms}ms"),
         )
         env = await load_row(conn, queue_row)
-        if env is None or not env["current"]:
-            stats.skipped_stale += 1  # a newer parse attempt supersedes this row
-            await self._finish(conn, queue_row, True, [])
+        if env is None:
+            await self._finish(conn, queue_row, True, [])  # cannot happen: rows are never deleted
             return
+        if not env["current"]:
+            await self._superseded(conn, env, stats)
         dead = {
             str(r["rule_id"])
             for r in await db.fetch_all(
@@ -523,6 +532,38 @@ class Worker:
         stats.evaluated += 1
         done = not failures or await self._record_failures(conn, queue_row, env, failures, stats)
         await self._finish(conn, queue_row, done, failures)
+
+    async def _superseded(
+        self, conn: AsyncConnection[Any], env: dict[str, Any], stats: Stats
+    ) -> None:
+        """A queued row whose parse attempt is no longer current.
+
+        Only a reprocessing run may supersede a derivation, and none exists yet, so this is
+        never expected: the database refuses other writers such attempts (ADR 0011). Should it
+        happen, it is not taken as a reason to drop the row silently. It raises a
+        ``tuisku.meta.evaluation_failed`` (subject ``superseded_derivation``), which the
+        tuisku-meta pack pages on, and the row is evaluated anyway. ADR 0006's re-evaluation
+        suppression is built together with the reprocessing path (see ``enqueue``).
+        """
+        stats.superseded += 1
+        log.error(
+            "%s %s was superseded by a parse attempt no reprocessing run wrote; "
+            "evaluating it anyway",
+            env["layer"],
+            env["id"],
+        )
+        await meta.record_evaluation_failed(
+            conn,
+            source_id=env["source_id"],
+            source_name=env["source"],
+            rule_id="superseded_derivation",
+            details={
+                "row": _row_ref(env),
+                "reason": "parse attempt superseded outside reprocessing",
+            },
+            now=self.clock(),
+        )
+        env["current"] = True
 
     async def _evaluate_pair_with_retries(
         self, conn: AsyncConnection[Any], m: Match, env: dict[str, Any], stats: Stats

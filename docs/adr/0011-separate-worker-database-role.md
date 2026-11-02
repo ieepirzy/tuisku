@@ -28,24 +28,36 @@ able to forge rule output or firing keys.
   built into revisions 0001 and 0002, which had not been merged or deployed, so both revisions
   stay expand-only.
 - **What the API role can write**, and nothing else:
-  - `raw_records`, `raw_duplicates`, `parse_attempts`, `observations`: `INSERT`.
-  - `detections`: `INSERT` of sensor detections. Of `tuisku`-evaluated rows, only its own
+  - `raw_records`, `raw_duplicates`: `INSERT`. Each raw record stores the source name it
+    arrived with (`source_name`), and rules match on that name.
+  - `parse_attempts`, `observations`: `INSERT` only together with their record (a trigger):
+    an attempt only for a raw record inserted in the same transaction, and an observation only
+    for an attempt of the same raw record from the same transaction. So the API role cannot
+    supersede a stored record's derivation and make its rows stale.
+  - `detections`: `INSERT` of sensor detections, under the same same-transaction rule as
+    observations. Of `tuisku`-evaluated rows, only its own
     ingest meta-detections: kinds `source_limit_exceeded`, `source_rate_limited` and
     `invalid_envelope`, with a source, identity equal to the kind, and the current 5-minute
     bucket by the database clock (a trigger).
-  - `detection_observations`: `INSERT` of links to sensor detections only (a trigger).
-  - `evaluation_queue`: `INSERT` only.
+  - `detection_observations`: `INSERT` only of links between a sensor detection and an
+    observation of the same parse attempt, both from the same transaction (a trigger).
+  - `evaluation_queue`: `INSERT` of `observation_id`, `detection_id` and `enqueued_at` only.
   - `meta_counters`: `SELECT`, `INSERT`, `UPDATE` (the breach-count upsert).
-  - `sources`, `source_tokens`: full DML, for administration.
+  - `sources`: `SELECT`, `INSERT`, `UPDATE (disabled_at)`. `source_tokens`: `SELECT`,
+    `INSERT`, `UPDATE (revoked_at, last_used_at)`. Neither can be deleted, and sources are
+    renamed only by the owner.
   - `operator_tokens`: `SELECT`, `INSERT`, `UPDATE`, never `DELETE`; person-bound and approve
     tokens stay owner-only (ADR 0005).
   - `findings`: `UPDATE` of the triage columns only (`status`, `suppressed_until`,
     `suppression_reason`, `suppressed_at`, `count_at_suppression`, `updated_at`).
   - `incidents`: `UPDATE` of `status`, `disposition` and `updated_at` only.
     For both tables a trigger refuses any other change and any update of a resolved, expired or
-    closed row. It requires a matching operator event inserted in the same transaction. It sets
-    a new suppression's start and count itself, and caps every suppression at 30 days from when
-    it began.
+    closed row. It requires a matching operator event inserted in the same transaction. Triage
+    may set a finding only to `open`, `acknowledged`, `resolved` or `suppressed`, never
+    `expired`. The trigger sets a suppression's count itself. It caps every suppression at
+    30 days from the finding's first suppression, so a lift and re-suppress does not restart the
+    clock. Lifting a suppression requires that its threshold pages (`triage_threshold:`) were
+    inserted in the same transaction.
   - `finding_events`, `incident_events`: `INSERT` with an `operator:` actor only (a trigger).
   - `notifications`: `INSERT` with the dedupe-key prefixes triage emits only
     (`operator_escalation:` and `triage_threshold:`) (a trigger).
@@ -58,7 +70,10 @@ able to forge rule output or firing keys.
   `finding_link:`, `escalation:`, `incident_opened:`, `overflow_group:`, `dead_letter:` and the
   rest), and the worker's meta kinds (`evaluation_failed`, `notification_undeliverable`) in any
   bucket.
-- **The worker role** writes all of the above that the API cannot. Its name is fixed in the
+- **The worker role** writes all of the above that the API cannot. A queued row whose parse
+  attempt was superseded is never dropped as stale: no reprocessing run exists yet, so the
+  worker raises a `tuisku.meta.evaluation_failed` (subject `superseded_derivation`) and
+  evaluates the row anyway. Its name is fixed in the
   trigger functions at migration time, like the grants.
 - **Second line of defence.** A firing key of any kind is accepted only when its detection is
   rule output of the key's rule, and is linked to the key's row by a link inserted in the same

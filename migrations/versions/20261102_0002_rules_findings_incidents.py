@@ -337,26 +337,9 @@ $$;
 # the second line of defence):
 # - it points at a tuisku detection whose identity is the key's rule;
 # - for every kind, the detection is linked to the key's row (detection_observations or
-#   detection_evidence) by a link inserted in this very transaction. A row whose inserting
-#   transaction is still in progress and that we can see can only be our own (another session's
-#   uncommitted rows are invisible), so its xmin, widened to 64 bits with the current epoch,
-#   must have pg_xact_status() 'in progress'.
+#   detection_evidence) by a link inserted in this very transaction
+#   (tuisku_xmin_is_current(), from revision 0001).
 FIRING_IDENTITY_FUNCTION_SQL = """
-CREATE FUNCTION tuisku_xmin_is_current(x xid) RETURNS boolean
-LANGUAGE plpgsql STABLE
-SET search_path = pg_catalog
-AS $$
-DECLARE
-    cur      bigint := pg_current_xact_id()::text::bigint;
-    full_xid bigint := ((cur >> 32) << 32) + x::text::bigint;
-BEGIN
-    IF full_xid - cur > 2147483648 THEN
-        full_xid := full_xid - 4294967296;  -- the xid is from the previous epoch
-    END IF;
-    RETURN full_xid >= 3 AND pg_xact_status(full_xid::text::xid8) = 'in progress';
-END
-$$;
-
 CREATE FUNCTION tuisku_check_firing_identity() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog
@@ -436,10 +419,16 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
 DECLARE
-    began timestamptz;
+    began     timestamptz;
+    threshold integer;
 BEGIN
     IF public.tuisku_is_worker() THEN
         RETURN NEW;
+    END IF;
+    -- Triage sets these states only; expiry is the worker's.
+    IF NEW.status NOT IN ('open', 'acknowledged', 'resolved', 'suppressed') THEN
+        RAISE EXCEPTION 'triage cannot set a finding to % (ADR 0011)', NEW.status
+            USING ERRCODE = 'insufficient_privilege';
     END IF;
     IF (to_jsonb(NEW) - {_sql_array(FINDING_TRIAGE_COLUMNS)})
        IS DISTINCT FROM (to_jsonb(OLD) - {_sql_array(FINDING_TRIAGE_COLUMNS)}) THEN
@@ -452,17 +441,38 @@ BEGIN
     END IF;
     IF NEW.status = 'suppressed' THEN
         IF OLD.status = 'suppressed' THEN
-            NEW.suppressed_at := OLD.suppressed_at;
             NEW.count_at_suppression := OLD.count_at_suppression;
         ELSE
-            NEW.suppressed_at := now();
             NEW.count_at_suppression := OLD.count;
         END IF;
-        began := NEW.suppressed_at;
+        -- The 30 days run from the finding's first suppression ever, so lifting and
+        -- re-suppressing (a bounce) never restarts the clock. The operator event for this
+        -- change is already written, so the earliest one is never later than now().
+        SELECT min(e.at) INTO began FROM public.finding_events e
+        WHERE e.finding_id = NEW.id AND e.kind = 'suppressed';
+        began := least(coalesce(began, now()), coalesce(OLD.suppressed_at, now()), now());
+        NEW.suppressed_at := began;
         IF NEW.suppressed_until IS NULL OR NEW.suppressed_until > began + interval '30 days' THEN
             RAISE EXCEPTION 'a suppression ends within 30 days of when it began (ADR 0007)'
                 USING ERRCODE = 'insufficient_privilege';
         END IF;
+    END IF;
+    -- Lifting a suppression pages for every threshold crossed while it held (ADR 0007): those
+    -- notifications must be in this transaction already, so a lift (or a lift and
+    -- re-suppress) can never swallow them.
+    IF OLD.status = 'suppressed' AND NEW.status IN ('open', 'acknowledged') THEN
+        FOREACH threshold IN ARRAY ARRAY[10, 100, 1000] LOOP
+            IF OLD.count_at_suppression < threshold AND threshold <= OLD.count
+               AND NOT EXISTS (
+                   SELECT 1 FROM public.notifications n
+                   WHERE n.dedupe_key = 'triage_threshold:' || NEW.uid || ':' || threshold
+                     AND public.tuisku_xmin_is_current(n.xmin)
+               )
+            THEN
+                RAISE EXCEPTION 'lifting a suppression pages threshold % first (ADR 0007)',
+                    threshold USING ERRCODE = 'insufficient_privilege';
+            END IF;
+        END LOOP;
     END IF;
     IF NOT EXISTS (
         SELECT 1 FROM public.finding_events e
@@ -592,7 +602,7 @@ def downgrade() -> None:
     )
     op.execute(
         "DROP FUNCTION tuisku_force_event_time(), tuisku_check_firing_identity(), "
-        "tuisku_xmin_is_current(xid), tuisku_events_operator_only(), "
+        "tuisku_events_operator_only(), "
         "tuisku_findings_triage_guard(), tuisku_incidents_triage_guard(), "
         "tuisku_notifications_prefix_guard()"
     )
