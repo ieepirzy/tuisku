@@ -1,0 +1,357 @@
+[
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {
+          "flags": [
+            "log_type_inferred"
+          ],
+          "unmapped": {
+            "community_id": "1:J2yH/q0MfiSWWwgElbeSQG+C6TY=",
+            "email_dest": [],
+            "peer_descr": "zeek",
+            "suppress_for": 3600.0
+          }
+        },
+        "authorship": "builtin",
+        "entity_keys": [
+          "ip:198.51.100.9",
+          "ip:10.0.0.5"
+        ],
+        "event_time": "2023-09-18T06:13:40+00:00",
+        "explanation": {
+          "actions": [
+            "Notice::ACTION_LOG"
+          ],
+          "dst": "10.0.0.5",
+          "log": "notice",
+          "msg": "198.51.100.9 appears to be guessing SSH passwords (seen in 30 connections).",
+          "n": 30,
+          "note": "SSH::Password_Guessing",
+          "p": 22,
+          "sensor": "zeek",
+          "src": "198.51.100.9",
+          "sub": "Sampled servers:  10.0.0.5"
+        },
+        "identity": "zeek:notice:SSH::Password_Guessing",
+        "kind": "zeek.notice",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "engine": "zeek",
+          "log": "notice",
+          "note": "SSH::Password_Guessing"
+        },
+        "severity": 3,
+        "title": "Zeek notice: SSH::Password_Guessing"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "community_uid": "1:J2yH/q0MfiSWWwgElbeSQG+C6TY=",
+            "protocol_name": "tcp",
+            "protocol_num": 6,
+            "uid": "CHhAvVGS1DHFjwGM9"
+          },
+          "dst_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 22
+          },
+          "src_endpoint": {
+            "ip": "198.51.100.9",
+            "port": 4444
+          }
+        },
+        "community_id": "1:J2yH/q0MfiSWWwgElbeSQG+C6TY=",
+        "correlation": {
+          "zeek.uid": [
+            "CHhAvVGS1DHFjwGM9"
+          ]
+        },
+        "entity_keys": [
+          "ip:198.51.100.9",
+          "ip:10.0.0.5"
+        ],
+        "event_time": "2023-09-18T06:13:40+00:00",
+        "flags": [
+          "connection_context",
+          "log_type_inferred"
+        ],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {}
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {
+          "flags": [
+            "log_type_inferred"
+          ],
+          "unmapped": {
+            "email_dest": [],
+            "peer_descr": "zeek",
+            "suppress_for": 3600.0
+          }
+        },
+        "authorship": "builtin",
+        "entity_keys": [
+          "ip:198.51.100.9"
+        ],
+        "event_time": "2023-09-18T06:14:00+00:00",
+        "explanation": {
+          "actions": [
+            "Notice::ACTION_LOG"
+          ],
+          "log": "notice",
+          "msg": "198.51.100.9 scanned at least 15 unique ports of host 10.0.0.5 in 0m5s",
+          "note": "Scan::Port_Scan",
+          "sensor": "zeek",
+          "src": "198.51.100.9",
+          "sub": "remote"
+        },
+        "identity": "zeek:notice:Scan::Port_Scan",
+        "kind": "zeek.notice",
+        "observation_refs": [],
+        "rule_ref": {
+          "engine": "zeek",
+          "log": "notice",
+          "note": "Scan::Port_Scan"
+        },
+        "severity": 3,
+        "title": "Zeek notice: Scan::Port_Scan"
+      }
+    ],
+    "observations": []
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {
+          "flags": [
+            "log_type_inferred"
+          ],
+          "unmapped": {
+            "file_desc": "http://www.example.com/a.exe",
+            "file_mime_type": "application/x-dosexec",
+            "fuid": "F2xow8TIkvHG4Zz41",
+            "suppress_for": 3600.0
+          }
+        },
+        "authorship": "builtin",
+        "entity_keys": [
+          "ip:203.0.113.20",
+          "ip:192.0.2.10"
+        ],
+        "event_time": "2023-09-18T06:14:00+00:00",
+        "explanation": {
+          "actions": [
+            "Notice::ACTION_LOG"
+          ],
+          "dst": "192.0.2.10",
+          "log": "notice",
+          "msg": "Malware Hash Registry Detection rate: 42%",
+          "note": "TeamCymruMalwareHashRegistry::Match",
+          "p": 80,
+          "sensor": "zeek",
+          "src": "203.0.113.20",
+          "sub": "https://www.virustotal.com/gui/search/x"
+        },
+        "identity": "zeek:notice:TeamCymruMalwareHashRegistry::Match",
+        "kind": "zeek.notice",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "engine": "zeek",
+          "log": "notice",
+          "note": "TeamCymruMalwareHashRegistry::Match"
+        },
+        "severity": 3,
+        "title": "Zeek notice: TeamCymruMalwareHashRegistry::Match"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "community_uid": "1:49bYOrrydo4sgWpC7HXQF42rt9I=",
+            "protocol_name": "tcp",
+            "protocol_num": 6,
+            "uid": "CfileNotice000001"
+          },
+          "dst_endpoint": {
+            "ip": "192.0.2.10",
+            "port": 49175
+          },
+          "src_endpoint": {
+            "ip": "203.0.113.20",
+            "port": 80
+          }
+        },
+        "community_id": "1:49bYOrrydo4sgWpC7HXQF42rt9I=",
+        "correlation": {
+          "zeek.fuid": [
+            "F2xow8TIkvHG4Zz41"
+          ],
+          "zeek.uid": [
+            "CfileNotice000001"
+          ]
+        },
+        "entity_keys": [
+          "ip:203.0.113.20",
+          "ip:192.0.2.10"
+        ],
+        "event_time": "2023-09-18T06:14:00+00:00",
+        "flags": [
+          "connection_context",
+          "log_type_inferred"
+        ],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {}
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {
+          "flags": [
+            "log_type_ambiguous",
+            "log_type_inferred"
+          ],
+          "log_type_candidates": [
+            "dns",
+            "notice"
+          ],
+          "unmapped": {
+            "query": "odd.example.com",
+            "suppress_for": 3600.0
+          }
+        },
+        "authorship": "builtin",
+        "entity_keys": [
+          "ip:192.0.2.10",
+          "ip:203.0.113.53"
+        ],
+        "event_time": "2023-09-18T06:14:01+00:00",
+        "explanation": {
+          "actions": [
+            "Notice::ACTION_LOG"
+          ],
+          "log": "notice",
+          "msg": "site-extended notice carrying a dns field",
+          "note": "Site::Suspicious_Query",
+          "sensor": "zeek"
+        },
+        "identity": "zeek:notice:Site::Suspicious_Query",
+        "kind": "zeek.notice",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "engine": "zeek",
+          "log": "notice",
+          "note": "Site::Suspicious_Query"
+        },
+        "severity": 3,
+        "title": "Zeek notice: Site::Suspicious_Query"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "community_uid": "1:cH0+u5VRL/KvgvMy+DYz+RejGzg=",
+            "protocol_name": "udp",
+            "protocol_num": 17,
+            "uid": "CsiteNotice000001"
+          },
+          "dst_endpoint": {
+            "ip": "203.0.113.53",
+            "port": 53
+          },
+          "src_endpoint": {
+            "ip": "192.0.2.10",
+            "port": 49300
+          }
+        },
+        "community_id": "1:cH0+u5VRL/KvgvMy+DYz+RejGzg=",
+        "correlation": {
+          "zeek.uid": [
+            "CsiteNotice000001"
+          ]
+        },
+        "entity_keys": [
+          "ip:192.0.2.10",
+          "ip:203.0.113.53"
+        ],
+        "event_time": "2023-09-18T06:14:01+00:00",
+        "flags": [
+          "connection_context",
+          "log_type_inferred",
+          "log_type_ambiguous"
+        ],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {}
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {
+          "unmapped": {
+            "_path": "notice_alarm",
+            "suppress_for": 3600.0
+          }
+        },
+        "authorship": "builtin",
+        "entity_keys": [
+          "ip:198.51.100.9"
+        ],
+        "event_time": "2023-09-18T06:14:02+00:00",
+        "explanation": {
+          "actions": [
+            "Notice::ACTION_ALARM"
+          ],
+          "log": "notice",
+          "msg": "198.51.100.9 scanned at least 25 unique hosts on port 22/tcp in 0m30s",
+          "note": "Scan::Address_Scan",
+          "p": 22,
+          "sensor": "zeek",
+          "src": "198.51.100.9",
+          "sub": "local"
+        },
+        "identity": "zeek:notice:Scan::Address_Scan",
+        "kind": "zeek.notice",
+        "observation_refs": [],
+        "rule_ref": {
+          "engine": "zeek",
+          "log": "notice",
+          "note": "Scan::Address_Scan"
+        },
+        "severity": 3,
+        "title": "Zeek notice: Scan::Address_Scan"
+      }
+    ],
+    "observations": []
+  }
+]

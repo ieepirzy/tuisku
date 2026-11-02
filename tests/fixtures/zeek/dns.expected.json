@@ -1,0 +1,183 @@
+[
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "answers": [
+            {
+              "rdata": "example.com",
+              "ttl": 3324
+            },
+            {
+              "rdata": "192.0.2.80",
+              "ttl": 10
+            }
+          ],
+          "connection_info": {
+            "community_uid": "1:ktGSSHxVRGE5LR0LsXJNJxiLm9A=",
+            "protocol_name": "udp",
+            "protocol_num": 17,
+            "uid": "C8a1bQ2xYdns00001"
+          },
+          "dst_endpoint": {
+            "ip": "10.0.0.2",
+            "port": 53
+          },
+          "query": {
+            "class": "C_INTERNET",
+            "hostname": "www.example.com",
+            "packet_uid": 45444,
+            "type": "A"
+          },
+          "rcode": "NOERROR",
+          "rcode_id": 0,
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 53211
+          }
+        },
+        "community_id": "1:ktGSSHxVRGE5LR0LsXJNJxiLm9A=",
+        "correlation": {
+          "zeek.uid": [
+            "C8a1bQ2xYdns00001"
+          ]
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:10.0.0.2",
+          "domain:www.example.com",
+          "ip:192.0.2.80"
+        ],
+        "event_time": "2023-09-18T06:13:33.100000+00:00",
+        "flags": [
+          "log_type_inferred"
+        ],
+        "kind": "dns.answer",
+        "ocsf_class_uid": 4003,
+        "unmapped": {
+          "AA": false,
+          "RA": true,
+          "RD": true,
+          "TC": false,
+          "Z": 0,
+          "qclass": 1,
+          "qtype": 1,
+          "rejected": false,
+          "rtt": 0.012
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "community_uid": "1:CmYpC27wf62utZQ5Em2SwTsgXEA=",
+            "protocol_name": "udp",
+            "protocol_num": 17,
+            "uid": "C8a1bQ2xYdns00002"
+          },
+          "dst_endpoint": {
+            "ip": "10.0.0.2",
+            "port": 53
+          },
+          "query": {
+            "hostname": "Missing.Example.",
+            "packet_uid": 1,
+            "type": "AAAA"
+          },
+          "rcode": "NXDOMAIN",
+          "rcode_id": 3,
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 53212
+          }
+        },
+        "community_id": "1:CmYpC27wf62utZQ5Em2SwTsgXEA=",
+        "correlation": {
+          "zeek.uid": [
+            "C8a1bQ2xYdns00002"
+          ]
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:10.0.0.2",
+          "domain:missing.example"
+        ],
+        "event_time": "2023-09-18T06:13:41+00:00",
+        "flags": [
+          "log_type_inferred"
+        ],
+        "kind": "dns.answer",
+        "ocsf_class_uid": 4003,
+        "unmapped": {
+          "RA": true,
+          "RD": true,
+          "qtype": 28,
+          "rejected": false
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "answers": [
+            {
+              "rdata": "2001:db8::53"
+            }
+          ],
+          "connection_info": {
+            "community_uid": "1:ZWWWI23KUXMnKffAGlmGBJFWfiE=",
+            "protocol_name": "udp",
+            "protocol_num": 17,
+            "uid": "C8a1bQ2xYdns00003"
+          },
+          "dst_endpoint": {
+            "ip": "10.0.0.2",
+            "port": 53
+          },
+          "query": {
+            "hostname": "bad_label.example",
+            "packet_uid": 2
+          },
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 53213
+          }
+        },
+        "community_id": "1:ZWWWI23KUXMnKffAGlmGBJFWfiE=",
+        "correlation": {
+          "zeek.uid": [
+            "C8a1bQ2xYdns00003"
+          ]
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:10.0.0.2",
+          "ip:2001:db8::53"
+        ],
+        "event_time": "2023-09-18T06:13:33.300000+00:00",
+        "flags": [
+          "log_type_inferred"
+        ],
+        "kind": "dns.answer",
+        "ocsf_class_uid": 4003,
+        "unmapped": {
+          "TTLs": [
+            1.0,
+            2.0
+          ]
+        }
+      }
+    ]
+  }
+]

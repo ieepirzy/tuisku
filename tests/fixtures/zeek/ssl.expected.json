@@ -1,0 +1,149 @@
+[
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "community_uid": "1:LBo+Y+FKVasQET6xukDcXRc+xmY=",
+            "uid": "CsWnPx3sslUid0001"
+          },
+          "dst_endpoint": {
+            "ip": "198.51.100.43",
+            "port": 443
+          },
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 50110
+          },
+          "tls": {
+            "cipher": "TLS_AES_128_GCM_SHA256",
+            "sni": "calendar.example.com",
+            "version": "TLSv13"
+          }
+        },
+        "community_id": "1:LBo+Y+FKVasQET6xukDcXRc+xmY=",
+        "correlation": {
+          "zeek.uid": [
+            "CsWnPx3sslUid0001"
+          ]
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:198.51.100.43",
+          "domain:calendar.example.com"
+        ],
+        "event_time": "2023-09-18T06:13:34+00:00",
+        "flags": [
+          "proto_assumed_tcp",
+          "log_type_inferred"
+        ],
+        "kind": "tls.handshake",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "curve": "x25519",
+          "established": true,
+          "resumed": false,
+          "ssl_history": "CsiI"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "reported_community_uid": "1:unverifiedSensorValue000000=",
+            "uid": "CsWnPx3sslUid0002"
+          },
+          "dst_endpoint": {
+            "ip": "198.51.100.44",
+            "port": 443
+          },
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 50111
+          },
+          "tls": {
+            "sni": "failed.example.org"
+          }
+        },
+        "community_id": "1:unverifiedSensorValue000000=",
+        "correlation": {
+          "zeek.uid": [
+            "CsWnPx3sslUid0002"
+          ]
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:198.51.100.44",
+          "domain:failed.example.org"
+        ],
+        "event_time": "2023-09-18T08:13:46+00:00",
+        "flags": [
+          "community_id_unverified",
+          "log_type_inferred"
+        ],
+        "kind": "tls.handshake",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "community_id": "1:unverifiedSensorValue000000=",
+          "established": false,
+          "last_alert": "handshake_failure",
+          "resumed": false,
+          "ssl_history": "C"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "uid": "CdtlsUid000000001"
+          },
+          "dst_endpoint": {
+            "ip": "198.51.100.45",
+            "port": 443
+          },
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 50112
+          },
+          "tls": {
+            "cipher": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+            "version": "DTLSv12"
+          }
+        },
+        "community_id": null,
+        "correlation": {
+          "zeek.uid": [
+            "CdtlsUid000000001"
+          ]
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:198.51.100.45"
+        ],
+        "event_time": "2023-09-18T06:13:34.500000+00:00",
+        "flags": [
+          "log_type_inferred"
+        ],
+        "kind": "tls.handshake",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "established": true,
+          "resumed": false,
+          "ssl_history": "CsxknGIi"
+        }
+      }
+    ]
+  }
+]

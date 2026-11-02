@@ -1,0 +1,9 @@
+not json at all
+["a","json","array"]
+{"ts":1695017670.0,"note":"Scan::Port_Scan"
+{"ts":NaN,"note":"Scan::Port_Scan"}
+{"ts":1695017670.0,"note":12345,"msg":"note is not a string"}
+{"ts":1695017670.0,"note":"Bad Note With Spaces; DROP TABLE","msg":"x"}
+{"ts":1695017670.0,"name":["not","a","string"],"addl":"x"}
+{"ts":1e300,"uid":{"nested":"object"},"id.orig_h":12,"id.orig_p":null,"id.resp_h":"203.0.113.20","id.resp_p":true,"proto":"tcp","conn_state":"SF"}
+{"ts":1695017671.0,"uid":"CscopedIpv600001","id.orig_h":"fe80::1%eth0","id.orig_p":546,"id.resp_h":"ff02::1:2","id.resp_p":547,"proto":"udp","conn_state":"S0","history":"D","community_id":"1:x"}

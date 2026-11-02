@@ -1,0 +1,141 @@
+[
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "community_uid": "1:49bYOrrydo4sgWpC7HXQF42rt9I=",
+            "uid": "CHhAvVGS1DHFjwGM9"
+          },
+          "dst_endpoint": {
+            "ip": "203.0.113.20",
+            "port": 80
+          },
+          "http_request": {
+            "http_method": "POST",
+            "length": 137,
+            "referrer": "http://www.example.com/",
+            "url": {
+              "hostname": "www.example.com",
+              "path": "/upload/form",
+              "port": 8080,
+              "query_string": "id=7&x=y"
+            },
+            "user_agent": "Mozilla/5.0",
+            "version": "1.1"
+          },
+          "http_response": {
+            "code": 200,
+            "length": 212,
+            "message": "OK"
+          },
+          "src_endpoint": {
+            "ip": "192.0.2.10",
+            "port": 49175
+          }
+        },
+        "community_id": "1:49bYOrrydo4sgWpC7HXQF42rt9I=",
+        "correlation": {
+          "zeek.fuid": [
+            "F2xow8TIkvHG4Zz41",
+            "F3second000000002",
+            "FupLoad0000000001"
+          ],
+          "zeek.uid": [
+            "CHhAvVGS1DHFjwGM9"
+          ]
+        },
+        "entity_keys": [
+          "ip:192.0.2.10",
+          "ip:203.0.113.20",
+          "domain:www.example.com"
+        ],
+        "event_time": "2023-09-18T06:13:33.900000+00:00",
+        "flags": [
+          "proto_assumed_tcp",
+          "log_type_inferred"
+        ],
+        "kind": "http.request",
+        "ocsf_class_uid": 4002,
+        "unmapped": {
+          "orig_fuids": [
+            "FupLoad0000000001"
+          ],
+          "orig_mime_types": [
+            "text/plain"
+          ],
+          "origin": "-",
+          "resp_fuids": [
+            "F2xow8TIkvHG4Zz41",
+            "F3second000000002"
+          ],
+          "resp_mime_types": [
+            "text/xml",
+            "text/xml"
+          ],
+          "tags": [],
+          "trans_depth": 1
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "community_uid": "1:fk9C1PD/an7cjlFXvD3sUMpBF7I=",
+            "uid": "CHttpIpHost000001"
+          },
+          "dst_endpoint": {
+            "ip": "203.0.113.20",
+            "port": 80
+          },
+          "http_request": {
+            "http_method": "GET",
+            "length": 0,
+            "url": {
+              "hostname": "203.0.113.20",
+              "path": "/"
+            },
+            "version": "1.1"
+          },
+          "http_response": {
+            "code": 404,
+            "length": 0,
+            "message": "Not Found"
+          },
+          "src_endpoint": {
+            "ip": "192.0.2.10",
+            "port": 49176
+          }
+        },
+        "community_id": "1:fk9C1PD/an7cjlFXvD3sUMpBF7I=",
+        "correlation": {
+          "zeek.uid": [
+            "CHttpIpHost000001"
+          ]
+        },
+        "entity_keys": [
+          "ip:192.0.2.10",
+          "ip:203.0.113.20"
+        ],
+        "event_time": "2023-09-18T06:13:45.500000+00:00",
+        "flags": [
+          "proto_assumed_tcp",
+          "log_type_inferred"
+        ],
+        "kind": "http.request",
+        "ocsf_class_uid": 4002,
+        "unmapped": {
+          "tags": [],
+          "trans_depth": 2
+        }
+      }
+    ]
+  }
+]
