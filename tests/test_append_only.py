@@ -551,6 +551,7 @@ def test_runtime_roles_cannot_create_temp_tables(populated: AppDatabase, role: s
         "tuisku_operator_revocation_guard",
         "tuisku_apply_operator_revocation",
         "tuisku_force_creation_time",
+        "tuisku_force_request_time",
     ],
 )
 def test_trigger_functions_refuse_to_run_on_other_tables(
@@ -719,6 +720,19 @@ def test_an_operator_revocation_cannot_be_undone(populated: AppDatabase) -> None
         (
             "INSERT INTO source_tokens (source_id, token_sha256, created_at) "
             "SELECT id, %s, '2019-01-01' FROM sources LIMIT 1 RETURNING created_at = now()",
+            True,
+        ),
+        # Round eleven: the request tables too.
+        (
+            "INSERT INTO source_admin_requests (source_id, action, requested_at) "
+            "SELECT id, 'disable', '2019-01-01' FROM sources WHERE %s IS NOT NULL LIMIT 1 "
+            "RETURNING requested_at = now()",
+            True,
+        ),
+        (
+            "INSERT INTO token_revocations (token_id, revoked_at) "
+            "SELECT id, '2019-01-01' FROM source_tokens WHERE %s IS NOT NULL LIMIT 1 "
+            "RETURNING revoked_at = now()",
             True,
         ),
     ],
