@@ -1,4 +1,4 @@
-"""Finding fingerprints and advisory-lock keys (ADR 0007).
+"""Finding fingerprints and worker lock keys (ADR 0007).
 
 The fingerprint is the SHA-256 of the RFC 8785 (JCS) canonical JSON array
 ``["finding", <rule id>, <rule rev>, [<group_by values in order>]]``; the overflow finding's is
@@ -66,7 +66,7 @@ def overflow_fingerprint(rule_id: str, rev: int) -> bytes:
 
 
 def lock_key(*parts: str | int | bytes) -> int:
-    """A signed 64-bit key for ``pg_advisory_xact_lock`` from a canonical tuple of parts."""
+    """A signed 64-bit key for a ``group_locks`` row from a canonical tuple of parts."""
     encoded = [p.hex() if isinstance(p, bytes) else p for p in parts]
     digest = hashlib.sha256(canonical(["lock", *encoded])).digest()
     return int.from_bytes(digest[:8], "big", signed=True)

@@ -648,3 +648,49 @@ def test_the_drain_delivers_the_most_severe_page_first(fresh_database_url: str) 
     # Then the rest by age.
     run_async(url, lambda conn: notify.drain(conn, notifier, T, limit=1000))
     assert len(notifier.sent) == 601
+
+
+# --- round eight: bounded waits for the whole connection; a stuck step is skipped ------------
+
+
+def test_the_worker_connection_has_lock_and_statement_timeouts(fresh_database_url: str) -> None:
+    worker = Worker(
+        rule_set=builtin_rules(),
+        clock=Clock(T),
+        notifier=RecordingNotifier(),
+        config=WorkerConfig(lock_timeout_ms=1234, statement_timeout_ms=5678),
+    )
+
+    async def settings(conn: Any) -> tuple[str, str]:
+        await worker.run_once(conn)
+        lock = await (await conn.execute("SHOW lock_timeout")).fetchone()
+        statement = await (await conn.execute("SHOW statement_timeout")).fetchone()
+        return lock[0], statement[0]
+
+    assert run_async(fresh_database_url, settings) == ("1234ms", "5678ms")
+
+
+def test_a_step_stuck_on_a_lock_is_skipped_and_the_pass_goes_on(fresh_database_url: str) -> None:
+    """The backlog check's counter row is held elsewhere: that step times out and is skipped,
+    while claiming, evaluating and the drain carry on."""
+    url = fresh_database_url
+    ingest(url, "h", "harava", lines((T, "agents")))
+    hold = psycopg.connect(url)
+    try:
+        hold.execute(
+            "INSERT INTO meta_counters (source_id, kind, subject, bucket_start, count) "
+            "VALUES (NULL, 'tuisku.meta.backlog', 'queue', tuisku_current_bucket(), 0)"
+        )
+        notifier = RecordingNotifier()
+        worker = Worker(
+            rule_set=builtin_rules(),
+            clock=Clock(T + timedelta(minutes=10)),  # the queue is 10 minutes behind
+            notifier=notifier,
+            config=WorkerConfig(lock_timeout_ms=200, backlog_after=timedelta(minutes=5)),
+        )
+        stats = run_async(url, worker.run_once)
+        assert stats.backlog == 0  # skipped: its counter row is held
+        assert stats.claimed >= 1 and "finding_opened" in notifier.kinds()
+    finally:
+        hold.rollback()
+        hold.close()

@@ -48,6 +48,8 @@ WORKING_TABLES = (
     "evaluation_dead_letter_rules",
     "evaluation_attempts",
 )
+# Worker-only lock tables: the API role gets no privilege at all on them.
+LOCK_TABLES = ("worker_locks", "group_locks")
 # What the API role (ingest and triage) may write here; it reads everything (ADR 0011).
 # The API role writes no notifications at all: the pages triage causes are written by owner
 # triggers (SECURITY DEFINER) below.
@@ -282,6 +284,18 @@ CREATE TABLE notification_deliveries (
 );
 CREATE INDEX notification_deliveries_notification_idx
     ON notification_deliveries (notification_id, status);
+
+-- The worker's own locks (ADR 0011). Postgres checks no privilege on advisory locks, so any
+-- role could hold an advisory key and stall the worker. Row locks on these worker-only tables
+-- need UPDATE, which only the worker role has. `worker_locks` holds singletons (the notification
+-- drain); `group_locks` serializes each rule's groups and cap checks, one row per key, locked
+-- in sorted key order.
+CREATE TABLE worker_locks (
+    name text PRIMARY KEY CHECK (char_length(name) BETWEEN 1 AND 64)
+);
+CREATE TABLE group_locks (
+    key text PRIMARY KEY CHECK (char_length(key) BETWEEN 1 AND 64)
+);
 
 -- Failure counts per (queue row, rule) (ADR 0006): lease expiries and crashes never count, and
 -- uncounted transient retries are capped.
@@ -730,9 +744,10 @@ def upgrade() -> None:
     # The worker writes rule output, firing keys, links, findings and incidents (ADR 0011).
     op.execute(f'GRANT SELECT, INSERT ON {", ".join(EVIDENCE_TABLES)} TO "{worker}"')
     op.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON {", ".join(WORKING_TABLES)} TO "{worker}"')
+    op.execute(f'GRANT SELECT, INSERT, UPDATE ON {", ".join(LOCK_TABLES)} TO "{worker}"')
     op.execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "{worker}"')
-    # The API reads all of it and writes only triage: status updates, operator events and
-    # escalation notifications.
+    # The API reads all of it (but the lock tables) and writes only triage: status updates and
+    # operator events. Owner triggers write the pages triage causes.
     op.execute(f'GRANT SELECT ON {", ".join(EVIDENCE_TABLES + WORKING_TABLES)} TO "{app}"')
     op.execute(f'GRANT INSERT ON {", ".join(API_INSERT)} TO "{app}"')
     op.execute(f'GRANT UPDATE ({", ".join(FINDING_TRIAGE_COLUMNS)}) ON findings TO "{app}"')
@@ -747,7 +762,8 @@ def downgrade() -> None:
     op.execute("DROP INDEX detection_evidence_observation_id_idx")
     op.execute("DROP INDEX detection_evidence_detection_ref_id_idx")
     op.execute(
-        "DROP TABLE evaluation_attempts, evaluation_dead_letter_rules, notification_deliveries, "
+        "DROP TABLE worker_locks, group_locks, evaluation_attempts, evaluation_dead_letter_rules, "
+        "notification_deliveries, "
         "notifications, rule_firings, incident_findings, "
         "incident_events, finding_overflow_groups, finding_detections, finding_events, findings, "
         "incidents, pack_loads"

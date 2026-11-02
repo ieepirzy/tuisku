@@ -1,8 +1,8 @@
 """Fold firings and linked rows into findings and incidents (ADRs 0006 and 0007).
 
 Every function here runs inside the caller's evaluation savepoint, after the caller took the
-group and rule advisory locks, so two workers cannot both open a finding for a fingerprint or
-overshoot a cap.
+group and rule locks (rows of group_locks), so two workers cannot both open a finding for a
+fingerprint or overshoot a cap.
 """
 
 from __future__ import annotations

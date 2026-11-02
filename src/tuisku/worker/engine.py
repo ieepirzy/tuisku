@@ -9,7 +9,8 @@ One pass (:meth:`Worker.run_once`):
    again, so a crashed worker loses nothing.
 3. **Evaluate** each row in its own transaction. Rows of a non-current parse attempt are
    skipped. The worker matches every rule (pure Python), takes
-   ``pg_advisory_xact_lock`` for every group key and rule key the row touches, **in sorted
+   a row lock in the worker-only ``group_locks`` table for every group key and rule key the
+   row touches (never an advisory lock, which any role could hold; ADR 0011), **in sorted
    order**, then evaluates each *(row, rule)* pair under its own ``SAVEPOINT``. Deadlocks,
    serialization failures and lock timeouts are retried without counting as attempts. A pair
    that still fails is rolled back to its savepoint; after 5 counted attempts it is
@@ -28,7 +29,7 @@ expires mid-evaluation therefore never writes a second detection or pages twice.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, LiteralString
@@ -94,7 +95,7 @@ class Stats:
 
 
 class _Transient(Exception):
-    """The row's advisory locks could not be taken in time; nothing was evaluated."""
+    """The row's group locks could not be taken in time; nothing was evaluated."""
 
     def __init__(self, rules: Sequence[Rule]) -> None:
         super().__init__("lock timeout")
@@ -374,15 +375,37 @@ class Worker:
         """Sweep, claim one batch, evaluate it and deliver notifications. ``conn`` must be in
         autocommit mode; every step manages its own transaction."""
         stats = Stats()
-        stats.backlog = await self.check_backlog(conn)
-        stats.expired_findings = await self.sweep(conn)
-        for queue_row in await self.claim(conn):
+        await self.set_timeouts(conn)
+        stats.backlog = await self._step("backlog check", self.check_backlog(conn), 0)
+        stats.expired_findings = await self._step("sweep", self.sweep(conn), 0)
+        for queue_row in await self._step("claim", self.claim(conn), []):
             stats.claimed += 1
             await self._process(conn, queue_row, stats)
-        stats.delivered = await notify.drain(
-            conn, self.notifier, self.clock(), backoff=self.config.notify_backoff
+        stats.delivered = await self._step(
+            "drain",
+            notify.drain(conn, self.notifier, self.clock(), backoff=self.config.notify_backoff),
+            0,
         )
         return stats
+
+    async def set_timeouts(self, conn: AsyncConnection[Any]) -> None:
+        """For the whole connection: no step of the worker waits on a lock, or runs, without a
+        bound. A lock held elsewhere (a compromised API holding rows) delays one step; it never
+        stalls a pass (ADR 0011)."""
+        await conn.execute(
+            "SELECT set_config('lock_timeout', %s, false), "
+            "set_config('statement_timeout', %s, false)",
+            (f"{self.config.lock_timeout_ms}ms", f"{self.config.statement_timeout_ms}ms"),
+        )
+
+    async def _step[T](self, name: str, work: Awaitable[T], fallback: T) -> T:
+        """Run one step of a pass; a lock or statement timeout skips it until the next pass, so
+        the other steps (and the backlog check that reports it) still run."""
+        try:
+            return await work
+        except (errors.LockNotAvailable, errors.QueryCanceled) as exc:
+            log.warning("worker %s skipped this pass: %s", name, type(exc).__name__)
+            return fallback
 
     async def run_until_idle(self, conn: AsyncConnection[Any], max_passes: int = 100) -> Stats:
         total = Stats()
@@ -500,7 +523,7 @@ class Worker:
             async with conn.transaction():
                 await self._evaluate_row(conn, queue_row, stats)
         except _Transient as exc:
-            # The advisory locks timed out, so the transaction is gone and nothing was
+            # The group locks timed out, so the transaction is gone and nothing was
             # evaluated. Record an uncounted conflict per rule (capped) in a new one.
             stats.retried_later += 1
             async with conn.transaction():
@@ -512,8 +535,15 @@ class Worker:
                 await self._finish(conn, queue_row, done, failures)
 
     async def _lock(self, conn: AsyncConnection[Any], keys: Iterable[int]) -> None:
-        for key in sorted(keys):  # sorted: two workers can never deadlock on these
-            await conn.execute("SELECT pg_advisory_xact_lock(%s)", (key,))
+        """Serialize on each group and rule key: a row lock on the worker-only group_locks
+        table, held to the end of the transaction. Never an advisory lock, which any role could
+        hold (ADR 0011). Sorted, so two workers can never deadlock on these."""
+        for key in sorted(keys):
+            text = str(key)
+            await conn.execute(
+                "INSERT INTO group_locks (key) VALUES (%s) ON CONFLICT (key) DO NOTHING", (text,)
+            )
+            await conn.execute("SELECT 1 FROM group_locks WHERE key = %s FOR UPDATE", (text,))
 
     async def _finish(
         self,

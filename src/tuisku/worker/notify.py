@@ -58,7 +58,6 @@ async def emit(
 
 
 ALERT_AFTER_FAILURES = 10
-_DRAIN_LOCK = 0x7475_6973_6B75_6E6F  # one drainer at a time; rows are never locked or updated
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,8 +96,16 @@ async def drain(
     """
     delivered = 0
     async with conn.transaction():
-        got = await db.fetch_one(conn, "SELECT pg_try_advisory_xact_lock(%s) AS ok", (_DRAIN_LOCK,))
-        if got is None or not got["ok"]:
+        # One drainer at a time, by a row lock on the worker-only worker_locks table: an advisory
+        # lock would be takeable by any role (ADR 0011).
+        await conn.execute(
+            "INSERT INTO worker_locks (name) VALUES ('drain') ON CONFLICT (name) DO NOTHING"
+        )
+        got = await db.fetch_one(
+            conn,
+            "SELECT name FROM worker_locks WHERE name = 'drain' FOR UPDATE SKIP LOCKED",
+        )
+        if got is None:
             return 0  # another worker is draining
         rows = await db.fetch_all(
             conn,

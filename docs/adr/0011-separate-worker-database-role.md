@@ -44,7 +44,9 @@ able to forge rule output or firing keys.
     observation of the same parse attempt, both from the same transaction (a trigger).
   - `evaluation_queue`: `INSERT` of `observation_id`, `detection_id` and `enqueued_at` only,
     and only for an observation or detection inserted in the same transaction (a trigger).
-  - `meta_counters`: `SELECT`, `INSERT`, `UPDATE` (the breach-count upsert).
+  - `meta_counters`: `SELECT`, `INSERT`, `UPDATE (count)` (the breach-count upsert), only for
+    its own ingest kinds with a source (a trigger). Row-level security hides every other
+    counter from it, so it cannot row-lock the worker's.
   - `sources`: `SELECT`, `INSERT`, `UPDATE (disabled_at)`. `source_tokens`: `SELECT`,
     `INSERT`, `UPDATE (revoked_at, last_used_at)`. Neither can be deleted, and sources are
     renamed only by the owner.
@@ -83,6 +85,23 @@ able to forge rule output or firing keys.
   run anywhere but on its own table. PUBLIC has no `TEMP` on the database, and the migration
   stops if a runtime role still has it. So no role can attach a Tuisku trigger function,
   least of all a `SECURITY DEFINER` pager, to a table of its own.
+- **No table locks, no advisory locks.** `LOCK TABLE` above `ROW EXCLUSIVE` needs table-level
+  `UPDATE`, `DELETE` or `TRUNCATE`. The API role holds none of them on any table: every
+  `UPDATE` it has is column-level (`sources.disabled_at`, `source_tokens.revoked_at` and
+  `last_used_at`, `operator_tokens.revoked_at`, `meta_counters.count`, and the triage columns of
+  `findings` and `incidents`). Postgres checks no privilege on advisory locks, so the worker uses
+  none. The drain takes a row lock on the worker-only `worker_locks` table. Group and rule
+  serialization take row locks on the worker-only `group_locks` table (one row per key, in
+  sorted key order), which needs `UPDATE` that only the worker role has. The worker connection
+  runs with `lock_timeout` and `statement_timeout`. A row the API role holds for triage
+  therefore delays only what touches that row, within the lock timeout; other work proceeds,
+  and the backlog check pages if the queue falls behind. `group_locks` keeps one small row per
+  group key ever seen. The migration lock (`tuisku migrate`) is still an advisory lock: a
+  compromised API process could delay a migration, but no evaluation or page.
+- **A database of its own.** `REVOKE TEMP ON DATABASE ... FROM PUBLIC` is database-wide, so
+  Tuisku expects a database of its own. Any role may still create large objects
+  (`lo_create()`), and the API role may insert evidence as fast as Postgres accepts it.
+  Deployments set a disk quota, or at least disk alerts.
 - **Delivery order.** The drain delivers the most severe notification first, then the oldest,
   so a backlog of lesser pages never holds back a newer high-severity one.
 - **The worker role** writes all of the above that the API cannot. A queued row whose parse

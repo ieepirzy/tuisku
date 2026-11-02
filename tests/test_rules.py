@@ -464,9 +464,10 @@ def test_advisory_locks_are_taken_in_sorted_order() -> None:
 
     calls: list[int] = []
 
-    class FakeConn:
-        async def execute(self, query: str, params: tuple[int]) -> None:
-            calls.append(params[0])
+    class FakeConn:  # records the group_locks key of each row lock taken
+        async def execute(self, query: str, params: tuple[str]) -> None:
+            if "FOR UPDATE" in query:
+                calls.append(int(params[0]))
 
     worker = Worker(
         rule_set=load_rule_set([], builtin=[PACKS]),

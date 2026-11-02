@@ -17,7 +17,14 @@ from psycopg import errors
 from tests.conftest import AppDatabase
 from tests.support import query
 from tests.test_append_only_rules import FALCO_CRITICAL, _falco_line
-from tests.worker_support import Clock, RecordingNotifier, builtin_rules, ingest, run_worker
+from tests.worker_support import (
+    Clock,
+    RecordingNotifier,
+    builtin_rules,
+    ingest,
+    run_async,
+    run_worker,
+)
 from tuisku.rules.packs import RuleSet
 from tuisku.store.ingest import Transport
 
@@ -664,3 +671,116 @@ def test_revision_0002_trigger_functions_refuse_other_tables(
         with pytest.raises(errors.InsufficientPrivilege, match="used out of place"):
             conn.execute(fire)  # type: ignore[arg-type]
         conn.rollback()
+
+
+# --- round eight: the worker's locks are not the API role's to hold --------------------------
+
+_OLD_DRAIN_KEY = 0x7475_6973_6B75_6E6F  # the advisory key the drain used before round eight
+
+
+@pytest.mark.parametrize("table", ["worker_locks", "group_locks"])
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "SELECT * FROM {t}",
+        "SELECT * FROM {t} FOR UPDATE",
+        "SELECT * FROM {t} FOR KEY SHARE",
+        "INSERT INTO {t} VALUES ('drain')",
+        "LOCK TABLE {t} IN ACCESS SHARE MODE",
+        "LOCK TABLE {t} IN ROW EXCLUSIVE MODE",
+        "LOCK TABLE {t} IN ACCESS EXCLUSIVE MODE",
+    ],
+)
+def test_the_api_role_cannot_touch_the_worker_locks(
+    app_db: AppDatabase, table: str, statement: str
+) -> None:
+    exc = _refused(app_db.app_url, statement.format(t=table))
+    assert "permission denied" in str(exc)
+
+
+def test_the_worker_ignores_every_advisory_lock_the_api_role_holds(app_db: AppDatabase) -> None:
+    """The round-eight probe: the API role holds the old drain key and the victim's old group
+    and rule keys. Evaluation and the drain go on, because the worker no longer uses them."""
+    from tuisku.rules.fingerprint import lock_key
+    from tuisku.rules.match import match
+    from tuisku.worker import fold
+    from tuisku.worker.engine import load_row
+
+    victim, victim_uid = _falco_victim(app_db)
+    rules = builtin_rules()
+    [falco] = [r for r in rules.rules if r.id == FALCO_CRITICAL]
+    with psycopg.connect(app_db.worker_url) as conn:
+        [(queue_id,)] = conn.execute(
+            "SELECT id FROM evaluation_queue WHERE detection_id = %s", (victim,)
+        ).fetchall()
+
+    async def envelope(conn: Any) -> Any:
+        return await load_row(conn, {"observation_id": None, "detection_id": victim})
+
+    env = run_async(app_db.worker_url, envelope)
+    m = match(falco, env)
+    assert m is not None and queue_id
+    keys = [
+        _OLD_DRAIN_KEY,
+        lock_key("rule", falco.id),
+        lock_key("group", falco.id, falco.rev, fold.fingerprint_for(falco, m.group_values)),
+    ]
+    hold = psycopg.connect(app_db.app_url, autocommit=True)  # a compromised API process
+    try:
+        for key in keys:
+            hold.execute("SELECT pg_advisory_lock(%s)", (key,))
+        notifier = RecordingNotifier()
+        run_worker(
+            app_db.worker_url,
+            rules,
+            Clock(AT + timedelta(minutes=1)),
+            notifier,
+            lock_timeout_ms=500,
+        )
+        assert _paged_for(app_db, notifier, victim_uid)  # evaluated and delivered
+    finally:
+        hold.close()
+
+
+def test_the_worker_progresses_while_the_api_role_holds_rows(
+    app_db: AppDatabase, tmp_path: Path
+) -> None:
+    """The API role (it may update triage columns) holds a finding's row lock in an open
+    transaction. Rows for other groups still page; the blocked one waits within its lock
+    timeout, is retried, and the backlog check pages that the queue is behind. Once released,
+    the blocked row pages too."""
+    uid, caller, rules, source = _agent_finding(app_db, tmp_path)
+    victim, victim_uid = _falco_victim(app_db)
+    ingest(app_db.app_url, source, "harava", [_refusal(AT + timedelta(minutes=2), caller)])
+    hold = psycopg.connect(app_db.app_url)  # an open transaction
+    try:
+        hold.execute("SELECT 1 FROM findings WHERE uid = %s FOR UPDATE", (uid,)).fetchall()
+        from tuisku.worker.engine import Worker, WorkerConfig
+
+        notifier = RecordingNotifier()
+        w = Worker(
+            rule_set=rules,
+            clock=Clock(AT + timedelta(minutes=30)),
+            notifier=notifier,
+            config=WorkerConfig(lock_timeout_ms=200, backlog_after=timedelta(minutes=5)),
+        )
+        import time
+
+        started = time.monotonic()
+        for _ in range(3):
+            run_async(app_db.worker_url, w.run_once)
+        # Each wait on the held row is bounded by the 200 ms lock timeout, not by how long the
+        # API role keeps its transaction open.
+        assert time.monotonic() - started < 8
+        assert _paged_for(app_db, notifier, victim_uid)  # progress elsewhere
+        blocked = [n for n in notifier.sent if n.get("finding_uid") == uid]
+        assert blocked == []  # still waiting on the held row
+        assert "tuisku_backlog" in notifier.kinds()  # and the queue's lag pages
+    finally:
+        hold.rollback()
+        hold.close()
+    notifier = RecordingNotifier()
+    run_worker(app_db.worker_url, rules, Clock(AT + timedelta(minutes=31)), notifier)
+    assert [n["kind"] for n in notifier.sent if n.get("finding_uid") == uid] == [
+        "finding_occurrence"
+    ]
