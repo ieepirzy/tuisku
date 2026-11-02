@@ -150,9 +150,8 @@ therefore cannot forge rule output or firing keys (ADR 0011). A firing key is al
 only for a row linked to its detection in the same transaction.
 
 Triggers set the timestamps of the histories, link tables, firing keys, pack loads and
-deliveries to the database clock. Grants are made by the revision that creates each table, and
-revision 0003 adds the worker role on revision 0001's tables, so set both variables before the
-first `tuisku migrate`. For an existing database, run the same `GRANT` statements by hand. With
+deliveries to the database clock. Grants for both roles are made by the revision that creates
+each table, so set both variables before the first `tuisku migrate`. For an existing database, run the same `GRANT` statements by hand. With
 `TUISKU_APP_ROLE` unset no grants are made, and the owning role does everything; that suits
 local development only. Independently of roles, triggers reject `UPDATE`, `DELETE` and
 `TRUNCATE` on evidence tables for every role, owner included.

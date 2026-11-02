@@ -47,6 +47,9 @@ able to forge rule output or firing keys.
   a row done.
 - In single-role development setups (`TUISKU_APP_ROLE` unset), the owner does everything, as
   before.
+- **In the first revisions.** Neither revision 0001 nor 0002 had been merged or deployed, so the
+  split is built into both, and both stay expand-only. There is no later revision that revokes
+  privileges.
 
 ## Consequences
 

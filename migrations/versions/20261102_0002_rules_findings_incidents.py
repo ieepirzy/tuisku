@@ -383,6 +383,28 @@ CREATE TRIGGER rule_firings_identity BEFORE INSERT ON rule_firings
 """
 
 
+# ADR 0011: events with a system or rule actor are the worker's alone; the API writes only
+# operator events. tuisku_is_worker() comes from revision 0001.
+EVENT_ACTOR_SQL = """
+CREATE FUNCTION tuisku_events_operator_only() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF NEW.actor NOT LIKE 'operator:%' AND NOT public.tuisku_is_worker() THEN
+        RAISE EXCEPTION 'only the worker role writes % events (ADR 0011)', NEW.actor
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER finding_events_actor BEFORE INSERT ON finding_events
+    FOR EACH ROW EXECUTE FUNCTION tuisku_events_operator_only();
+CREATE TRIGGER incident_events_actor BEFORE INSERT ON incident_events
+    FOR EACH ROW EXECUTE FUNCTION tuisku_events_operator_only();
+"""
+
+
 def _role(name: str) -> str | None:
     role = context.config.attributes.get(name)
     if not role:
@@ -401,6 +423,7 @@ def upgrade() -> None:
             f"FOR EACH ROW EXECUTE FUNCTION tuisku_force_event_time('{column}')"
         )
     op.execute(FIRING_IDENTITY_FUNCTION_SQL)
+    op.execute(EVENT_ACTOR_SQL)
     # The evidence trigger function comes from revision 0001.
     for table in EVIDENCE_TABLES:
         op.execute(
@@ -442,5 +465,5 @@ def downgrade() -> None:
     )
     op.execute(
         "DROP FUNCTION tuisku_force_event_time(), tuisku_check_firing_identity(), "
-        "tuisku_xmin_is_current(xid)"
+        "tuisku_xmin_is_current(xid), tuisku_events_operator_only()"
     )
