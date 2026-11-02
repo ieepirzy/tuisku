@@ -110,8 +110,10 @@ cannot make a stored record's rows stale or attach rows to it. The migrations al
 `UPDATE (revoked_at, last_used_at)` respectively. Renames go through the owner CLI, and each raw
 record keeps the source name it arrived with in `source_name`. They grant
 `SELECT, INSERT, UPDATE` on `operator_tokens` and `meta_counters`, and
-`INSERT (observation_id, detection_id, enqueued_at)` on `evaluation_queue`, plus `USAGE` on
-sequences. Only the worker role claims, updates or deletes queue rows, or touches
+`INSERT (observation_id, detection_id, enqueued_at)` on `evaluation_queue` (a trigger accepts
+only observations and detections inserted in the same transaction), plus `USAGE` on
+sequences. A trigger sets each raw record's `source_name` from `sources`, whatever the writer
+supplied. Only the worker role claims, updates or deletes queue rows, or touches
 `evaluation_dead_letter`.
 
 The worker role alone writes rule output, so a compromised API process cannot forge it. Only the

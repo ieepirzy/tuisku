@@ -438,6 +438,46 @@ CREATE TRIGGER observations_same_transaction BEFORE INSERT ON observations
 CREATE TRIGGER detections_same_transaction BEFORE INSERT ON detections
     FOR EACH ROW EXECUTE FUNCTION tuisku_derivation_same_transaction();
 
+-- Ingest enqueues only what it has just written (ADR 0011): for any role but the worker and the
+-- owner, a queue row may name only an observation or detection inserted in this transaction.
+-- So the API role cannot flood the queue with existing rows, or re-enqueue them.
+CREATE FUNCTION tuisku_queue_same_transaction() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF public.tuisku_is_worker() THEN
+        RETURN NEW;
+    END IF;
+    IF NOT (
+        EXISTS (SELECT 1 FROM public.observations o WHERE o.id = NEW.observation_id
+                AND public.tuisku_xmin_is_current(o.xmin))
+        OR EXISTS (SELECT 1 FROM public.detections d WHERE d.id = NEW.detection_id
+                   AND public.tuisku_xmin_is_current(d.xmin))
+    ) THEN
+        RAISE EXCEPTION 'only rows written in this transaction are enqueued (ADR 0011)'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER evaluation_queue_same_transaction BEFORE INSERT ON evaluation_queue
+    FOR EACH ROW EXECUTE FUNCTION tuisku_queue_same_transaction();
+
+-- A raw record's source_name is the source's name at receipt, set here whatever was supplied,
+-- so evidence keeps the name it arrived with and no writer can fake it (ADR 0011).
+CREATE FUNCTION tuisku_raw_source_name() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    SELECT s.name INTO NEW.source_name FROM public.sources s WHERE s.id = NEW.source_id;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER raw_records_source_name BEFORE INSERT ON raw_records
+    FOR EACH ROW EXECUTE FUNCTION tuisku_raw_source_name();
+
 CREATE FUNCTION tuisku_current_bucket() RETURNS timestamptz
 LANGUAGE sql STABLE
 SET search_path = pg_catalog
@@ -558,5 +598,5 @@ def downgrade() -> None:
         "DROP FUNCTION tuisku_reject_evidence_change(), tuisku_person_tokens_owner_only(), "
         "tuisku_detections_worker_only(), tuisku_rule_links_worker_only(), tuisku_is_worker(), "
         "tuisku_current_bucket(), tuisku_derivation_same_transaction(), "
-        "tuisku_xmin_is_current(xid)"
+        "tuisku_xmin_is_current(xid), tuisku_queue_same_transaction(), tuisku_raw_source_name()"
     )

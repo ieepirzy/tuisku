@@ -139,11 +139,6 @@ def test_app_role_cannot_touch_the_queue_or_delete_counters_and_tokens(
     assert "permission denied" in str(exc)
 
 
-def test_app_role_can_enqueue(populated: AppDatabase) -> None:
-    statement = "INSERT INTO evaluation_queue (observation_id) SELECT max(id) FROM observations"
-    assert _attempt(populated.app_url, statement) is None
-
-
 # --- ADR 0011: only the worker role writes rule output ----------------------------------------
 
 _TUISKU_DETECTION = (
@@ -357,3 +352,45 @@ def test_a_fresh_attempt_cannot_be_pinned_on_another_record(populated: AppDataba
                 (victim, attempt, source_id),
             )
         conn.rollback()
+
+
+# --- round six: the queue takes fresh rows only; raw records name their source ----------------
+
+
+@pytest.mark.parametrize("column", ["observation_id", "detection_id"])
+def test_app_role_cannot_enqueue_existing_rows(populated: AppDatabase, column: str) -> None:
+    table = "observations" if column == "observation_id" else "detections"
+    exc = _attempt(
+        populated.app_url,
+        f"INSERT INTO evaluation_queue ({column}) SELECT id FROM {table} ORDER BY id LIMIT 1",
+    )
+    assert isinstance(exc, errors.InsufficientPrivilege), exc
+    assert "written in this transaction" in str(exc)
+
+
+def test_ingest_still_enqueues_what_it_writes(populated: AppDatabase) -> None:
+    name = f"q{uuid.uuid4().hex[:10]}"
+    token = new_source(populated.app_url, name)
+    with client(populated.app_url) as c:
+        response = post_records(c, name, token, ndjson({"detect": 1, "msg": "fresh"}))
+    assert response.json()["results"][0]["status"] == "accepted"
+    [(queued,)] = query(
+        populated.owner_url,
+        "SELECT count(*) FROM evaluation_queue q JOIN observations o ON o.id = q.observation_id "
+        "JOIN sources s ON s.id = o.source_id WHERE s.name = %s",
+        (name,),
+    )
+    assert queued == 1
+
+
+def test_raw_source_name_is_set_by_the_database(populated: AppDatabase) -> None:
+    with psycopg.connect(populated.app_url) as conn:
+        [(stored, actual)] = conn.execute(
+            "INSERT INTO raw_records (source_id, source_name, token_id, sha256, received_at, "
+            "transport, body, body_size) SELECT s.id, 'forged-name', t.id, "
+            "sha256(gen_random_uuid()::text::bytea), now(), 'ndjson', 'x', 1 FROM sources s "
+            "JOIN source_tokens t ON t.source_id = s.id LIMIT 1 "
+            "RETURNING source_name, (SELECT name FROM sources WHERE id = source_id)"
+        ).fetchall()
+        conn.rollback()
+    assert stored == actual != "forged-name"
