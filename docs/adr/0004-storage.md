@@ -72,7 +72,7 @@ are mutable working objects that keep a history.
    - `observations`, `detections`, and the link tables between them (including
      `detection_evidence`)
    - the histories: `finding_events` and `incident_events`
-   - later, the L4 tables (`hypotheses`, `investigator_sessions`, `tool_calls`, `proposed_actions`, `evidence_requests`)
+   - later, the L4 tables (`hypotheses`, `investigator_sessions`, `investigator_session_events`, `tool_calls`, `proposed_actions`, `evidence_requests`)
 
    Findings and incidents are mutable projections. Every change to one writes a
    `finding_events` or `incident_events` row.
