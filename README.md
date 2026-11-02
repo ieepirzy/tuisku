@@ -156,10 +156,14 @@ With `TUISKU_APP_ROLE` set, migrations grant the app role `SELECT` on evidence t
 attempts only for a raw record inserted in the same transaction, and its observations, sensor
 detections and their links only for an attempt from that transaction. The API role therefore
 cannot make a stored record's rows stale or attach rows to it. The migrations also grant it
-`SELECT, INSERT` on `sources` and `source_tokens`, but only `UPDATE (disabled_at)` and
-`UPDATE (revoked_at, last_used_at)` respectively. Renames go through the owner CLI, and each raw
-record keeps the source name it arrived with in `source_name`. They grant
-`SELECT, INSERT, UPDATE` on `operator_tokens` and `meta_counters`, and
+`SELECT, INSERT` on `sources` and `source_tokens`, with no `UPDATE`: the API role can take no
+row lock (which needs `UPDATE`) on anything the worker references. It disables a source or
+revokes a token by inserting into the append-only `source_admin_requests` or
+`token_revocations`, which an owner trigger applies at once. It records token use in its own
+`source_token_usage` table. Renames go through the owner CLI, and each raw record keeps the
+source name it arrived with in `source_name`. They grant `SELECT, INSERT` and column-level
+`UPDATE` on `operator_tokens (revoked_at)` and `meta_counters (count)`, the API's own tables,
+and
 `INSERT (observation_id, detection_id, enqueued_at)` on `evaluation_queue` (a trigger accepts
 only observations and detections inserted in the same transaction), plus `USAGE` on
 sequences. A trigger sets each raw record's `source_name` from `sources`, whatever the writer
@@ -188,7 +192,13 @@ no grant can stop remain open to any role that can log in:
 - **Unbounded writes:** a compromised API process can still insert evidence, and with it
   queue rows, as fast as Postgres accepts them.
 
-Give the database a disk quota, or at least disk alerts, sized to the retention policy. The
+Migrations also cap the app role (`TUISKU_APP_ROLE_CONNECTION_LIMIT`, 20) and set defaults
+for its `statement_timeout` (30 s) and `idle_in_transaction_session_timeout` (60 s). A session
+can override those timeouts, so they bound mistakes, not attacks. On Postgres 16 and later,
+reserve slots for the worker so an exhausted pool cannot lock it out: set
+`reserved_connections` (for example 3) and `GRANT pg_use_reserved_connections TO
+tuisku_worker`. Give the database a disk quota, or at least disk alerts, sized to the retention
+policy. The
 worker's backlog check (`tuisku.meta.backlog`) pages when the queue or the notification outbox
 falls behind.
 
