@@ -23,10 +23,13 @@ if config.config_file_name is not None and not config.attributes.get("skip_loggi
 
 target_metadata = None
 
-# Revisions read the app role (TUISKU_APP_ROLE) from config.attributes, so they stay
-# importable without a database or settings. `tuisku migrate` sets it already.
+# Revisions read the app and worker roles (TUISKU_APP_ROLE, TUISKU_WORKER_ROLE) from
+# config.attributes, so they stay importable without a database or settings. `tuisku migrate`
+# sets them already.
 if "app_role" not in config.attributes:
     config.attributes["app_role"] = Settings().app_role
+if "worker_role" not in config.attributes:
+    config.attributes["worker_role"] = Settings().worker_role
 
 
 def _database_url(settings: Settings) -> str:
