@@ -1,0 +1,257 @@
+[
+  {
+    "adapter": "harava@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {},
+        "authorship": "builtin",
+        "entity_keys": [
+          "caller:harava/agents"
+        ],
+        "event_time": "2026-11-01T09:14:03.512874+00:00",
+        "explanation": {
+          "check": "outbound guard (harava.outbound)",
+          "sensor": "harava",
+          "why": "Harava found what looks like personal or secret data in URLs the caller asked it to fetch, and refused the request. Harava does not log the URL or the value; the findings are on the referenced observation."
+        },
+        "identity": "harava:outbound_refused",
+        "kind": "harava.outbound_refused",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "engine": "harava",
+          "name": "outbound_refused"
+        },
+        "severity": 4,
+        "title": "Harava refused outbound data"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "asctime": "2026-11-01 09:14:03,512",
+          "caller": "agents",
+          "findings": [
+            {
+              "detector": "email",
+              "encoding": "percent",
+              "location": "query"
+            }
+          ],
+          "level": "WARNING",
+          "logger": "harava.api",
+          "type": "outbound",
+          "urls": 1
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [
+          "caller:harava/agents"
+        ],
+        "event_time": "2026-11-01T09:14:03.512874+00:00",
+        "flags": [],
+        "kind": "harava.refusal",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "stream": "stderr"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "harava@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {},
+        "authorship": "builtin",
+        "entity_keys": [
+          "caller:harava/agents"
+        ],
+        "event_time": "2026-11-01T09:15:40.208001+00:00",
+        "explanation": {
+          "check": "destination policy (harava.destinations), admission stage",
+          "sensor": "harava",
+          "why": "The caller asked Harava to fetch a destination in a refused class (overlay networks and gateways, request catchers, tunnels, local-network names). Harava logs the classes only, never the destination; they are on the referenced observation."
+        },
+        "identity": "harava:destination_refused",
+        "kind": "harava.destination_refused",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "engine": "harava",
+          "name": "destination_refused"
+        },
+        "severity": 4,
+        "title": "Harava refused a destination"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "asctime": "2026-11-01 09:15:40,207",
+          "caller": "agents",
+          "classes": [
+            "capture_sink"
+          ],
+          "level": "WARNING",
+          "logger": "harava.api",
+          "stage": "admission",
+          "type": "destination"
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [
+          "caller:harava/agents"
+        ],
+        "event_time": "2026-11-01T09:15:40.208001+00:00",
+        "flags": [],
+        "kind": "harava.refusal",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "stream": "stderr"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "harava@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "asctime": "2026-11-01 09:30:00,001",
+          "level": "ERROR",
+          "logger": "harava.mcp",
+          "reason": "HARAVA_MCP_API_TOKEN is not a token the API accepts"
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-11-01T09:30:00.001532+00:00",
+        "flags": [],
+        "kind": "harava.mcp_refused_to_serve",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "envelope": {
+            "attrs": {
+              "tag": "harava-mcp"
+            }
+          },
+          "stream": "stderr"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "harava@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "asctime": "2026-11-01 09:31:12,045",
+          "level": "INFO",
+          "logger": "harava.api",
+          "message": "applied migration 0007_frontier"
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-11-01T09:31:12.045700+00:00",
+        "flags": [],
+        "kind": "harava.log",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "stream": "stderr"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "harava@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "asctime": "2026-11-01 09:31:12,045",
+          "level": "INFO",
+          "logger": "harava.api",
+          "message": "partial line wit"
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-11-01T09:31:12.045700+00:00",
+        "flags": [
+          "docker_partial"
+        ],
+        "kind": "harava.log",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "stream": "stderr"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "harava@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "length": 32,
+          "line_type": "fragment"
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-11-01T09:31:12.045800+00:00",
+        "flags": [
+          "possible_continuation",
+          "message_withheld"
+        ],
+        "kind": "harava.unknown",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "stream": "stderr"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "harava@1.0.0",
+    "error": "wrapper time is not a valid RFC 3339 timestamp"
+  },
+  {
+    "adapter": "harava@1.0.0",
+    "error": "docker json-file record has no string 'log'"
+  },
+  {
+    "adapter": "harava@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "length": 39,
+          "level": "INFO",
+          "line_type": "uvicorn"
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-11-01T09:31:12.045700+00:00",
+        "flags": [
+          "message_withheld"
+        ],
+        "kind": "harava.unknown",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "stream": "stderr"
+        }
+      }
+    ]
+  }
+]
