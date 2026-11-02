@@ -1,0 +1,111 @@
+[
+  {
+    "adapter": "zeek@1.0.0",
+    "error": "invalid JSON at position 0"
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "error": "expected a JSON object"
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "error": "invalid JSON at position 43"
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "error": "non-standard JSON constant"
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "error": "notice record has a missing or invalid 'note'"
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "error": "notice record has a missing or invalid 'note'"
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "error": "weird record has a missing or invalid 'name'"
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "protocol_name": "tcp",
+            "protocol_num": 6
+          },
+          "dst_endpoint": {
+            "ip": "203.0.113.20"
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [
+          "ip:203.0.113.20"
+        ],
+        "event_time": null,
+        "flags": [
+          "invalid_ts"
+        ],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "conn_state": "SF",
+          "id.orig_h": 12,
+          "id.orig_p": null,
+          "id.resp_p": true,
+          "ts": 1e+300,
+          "uid": {
+            "nested": "object"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "flag_history": "D",
+            "protocol_name": "udp",
+            "protocol_num": 17,
+            "uid": "CscopedIpv600001"
+          },
+          "dst_endpoint": {
+            "ip": "ff02::1:2",
+            "port": 547
+          },
+          "src_endpoint": {
+            "port": 546
+          }
+        },
+        "community_id": null,
+        "correlation": {
+          "zeek.uid": [
+            "CscopedIpv600001"
+          ]
+        },
+        "entity_keys": [
+          "ip:ff02::1:2"
+        ],
+        "event_time": "2023-09-18T06:14:31+00:00",
+        "flags": [
+          "community_id_invalid"
+        ],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "community_id": "1:x",
+          "conn_state": "S0",
+          "id.orig_h": "fe80::1%eth0"
+        }
+      }
+    ]
+  }
+]

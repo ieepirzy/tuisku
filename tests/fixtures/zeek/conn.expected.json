@@ -1,0 +1,238 @@
+[
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "community_uid": "1:49bYOrrydo4sgWpC7HXQF42rt9I=",
+            "flag_history": "ShADadFf",
+            "protocol_name": "tcp",
+            "protocol_num": 6,
+            "uid": "CHhAvVGS1DHFjwGM9"
+          },
+          "dst_endpoint": {
+            "ip": "203.0.113.20",
+            "port": 80
+          },
+          "duration": 40430,
+          "src_endpoint": {
+            "ip": "192.0.2.10",
+            "port": 49175
+          },
+          "traffic": {
+            "bytes_in": 94102,
+            "bytes_out": 3536,
+            "packets_in": 72,
+            "packets_out": 38
+          }
+        },
+        "community_id": "1:49bYOrrydo4sgWpC7HXQF42rt9I=",
+        "correlation": {
+          "zeek.uid": [
+            "CHhAvVGS1DHFjwGM9"
+          ]
+        },
+        "entity_keys": [
+          "ip:192.0.2.10",
+          "ip:203.0.113.20"
+        ],
+        "event_time": "2023-09-18T06:13:33.324862+00:00",
+        "flags": [],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "community_id": "1:49bYOrrydo4sgWpC7HXQF42rt9I=",
+          "conn_state": "SF",
+          "local_orig": true,
+          "local_resp": false,
+          "missed_bytes": 0,
+          "orig_ip_bytes": 5056,
+          "resp_ip_bytes": 97000,
+          "service": "http"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "community_uid": "1:ktGSSHxVRGE5LR0LsXJNJxiLm9A=",
+            "flag_history": "Dd",
+            "protocol_name": "udp",
+            "protocol_num": 17,
+            "uid": "C1a2b3c4d5e6f7g8h"
+          },
+          "dst_endpoint": {
+            "ip": "10.0.0.2",
+            "port": 53
+          },
+          "duration": 12,
+          "src_endpoint": {
+            "ip": "10.0.0.5",
+            "port": 53211
+          },
+          "traffic": {
+            "bytes_in": 49,
+            "bytes_out": 33,
+            "packets_in": 1,
+            "packets_out": 1
+          }
+        },
+        "community_id": "1:ktGSSHxVRGE5LR0LsXJNJxiLm9A=",
+        "correlation": {
+          "zeek.uid": [
+            "C1a2b3c4d5e6f7g8h"
+          ]
+        },
+        "entity_keys": [
+          "ip:10.0.0.5",
+          "ip:10.0.0.2"
+        ],
+        "event_time": "2023-09-18T06:13:40.000001+00:00",
+        "flags": [
+          "community_id_mismatch"
+        ],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "community_id": "1:AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "conn_state": "SF",
+          "service": "dns"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "community_uid": "1:OumxTbOcGKdViryxg/HzoqX/p+M=",
+            "protocol_name": "icmp",
+            "protocol_num": 1,
+            "uid": "CicmpUid0000000001"
+          },
+          "dst_endpoint": {
+            "ip": "203.0.113.20",
+            "port": 0
+          },
+          "src_endpoint": {
+            "ip": "192.0.2.10",
+            "port": 8
+          },
+          "traffic": {
+            "packets_in": 1,
+            "packets_out": 1
+          }
+        },
+        "community_id": "1:OumxTbOcGKdViryxg/HzoqX/p+M=",
+        "correlation": {
+          "zeek.uid": [
+            "CicmpUid0000000001"
+          ]
+        },
+        "entity_keys": [
+          "ip:192.0.2.10",
+          "ip:203.0.113.20"
+        ],
+        "event_time": "2023-09-18T06:15:00+00:00",
+        "flags": [],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "conn_state": "OTH"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "community_uid": "1:RYG3Msb11GthNt1OYXJouPzmrvA=",
+            "flag_history": "Sr",
+            "protocol_name": "tcp",
+            "protocol_num": 6,
+            "uid": "CmillisUid00000001"
+          },
+          "dst_endpoint": {
+            "ip": "2001:db8:0:0::2",
+            "port": 443
+          },
+          "src_endpoint": {
+            "ip": "2001:db8::1",
+            "port": 40000
+          }
+        },
+        "community_id": "1:RYG3Msb11GthNt1OYXJouPzmrvA=",
+        "correlation": {
+          "zeek.uid": [
+            "CmillisUid00000001"
+          ]
+        },
+        "entity_keys": [
+          "ip:2001:db8::1",
+          "ip:2001:db8::2"
+        ],
+        "event_time": "2023-09-18T06:16:40+00:00",
+        "flags": [],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "conn_state": "REJ"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "flag_history": "S",
+            "protocol_name": "tcp",
+            "protocol_num": 6,
+            "uid": "CbadTypes000000001"
+          },
+          "dst_endpoint": {
+            "ip": "203.0.113.20"
+          }
+        },
+        "community_id": null,
+        "correlation": {
+          "zeek.uid": [
+            "CbadTypes000000001"
+          ]
+        },
+        "entity_keys": [
+          "ip:203.0.113.20"
+        ],
+        "event_time": "2023-09-18T06:18:20.500000+00:00",
+        "flags": [],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "conn_state": "S0",
+          "id.orig_h": "not-an-ip",
+          "id.orig_p": "80",
+          "id.resp_p": 70000,
+          "orig_bytes": -5,
+          "resp_bytes": "lots"
+        }
+      }
+    ]
+  }
+]

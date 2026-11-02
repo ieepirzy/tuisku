@@ -1,0 +1,2 @@
+{"ts":1695017621.0,"uid":"CHhAvVGS1DHFjwGM9","id.orig_h":"198.51.100.9","id.orig_p":4444,"id.resp_h":"10.0.0.5","id.resp_p":22,"name":"inappropriate_FIN","addl":"","notice":false,"peer":"zeek","source":"TCP"}
+{"ts":"2023-09-18T06:14:02.25Z","name":"truncated_header","notice":true,"peer":"zeek"}

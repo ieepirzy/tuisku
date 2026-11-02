@@ -1,0 +1,127 @@
+[
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "community_uid": "1:49bYOrrydo4sgWpC7HXQF42rt9I=",
+            "protocol_name": "tcp",
+            "protocol_num": 6,
+            "uid": "CHhAvVGS1DHFjwGM9"
+          },
+          "dst_endpoint": {
+            "ip": "203.0.113.20",
+            "port": 80
+          },
+          "duration": 1500,
+          "src_endpoint": {
+            "ip": "192.0.2.10",
+            "port": 49175
+          }
+        },
+        "community_id": "1:49bYOrrydo4sgWpC7HXQF42rt9I=",
+        "correlation": {
+          "zeek.uid": [
+            "CHhAvVGS1DHFjwGM9"
+          ]
+        },
+        "entity_keys": [
+          "ip:192.0.2.10",
+          "ip:203.0.113.20"
+        ],
+        "event_time": "2023-09-18T06:13:33.324862+00:00",
+        "flags": [],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {}
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "community_uid": "1:49bYOrrydo4sgWpC7HXQF42rt9I=",
+            "protocol_name": "tcp",
+            "protocol_num": 6,
+            "uid": "CHhAvVGS1DHFjwGM9"
+          },
+          "dst_endpoint": {
+            "ip": "203.0.113.20",
+            "port": 80
+          },
+          "src_endpoint": {
+            "ip": "192.0.2.10",
+            "port": 49175
+          }
+        },
+        "community_id": "1:49bYOrrydo4sgWpC7HXQF42rt9I=",
+        "correlation": {
+          "zeek.uid": [
+            "CHhAvVGS1DHFjwGM9"
+          ]
+        },
+        "entity_keys": [
+          "ip:192.0.2.10",
+          "ip:203.0.113.20"
+        ],
+        "event_time": "2023-09-18T06:13:33.324862+00:00",
+        "flags": [],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "conn_state": "SF",
+          "query": "looks.like.dns.example"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "connection_info": {
+            "community_uid": "1:49bYOrrydo4sgWpC7HXQF42rt9I=",
+            "flag_history": "ShADadFf",
+            "protocol_name": "tcp",
+            "protocol_num": 6,
+            "uid": "CHhAvVGS1DHFjwGM9"
+          },
+          "dst_endpoint": {
+            "ip": "203.0.113.20",
+            "port": 80
+          },
+          "src_endpoint": {
+            "ip": "192.0.2.10",
+            "port": 49175
+          }
+        },
+        "community_id": "1:49bYOrrydo4sgWpC7HXQF42rt9I=",
+        "correlation": {
+          "zeek.uid": [
+            "CHhAvVGS1DHFjwGM9"
+          ]
+        },
+        "entity_keys": [
+          "ip:192.0.2.10",
+          "ip:203.0.113.20"
+        ],
+        "event_time": "2023-09-18T06:13:33.500000+00:00",
+        "flags": [],
+        "kind": "network.flow",
+        "ocsf_class_uid": 4001,
+        "unmapped": {
+          "_path": "dns",
+          "conn_state": "SF"
+        }
+      }
+    ]
+  }
+]

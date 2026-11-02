@@ -1,0 +1,84 @@
+[
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {
+          "log_type_candidates": [
+            "conn",
+            "dns"
+          ]
+        },
+        "community_id": "1:l9eRqCJDLmOeCnTOMzcMnLIObso=",
+        "correlation": {
+          "zeek.uid": [
+            "CambiguousUid0001"
+          ]
+        },
+        "entity_keys": [
+          "ip:192.0.2.10",
+          "ip:203.0.113.20"
+        ],
+        "event_time": "2023-09-18T06:14:10+00:00",
+        "flags": [
+          "log_type_ambiguous"
+        ],
+        "kind": "zeek.unknown",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "conn_state": "SF",
+          "id.orig_h": "192.0.2.10",
+          "id.orig_p": 49175,
+          "id.resp_h": "203.0.113.20",
+          "id.resp_p": 53,
+          "proto": "udp",
+          "query": "both.example.com",
+          "ts": 1695017650.0,
+          "uid": "CambiguousUid0001"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "zeek@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {
+          "flags": [
+            "log_type_ambiguous"
+          ],
+          "log_type_candidates": [
+            "notice",
+            "weird"
+          ],
+          "unmapped": {
+            "addl": "x",
+            "name": "odd"
+          }
+        },
+        "authorship": "builtin",
+        "entity_keys": [],
+        "event_time": "2023-09-18T06:14:11+00:00",
+        "explanation": {
+          "log": "notice",
+          "msg": "a notice that also looks like a weird",
+          "note": "Weird::Activity",
+          "sensor": "zeek"
+        },
+        "identity": "zeek:notice:Weird::Activity",
+        "kind": "zeek.notice",
+        "observation_refs": [],
+        "rule_ref": {
+          "engine": "zeek",
+          "log": "notice",
+          "note": "Weird::Activity"
+        },
+        "severity": 3,
+        "title": "Zeek notice: Weird::Activity"
+      }
+    ],
+    "observations": []
+  }
+]

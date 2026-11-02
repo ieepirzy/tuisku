@@ -1,0 +1,7 @@
+{"ts":1695017660.0,"uid":"CsshUid0000000001","id.orig_h":"198.51.100.9","id.orig_p":4444,"id.resp_h":"10.0.0.5","id.resp_p":22,"version":2,"auth_success":false,"auth_attempts":3,"client":"SSH-2.0-OpenSSH_9.6","server":"SSH-2.0-OpenSSH_9.6"}
+{"ts":"yesterday","something":"else"}
+{}
+{"ts":1695017661.0,"uid":"CkrbUid0000000001","id.orig_h":"10.0.0.5","id.orig_p":49200,"id.resp_h":"10.0.0.3","id.resp_p":88,"request_type":"TGS","client":"user/EXAMPLE.ORG","service":"host/server.example.org","success":true,"till":1695104061.0,"cipher":"aes256-cts-hmac-sha1-96","forwardable":true,"renewable":true}
+{"ts":1695017662.0,"uid":"CsnmpUid000000001","id.orig_h":"10.0.0.5","id.orig_p":49201,"id.resp_h":"10.0.0.4","id.resp_p":161,"duration":0.01,"version":"2c","community":"public","get_requests":1,"get_bulk_requests":0,"get_responses":1,"set_requests":0}
+{"ts":1695017663.0,"uid":"CsigUid0000000001","src_addr":"198.51.100.9","src_port":4444,"dst_addr":"10.0.0.5","dst_port":80,"note":"Signatures::Sensitive_Signature","sig_id":"example-sig-1","event_msg":"198.51.100.9: example signature","sub_msg":"GET /x","sig_count":1}
+{"ts":1695017664.0,"_path":"dhcp","uids":["CdhcpUid000000001"],"client_addr":"10.0.0.50","server_addr":"10.0.0.1","mac":"00:00:5e:00:53:01","host_name":"laptop","domain":"example.org","assigned_addr":"10.0.0.50","lease_time":3600.0,"msg_types":["REQUEST","ACK"]}
