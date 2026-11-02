@@ -1,0 +1,19 @@
+Tuisku
+Copyright (c) 2026 ieepirzy
+Licensed under the MIT License (see LICENSE).
+
+Tuisku aligns its event model with the specifications below and refers to them. This
+repository contains no specification text and no third-party rule content. If generated
+schema tables or bundled sample data are ever added, their licences and attributions will be
+listed here, file by file.
+
+- Open Cybersecurity Schema Framework (OCSF), https://ocsf.io. Apache License 2.0.
+- STIX Version 2.1, OASIS Standard, https://docs.oasis-open.org/cti/stix/v2.1/.
+  Copyright © OASIS Open. Referenced, not reproduced.
+- Community ID Flow Hashing specification, Corelight, https://github.com/corelight/community-id-spec.
+  BSD 3-Clause. The `communityid` Python package (BSD 3-Clause) is a runtime dependency.
+- Sigma correlation rules specification, SigmaHQ, https://github.com/SigmaHQ/sigma-specification.
+  Only its semantics are referenced. No Sigma rules are bundled; SigmaHQ rules are licensed
+  under the Detection Rule License 1.1, which requires attribution.
+- MITRE ATT&CK® technique identifiers are referenced verbatim. ATT&CK® is a registered
+  trademark of The MITRE Corporation. No ATT&CK content is reproduced.
