@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+import psycopg
 from psycopg import AsyncConnection
 from pydantic import ValidationError
 
@@ -100,11 +101,23 @@ def _add_admin_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]
         "--role",
         action="append",
         required=True,
-        choices=["read", "triage", "admin", "approve"],
-        help="repeatable; read < triage < admin, approve is separate and needs --person",
+        choices=["read", "triage", "admin"],
+        help="repeatable; read < triage < admin (approve tokens: `tuisku approver add`)",
     )
-    op_add.add_argument("--person", help="the named person the token is bound to")
+    op_add.add_argument(
+        "--person",
+        help="bind the token to a named person; only the database owner may do this (ADR 0005)",
+    )
     op_add.add_argument("--expires-at", type=_timestamp)
+
+    approver = sub.add_parser(
+        "approver", help="issue approve tokens (database owner only, out of band; ADR 0005)"
+    )
+    approver_sub = approver.add_subparsers(dest="approver_command", required=True)
+    approver_add = approver_sub.add_parser("add", help="create an approve token (printed once)")
+    approver_add.add_argument("--person", required=True, help="the named person who approves")
+    approver_add.add_argument("--name", help="a label for the token (default: the person)")
+    approver_add.add_argument("--expires-at", type=_timestamp)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -144,10 +157,21 @@ def _run_admin(args: argparse.Namespace, settings: Settings) -> None:
     from tuisku.store import admin
     from tuisku.store.tokens import Role
 
+    if args.command == "approver":
+        issued = _with_connection(
+            settings,
+            lambda conn: admin.create_operator_token(
+                conn,
+                name=args.name or args.person,
+                roles=[Role.APPROVE],
+                person=args.person,
+                expires_at=args.expires_at,
+            ),
+        )
+        _print_token(issued.token, f"created approve token {issued.uid} for {args.person}")
+        return
     if args.command == "operator-token":
         roles = [Role(r) for r in args.role]
-        if Role.APPROVE in roles and not args.person:
-            raise UsageError("--role approve requires --person (ADR 0005)")
         issued = _with_connection(
             settings,
             lambda conn: admin.create_operator_token(
@@ -220,6 +244,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except UsageError as exc:
         print(f"tuisku: {exc}", file=sys.stderr)
         return 2
+    except psycopg.errors.InsufficientPrivilege as exc:
+        # e.g. a person-bound token requested without connecting as the database owner
+        print(f"tuisku: refused by the database: {exc.diag.message_primary}", file=sys.stderr)
+        return 1
     except LookupError as exc:  # store.admin.NotFoundError
         print(f"tuisku: {exc}", file=sys.stderr)
         return 1

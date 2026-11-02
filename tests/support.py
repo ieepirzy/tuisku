@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -17,6 +18,7 @@ from tuisku.adapters import (
     AdapterError,
     Authorship,
     DetectionDraft,
+    LimitExceeded,
     ObservationDraft,
     ParseResult,
     RawRecord,
@@ -44,13 +46,26 @@ class DummyAdapter:
             raise AdapterError("dummy refuses this record")
         if obj.get("crash"):
             raise KeyError(obj["crash"])  # message would echo input: must not be stored
+        if "limit" in obj:
+            raise LimitExceeded(obj["limit"])
+        if "sleep" in obj:
+            time.sleep(obj["sleep"])  # a slow parse, for the request time budget
+        attributes: dict[str, Any] = {"message": obj.get("msg", "")}
+        if "thread" in obj:
+            try:
+                asyncio.get_running_loop()
+                attributes["on_event_loop"] = True
+            except RuntimeError:
+                attributes["on_event_loop"] = False
         entity_keys = (f"ip:{obj['ip']}",) if "ip" in obj else ()
         obs = ObservationDraft(
             kind=obj.get("kind", "dummy.event"),
             event_time=parse_timestamp_or_none(obj.get("time")),
-            attributes={"message": obj.get("msg", "")},
+            attributes=attributes,
             entity_keys=entity_keys,
-            correlation={"dummy.flow_id": "42"} if obj.get("flow") else {},
+            correlation=(
+                {"dummy.flow_id": "42", "dummy.fuid": ("Fa1", "Fb2")} if obj.get("flow") else {}
+            ),
             flags=tuple(obj.get("flags", ())),
         )
         detections: tuple[DetectionDraft, ...] = ()

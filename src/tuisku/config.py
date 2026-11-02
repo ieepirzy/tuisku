@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     # its own buckets, so the effective limit is replicas x rate.
     ingest_rate_per_second: float = Field(default=1000.0, gt=0)
     ingest_rate_burst: float = Field(default=10000.0, ge=1)
+    # Wall-clock budget for one ingest request. Once spent, the remaining lines are not
+    # processed and the answer is 503 with Retry-After (already processed lines are kept).
+    ingest_request_budget_seconds: float = Field(default=10.0, gt=0)
+    # Worker threads that run adapters, off the event loop.
+    ingest_parse_threads: int = Field(default=4, ge=1)
     # An event_time further than this in the future of received_at is flagged clock_skew
     # and evaluated at received_at (ADR 0004 section 6).
     clock_skew_tolerance_seconds: float = Field(default=300.0, ge=0)

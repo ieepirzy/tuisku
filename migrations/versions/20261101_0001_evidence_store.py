@@ -42,6 +42,7 @@ WORKING_TABLES = (
     "operator_tokens",
     "evaluation_queue",
     "evaluation_dead_letter",
+    "meta_counters",
 )
 
 _ROLE_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
@@ -113,8 +114,16 @@ CREATE TABLE raw_records (
     collector   jsonb NOT NULL DEFAULT '{{}}' CHECK (jsonb_typeof(collector) = 'object'),
     -- NULL once retention clears it (ADR 0004 section 9); sha256 and body_size stay.
     body        bytea,
+    -- Size of the record as received; sha256 always covers all of it.
     body_size   integer NOT NULL CHECK (body_size >= 0),
-    CONSTRAINT raw_records_source_sha256_key UNIQUE (source_id, sha256)
+    -- An over-long line is stored cut to the line limit, unparsed (ADR 0005).
+    truncated   boolean NOT NULL DEFAULT false,
+    CONSTRAINT raw_records_source_sha256_key UNIQUE (source_id, sha256),
+    CONSTRAINT raw_records_truncation_check CHECK (
+        body IS NULL
+        OR (NOT truncated AND octet_length(body) = body_size)
+        OR (truncated AND octet_length(body) < body_size)
+    )
 );
 CREATE INDEX raw_records_source_received_idx ON raw_records (source_id, received_at);
 
@@ -140,6 +149,9 @@ CREATE TABLE parse_attempts (
     CONSTRAINT parse_attempts_version_if_ok CHECK (status = 'failed' OR adapter_version IS NOT NULL)
 );
 CREATE INDEX parse_attempts_raw_record_id_idx ON parse_attempts (raw_record_id);
+-- The current derivation of a raw record is its newest successful attempt (ADR 0002 rule 3).
+CREATE INDEX parse_attempts_current_idx ON parse_attempts (raw_record_id, id DESC)
+    WHERE status = 'ok';
 
 -- L1: facts derived by a versioned adapter from one raw record.
 CREATE TABLE observations (
@@ -195,6 +207,14 @@ CREATE TABLE detections (
     entity_keys      text[] NOT NULL DEFAULT '{{}}',
     explanation      jsonb NOT NULL DEFAULT '{{}}' CHECK (jsonb_typeof(explanation) = 'object'),
     flags            text[] NOT NULL DEFAULT '{{}}',
+    -- Meta-detections (ADR 0005): what the breach is about (the limit name, or the rule id
+    -- for evaluation failures) and the 5-minute bucket. One row per source, kind, subject
+    -- and bucket. Other detections keep subject '' and bucket_start NULL.
+    subject          text NOT NULL DEFAULT '' CHECK (char_length(subject) <= 200),
+    bucket_start     timestamptz,
+    CONSTRAINT detections_bucket_only_meta CHECK (
+        bucket_start IS NULL OR (evaluator = 'tuisku' AND kind LIKE 'tuisku.meta.%')
+    ),
     CONSTRAINT detections_eval_time_check CHECK ({_EVAL_TIME_CHECK}),
     -- Sensor verdicts come from a parsed raw record and are never tuisku-authored;
     -- tuisku-evaluated rows have no raw record.
@@ -209,6 +229,22 @@ CREATE INDEX detections_kind_eval_time_idx ON detections (kind, eval_time);
 CREATE INDEX detections_source_received_idx ON detections (source_id, received_at);
 CREATE INDEX detections_raw_record_id_idx ON detections (raw_record_id);
 CREATE INDEX detections_parse_attempt_id_idx ON detections (parse_attempt_id);
+-- At most one meta-detection per source, kind, subject and bucket, across replicas (ADR 0005).
+-- NULLS NOT DISTINCT: a meta-detection without a source is still deduplicated.
+CREATE UNIQUE INDEX detections_meta_bucket_key
+    ON detections (source_id, kind, subject, bucket_start) NULLS NOT DISTINCT
+    WHERE bucket_start IS NOT NULL;
+
+-- Working table: how many breaches each meta-detection bucket absorbed. Detections are
+-- append-only, so repeats are counted here instead (ADR 0005).
+CREATE TABLE meta_counters (
+    source_id    bigint REFERENCES sources (id),
+    kind         text NOT NULL,
+    subject      text NOT NULL DEFAULT '',
+    bucket_start timestamptz NOT NULL,
+    count        bigint NOT NULL DEFAULT 0 CHECK (count >= 0),
+    CONSTRAINT meta_counters_key UNIQUE NULLS NOT DISTINCT (source_id, kind, subject, bucket_start)
+);
 
 CREATE TABLE detection_observations (
     detection_id   bigint NOT NULL REFERENCES detections (id),
@@ -236,6 +272,8 @@ CREATE TABLE evaluation_queue (
     detection_id   bigint REFERENCES detections (id),
     enqueued_at    timestamptz NOT NULL DEFAULT now(),
     attempts       integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    -- Worker lease (ADR 0006): a row whose lease expired is claimable again.
+    claimed_until  timestamptz,
     last_error     text,
     CONSTRAINT evaluation_queue_one_target CHECK (num_nonnulls(observation_id, detection_id) = 1)
 );
@@ -271,6 +309,30 @@ $$;
 """
 
 
+# ADR 0005: approve tokens and person-bound operator tokens are issued out of band, only by the
+# database owner (`tuisku approver add`, `tuisku operator-token add --person`). The API and
+# worker connect as the app role, so this holds even against a compromised admin API.
+PERSON_TOKEN_FUNCTION_SQL = """
+CREATE FUNCTION tuisku_person_tokens_owner_only() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF (NEW.person IS NOT NULL OR 'approve' = ANY (NEW.roles))
+       AND current_user <> (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = TG_RELID)
+    THEN
+        RAISE EXCEPTION 'person-bound and approve operator tokens are issued only by the '
+            'database owner (ADR 0005)'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER operator_tokens_person_owner_only BEFORE INSERT OR UPDATE ON operator_tokens
+    FOR EACH ROW EXECUTE FUNCTION tuisku_person_tokens_owner_only();
+"""
+
+
 def _app_role() -> str | None:
     role = context.config.attributes.get("app_role")
     if not role:
@@ -283,6 +345,7 @@ def _app_role() -> str | None:
 def upgrade() -> None:
     op.execute(TABLES_SQL)
     op.execute(TRIGGER_FUNCTION_SQL)
+    op.execute(PERSON_TOKEN_FUNCTION_SQL)
     for table in EVIDENCE_TABLES:
         op.execute(
             f"CREATE TRIGGER {table}_append_only_row BEFORE UPDATE OR DELETE ON {table} "
@@ -303,8 +366,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute(
-        "DROP TABLE evaluation_dead_letter, evaluation_queue, detection_evidence, "
+        "DROP TABLE meta_counters, evaluation_dead_letter, evaluation_queue, detection_evidence, "
         "detection_observations, detections, observations, parse_attempts, raw_duplicates, "
         "raw_records, operator_tokens, source_tokens, sources"
     )
-    op.execute("DROP FUNCTION tuisku_reject_evidence_change()")
+    op.execute("DROP FUNCTION tuisku_reject_evidence_change(), tuisku_person_tokens_owner_only()")

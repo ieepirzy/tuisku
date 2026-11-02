@@ -2,6 +2,10 @@
 
 Lists are newest first with keyset pagination on id: pass the previous page's ``next_before``
 as ``before`` to get the next page. Time filters apply to ``eval_time``.
+
+By default only rows of the **current** derivation are returned: for each raw record, the rows
+of its newest successful parse attempt (ADR 0002 rule 3). Rows without a parse attempt (Tuisku
+rule output and meta-detections) are always current. ``all_attempts`` returns every row.
 """
 
 from __future__ import annotations
@@ -28,6 +32,14 @@ class Filters:
     until: datetime | None = None
     before: int | None = None
     limit: int = 100
+    all_attempts: bool = False
+
+
+# The newest successful attempt for the row's raw record (index parse_attempts_current_idx).
+_CURRENT: LiteralString = (
+    "t.parse_attempt_id = (SELECT c.id FROM parse_attempts c WHERE c.raw_record_id = "
+    "t.raw_record_id AND c.status = 'ok' ORDER BY c.id DESC LIMIT 1)"
+)
 
 
 _OBSERVATION_COLUMNS: LiteralString = (
@@ -47,7 +59,10 @@ _DETECTION_COLUMNS: LiteralString = (
     "t.attack, t.attributes, t.entity_keys, t.explanation, t.flags, "
     "ARRAY(SELECT o.uid FROM detection_observations l JOIN observations o "
     "ON o.id = l.observation_id WHERE l.detection_id = t.id ORDER BY o.id) "
-    "AS observation_uids "
+    "AS observation_uids, "
+    "t.subject, (SELECT m.count FROM meta_counters m WHERE m.source_id IS NOT DISTINCT FROM "
+    "t.source_id AND m.kind = t.kind AND m.subject = t.subject "
+    "AND m.bucket_start = t.bucket_start) AS meta_count "
     "FROM detections t LEFT JOIN sources s ON s.id = t.source_id "
     "LEFT JOIN raw_records r ON r.id = t.raw_record_id "
     "LEFT JOIN parse_attempts p ON p.id = t.parse_attempt_id"
@@ -76,6 +91,8 @@ async def _list(
     if f.until is not None:
         where.append("t.eval_time < %s")
         params.append(f.until)
+    if not f.all_attempts:
+        where.append("(t.parse_attempt_id IS NULL OR " + _CURRENT + ")")
     if f.before is not None:
         where.append("t.id < %s")
         params.append(f.before)

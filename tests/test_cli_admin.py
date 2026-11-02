@@ -119,22 +119,42 @@ def test_operator_token_add(env: AppDatabase, capsys: pytest.CaptureFixture[str]
     assert sorted(roles) == ["read", "triage"] and person is None
 
 
-def test_approve_requires_a_person(env: AppDatabase, capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["operator-token", "add", "--name", "x", "--role", "approve"]) == 2
-    assert "requires --person" in capsys.readouterr().err
+def test_approve_tokens_come_only_from_approver_add(
+    env: AppDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:  # not an operator-token role any more
+        main(["operator-token", "add", "--name", "x", "--role", "approve"])
+    assert exit_info.value.code == 2
+    with pytest.raises(SystemExit):
+        main(["approver", "add"])  # --person is required
+    capsys.readouterr()
+
+
+def test_person_bound_tokens_need_the_database_owner(
+    env: AppDatabase, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # As the app role (what the API uses): refused by the database.
+    assert main(["approver", "add", "--person", "Alice Example"]) == 1
+    assert "issued only by the database owner" in capsys.readouterr().err
     assert (
         main(
-            [
-                "operator-token",
-                "add",
-                "--name",
-                "x",
-                "--role",
-                "approve",
-                "--person",
-                "Alice Example",
-            ]
+            ["operator-token", "add", "--name", "x", "--role", "read", "--person", "Alice Example"]
         )
+        == 1
+    )
+    capsys.readouterr()
+    # As the owner, out of band: allowed.
+    monkeypatch.setenv("TUISKU_DATABASE_URL", env.owner_url)
+    assert main(["approver", "add", "--person", "Alice Example"]) == 0
+    token = _token(capsys)
+    [(roles, person)] = query(
+        env.owner_url,
+        "SELECT roles, person FROM operator_tokens WHERE token_sha256 = %s",
+        (hashlib.sha256(token.encode()).digest(),),
+    )
+    assert roles == ["approve"] and person == "Alice Example"
+    assert (
+        main(["operator-token", "add", "--name", "y", "--role", "read", "--person", "Bob Example"])
         == 0
     )
     assert is_operator_token(_token(capsys))
@@ -143,9 +163,22 @@ def test_approve_requires_a_person(env: AppDatabase, capsys: pytest.CaptureFixtu
 def test_database_rejects_approve_without_person(app_db: AppDatabase) -> None:
     import psycopg
 
-    with psycopg.connect(app_db.app_url) as conn, pytest.raises(psycopg.errors.CheckViolation):
+    with (
+        psycopg.connect(app_db.owner_url) as conn,
+        pytest.raises(psycopg.errors.CheckViolation),
+    ):
         conn.execute(
             "INSERT INTO operator_tokens (name, roles, token_sha256) "
             "VALUES ('x', ARRAY['approve'], %s)",
             (b"\x00" * 32,),
         )
+
+
+def test_app_role_cannot_rebind_a_token_to_a_person(app_db: AppDatabase) -> None:
+    import psycopg
+
+    with (
+        psycopg.connect(app_db.app_url) as conn,
+        pytest.raises(psycopg.errors.InsufficientPrivilege),
+    ):
+        conn.execute("UPDATE operator_tokens SET person = 'Mallory' WHERE person IS NULL")

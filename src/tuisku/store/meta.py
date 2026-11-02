@@ -2,23 +2,19 @@
 
 A breach is never silently absorbed. It becomes a detection with kind ``tuisku.meta.<name>``,
 evaluator and authorship ``tuisku``, no raw record, and ``source:<name>`` as an entity key.
-At most one is written per source and kind per 5 minutes.
 
-ADR 0005 says repeats "increment a counter in its explanation", but detections are
-append-only (ADR 0004), so a written detection is never updated. Instead each replica counts
-breaches since its last write and puts those counts into the *next* meta-detection's
-explanation (``counts_since_previous``). Counts held in memory are lost if the replica
-restarts before the next write.
+At most one is written per source, kind, subject and 5-minute bucket: the unique index on
+``detections (source_id, kind, subject, bucket_start)`` with ``ON CONFLICT DO NOTHING``
+enforces it across API replicas. The subject is the limit name, so a breach of one limit
+cannot hide a breach of another. Every breach, the first included, increments
+``meta_counters`` for that bucket; detections are append-only, so the count is never written
+into the detection itself.
 """
 
 from __future__ import annotations
 
 import json
-import time
-from collections import Counter
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from psycopg import AsyncConnection
@@ -28,7 +24,8 @@ from tuisku.adapters import OCSF_VERSION, Severity
 from tuisku.store.admin import Source
 from tuisku.store.ingest import enqueue
 
-WINDOW = timedelta(minutes=5)
+BUCKET = timedelta(minutes=5)
+_EPOCH = datetime(2000, 1, 1, tzinfo=UTC)
 
 LIMIT_EXCEEDED = "tuisku.meta.source_limit_exceeded"
 RATE_LIMITED = "tuisku.meta.source_rate_limited"
@@ -41,74 +38,49 @@ _TITLES = {
 }
 
 
-@dataclass(slots=True)
-class _Pending:
-    counts: Counter[str] = field(default_factory=Counter)
-    last_attempt: float | None = None
+def bucket_start(now: datetime) -> datetime:
+    """The start of the 5-minute bucket containing ``now``."""
+    return now - (now - _EPOCH) % BUCKET
 
 
-class MetaDetectionGate:
-    """In-process throttle in front of the database check, so a flood of breaches costs at most
-    one database round trip per source and kind per window on each replica."""
-
-    def __init__(self, monotonic: Callable[[], float] = time.monotonic) -> None:
-        self._monotonic = monotonic
-        self._pending: dict[tuple[int, str], _Pending] = {}
-
-    def note(self, source_id: int, kind: str, limit: str, n: int = 1) -> dict[str, int] | None:
-        """Count a breach. Returns the counts to write when a write is due, else None."""
-        entry = self._pending.setdefault((source_id, kind), _Pending())
-        entry.counts[limit] += n
-        now = self._monotonic()
-        if entry.last_attempt is not None and now - entry.last_attempt < WINDOW.total_seconds():
-            return None
-        entry.last_attempt = now
-        return dict(entry.counts)
-
-    def written(self, source_id: int, kind: str) -> None:
-        entry = self._pending.get((source_id, kind))
-        if entry is not None:
-            entry.counts.clear()
-
-
-async def write_meta_detection(
+async def record_breach(
     conn: AsyncConnection[Any],
     source: Source,
     kind: str,
+    subject: str,
     *,
-    counts: dict[str, int],
+    n: int = 1,
     details: dict[str, Any],
     now: datetime,
 ) -> bool:
-    """Write one meta-detection unless one for this source and kind exists in the window.
+    """Count ``n`` breaches and write the bucket's meta-detection if it has none yet.
 
-    Runs in the caller's transaction. Returns True when a row was written.
+    Runs in the caller's transaction. Returns True when a detection row was written.
     """
-    # Serialize writers for this source and kind across replicas.
+    bucket = bucket_start(now)
     await conn.execute(
-        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"{kind}/{source.id}",)
+        "INSERT INTO meta_counters (source_id, kind, subject, bucket_start, count) "
+        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT ON CONSTRAINT meta_counters_key "
+        "DO UPDATE SET count = meta_counters.count + EXCLUDED.count",
+        (source.id, kind, subject, bucket, n),
     )
-    exists = await db.fetch_one(
-        conn,
-        "SELECT 1 AS x FROM detections WHERE kind = %s AND source_id = %s "
-        "AND evaluator = 'tuisku' AND eval_time > %s LIMIT 1",
-        (kind, source.id, now - WINDOW),
-    )
-    if exists is not None:
-        return False
     title, severity = _TITLES[kind]
     explanation = {
-        "counts_since_previous": counts,
-        "window_seconds": int(WINDOW.total_seconds()),
+        "bucket_start": bucket.isoformat(),
+        "bucket_seconds": int(BUCKET.total_seconds()),
+        "subject": subject,
+        "counter": "meta_counters",  # repeats in this bucket are counted there
         **details,
     }
     row = await db.fetch_one(
         conn,
         "INSERT INTO detections (source_id, evaluator, authorship, kind, identity, title, "
         "severity_id, event_time, received_at, eval_time, ocsf_version, rule_ref, "
-        "entity_keys, explanation) "
+        "entity_keys, explanation, subject, bucket_start) "
         "VALUES (%s, 'tuisku', 'tuisku', %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, "
-        "%s::jsonb) RETURNING id",
+        "%s::jsonb, %s, %s) "
+        "ON CONFLICT (source_id, kind, subject, bucket_start) WHERE bucket_start IS NOT NULL "
+        "DO NOTHING RETURNING id",
         (
             source.id,
             kind,
@@ -122,8 +94,11 @@ async def write_meta_detection(
             json.dumps({"engine": "tuisku", "name": "ingest_limits"}),
             [f"source:{source.name}"],
             json.dumps(explanation),
+            subject,
+            bucket,
         ),
     )
-    assert row is not None
+    if row is None:
+        return False
     await enqueue(conn, observation_ids=[], detection_ids=[row["id"]], enqueued_at=now)
     return True

@@ -9,6 +9,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import anyio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from psycopg_pool import AsyncConnectionPool
@@ -19,7 +20,6 @@ from tuisku.api import ingest, read
 from tuisku.api.deps import Clock, system_clock
 from tuisku.api.ratelimit import RateLimiter
 from tuisku.config import Settings
-from tuisku.store.meta import MetaDetectionGate
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +46,8 @@ def create_app(settings: Settings | None = None, *, clock: Clock | None = None) 
     app.state.rate_limiter = RateLimiter(
         settings.ingest_rate_per_second, settings.ingest_rate_burst
     )
-    app.state.meta_gate = MetaDetectionGate()
+    # Bounded worker threads for adapters, so parsing never blocks the event loop.
+    app.state.parse_limiter = anyio.CapacityLimiter(settings.ingest_parse_threads)
     app.include_router(ingest.router)
     app.include_router(read.router)
 

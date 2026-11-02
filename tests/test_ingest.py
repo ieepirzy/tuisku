@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import json
 import uuid
 from datetime import timedelta
 
+import psycopg
 import pytest
 
 from tests.conftest import AppDatabase
@@ -263,16 +265,23 @@ def test_correlation_keys_are_qualified_by_source(
         "JOIN sources s ON s.id = o.source_id WHERE s.name = %s",
         (name,),
     )
-    assert correlation == {"dummy.flow_id": f"{source_id}:42"}
+    assert correlation == {
+        "dummy.flow_id": f"{source_id}:42",
+        "dummy.fuid": [f"{source_id}:Fa1", f"{source_id}:Fb2"],  # order kept
+    }
 
 
 # --- limits -----------------------------------------------------------------------------------
 
 
-def _meta(url: str, name: str) -> list[tuple[str, dict]]:
+def _meta(url: str, name: str) -> list[tuple[str, str, int]]:
+    """(kind, subject, meta_counters count) for the source's meta-detections."""
     return query(
         url,
-        "SELECT d.kind, d.explanation FROM detections d JOIN sources s ON s.id = d.source_id "
+        "SELECT d.kind, d.subject, m.count FROM detections d "
+        "JOIN sources s ON s.id = d.source_id "
+        "JOIN meta_counters m ON m.source_id = d.source_id AND m.kind = d.kind "
+        "AND m.subject = d.subject AND m.bucket_start = d.bucket_start "
         "WHERE s.name = %s AND d.evaluator = 'tuisku' ORDER BY d.id",
         (name,),
     )
@@ -295,10 +304,7 @@ def test_body_over_limit_is_413_from_content_length(
         )
         == 0
     )
-    [(kind, explanation)] = _meta(app_db.owner_url, name)
-    assert kind == "tuisku.meta.source_limit_exceeded"
-    assert explanation["limit"] == "body_bytes"
-    assert explanation["counts_since_previous"] == {"body_bytes": 1}
+    assert _meta(app_db.owner_url, name) == [("tuisku.meta.source_limit_exceeded", "body_bytes", 1)]
 
 
 def test_body_over_limit_is_413_while_streaming_without_content_length(
@@ -322,18 +328,16 @@ def test_too_many_lines_is_413(app_db: AppDatabase, source: tuple[str, str]) -> 
     with client(app_db.app_url, ingest_max_lines=2) as c:
         response = post_records(c, name, token, ndjson({"a": 1}, {"a": 2}, {"a": 3}))
     assert response.status_code == 413
-    assert [k for k, _ in _meta(app_db.owner_url, name)] == ["tuisku.meta.source_limit_exceeded"]
+    assert _meta(app_db.owner_url, name) == [("tuisku.meta.source_limit_exceeded", "lines", 1)]
 
 
-def test_invalid_lines_are_rejected_individually(
+def test_only_malformed_envelopes_are_rejected(
     app_db: AppDatabase, source: tuple[str, str]
 ) -> None:
     name, token = source
-    good = json.dumps({"raw": "ok"})
     lines = [
-        good,
-        json.dumps({"raw": "z" * 300}),  # line too long
-        json.dumps({"raw": "c", "collector": {"k": "v" * 100}}),  # collector too large
+        json.dumps({"raw": "ok"}),
+        json.dumps({"raw": "c", "collector": {"k": "v" * 100}}),  # collector too large: kept
         "not json",
         json.dumps(["raw"]),
         json.dumps({"raw": 5}),
@@ -341,73 +345,200 @@ def test_invalid_lines_are_rejected_individually(
         json.dumps({"raw": "x", "extra": 1}),
         json.dumps({"raw": "x", "collector": "host"}),
         json.dumps({"raw": "\ud800"}),  # lone surrogate: not encodable as UTF-8
-        json.dumps({"raw": "x", "collector": {"k": "\u0000"}}),
+        '{"raw": "a", "raw": "b"}',  # duplicate key
+        json.dumps({"raw": "nul", "collector": {"k": "\u0000"}}),  # sanitized, kept
         "",  # blank lines are skipped, but keep their line numbers
         json.dumps({"raw": "ok2", "collector": None}),
     ]
     body = "\n".join(lines).encode() + b"\n\xff\xfe\n"  # final line: invalid UTF-8
-    with client(app_db.app_url, ingest_max_line_bytes=200, ingest_max_collector_bytes=50) as c:
+    with client(app_db.app_url, ingest_max_collector_bytes=50) as c:
         response = post_records(c, name, token, body)
     assert response.status_code == 200
     results = response.json()["results"]
-    assert [(r["line"], r["status"], r.get("reason")) for r in results] == [
-        (1, "accepted", None),
-        (2, "rejected", "line_too_long"),
-        (3, "rejected", "collector_too_large"),
-        (4, "rejected", "invalid_envelope"),
-        (5, "rejected", "invalid_envelope"),
-        (6, "rejected", "invalid_envelope"),
-        (7, "rejected", "invalid_envelope"),
-        (8, "rejected", "invalid_envelope"),
-        (9, "rejected", "invalid_envelope"),
-        (10, "rejected", "invalid_envelope"),
-        (11, "rejected", "invalid_envelope"),
-        (13, "accepted", None),
-        (14, "rejected", "invalid_envelope"),
+    # Stored lines are not JSON, so the dummy adapter fails on them: still accepted.
+    stored = ("failed", "accepted", None)
+    rejected = (None, "rejected", "invalid_envelope")
+    assert [(r.get("parse"), r["status"], r.get("reason")) for r in results] == [
+        stored,
+        stored,
+        *[rejected] * 8,
+        stored,
+        stored,
+        rejected,
     ]
-    meta = dict(_meta(app_db.owner_url, name))
-    assert meta["tuisku.meta.source_limit_exceeded"]["counts_since_previous"] == {"line_bytes": 1}
-    assert meta["tuisku.meta.invalid_envelope"]["counts_since_previous"] == {"envelope": 9}
+    assert [r["line"] for r in results][-3:] == [11, 13, 14]
+    collectors = query(
+        app_db.owner_url,
+        "SELECT convert_from(r.body, 'UTF8'), r.collector FROM raw_records r "
+        "JOIN sources s ON s.id = r.source_id WHERE s.name = %s ORDER BY r.id",
+        (name,),
+    )
+    assert collectors == [
+        ("ok", {}),
+        ("c", {"tuisku_collector_dropped_bytes": 108}),
+        ("nul", {"k": "\ufffd"}),
+        ("ok2", {}),
+    ]
+    assert sorted(_meta(app_db.owner_url, name)) == [
+        ("tuisku.meta.invalid_envelope", "envelope", 9),
+        ("tuisku.meta.source_limit_exceeded", "collector_bytes", 1),
+    ]
 
 
-def test_meta_detections_are_written_once_per_window(
+def test_over_long_record_is_stored_truncated_and_unparsed(
     app_db: AppDatabase, source: tuple[str, str]
 ) -> None:
     name, token = source
-    long_line = ndjson("z" * 300)
-    with client(app_db.app_url, ingest_max_line_bytes=200) as c:
-        for _ in range(3):
-            post_records(c, name, token, long_line)
-    # A second replica (fresh in-process gate) still sees the database row in the window.
-    with client(app_db.app_url, ingest_max_line_bytes=200) as c:
-        post_records(c, name, token, long_line)
-    rows = _meta(app_db.owner_url, name)
-    assert len(rows) == 1
+    long_raw = json.dumps({"msg": "z" * 300})
+    with client(app_db.app_url, ingest_max_line_bytes=100) as c:
+        first = post_records(c, name, token, ndjson(long_raw, {"msg": "short"}))
+        again = post_records(c, name, token, ndjson(long_raw))
+    assert first.status_code == 200
+    assert first.json()["results"] == [
+        {"line": 1, "status": "accepted", "parse": "skipped"},
+        {"line": 2, "status": "accepted", "parse": "ok"},
+    ]
+    assert again.json()["results"] == [{"line": 1, "status": "duplicate"}]
+    [(body, size, truncated, sha, attempts)] = query(
+        app_db.owner_url,
+        "SELECT r.body, r.body_size, r.truncated, r.sha256, "
+        "(SELECT count(*) FROM parse_attempts p WHERE p.raw_record_id = r.id) "
+        "FROM raw_records r JOIN sources s ON s.id = r.source_id "
+        "WHERE s.name = %s AND r.truncated",
+        (name,),
+    )
+    full = long_raw.encode()
+    assert bytes(body) == full[:100] and size == len(full) and truncated
+    assert bytes(sha) == hashlib.sha256(full).digest()  # over the full record
+    assert attempts == 0
+    # Both deliveries breached the limit: one detection, counted twice.
+    assert _meta(app_db.owner_url, name) == [("tuisku.meta.source_limit_exceeded", "line_bytes", 2)]
+
+
+def test_adapter_limit_exceeded_is_a_failed_parse_and_a_meta_detection(
+    app_db: AppDatabase, source: tuple[str, str]
+) -> None:
+    name, token = source
+    with client(app_db.app_url) as c:
+        response = post_records(c, name, token, ndjson({"limit": "json_depth"}))
+    assert response.json()["results"] == [{"line": 1, "status": "accepted", "parse": "failed"}]
+    [(error,)] = query(
+        app_db.owner_url,
+        "SELECT p.error FROM parse_attempts p JOIN raw_records r ON r.id = p.raw_record_id "
+        "JOIN sources s ON s.id = r.source_id WHERE s.name = %s",
+        (name,),
+    )
+    assert error == "limit exceeded: json_depth"
+    assert _meta(app_db.owner_url, name) == [("tuisku.meta.source_limit_exceeded", "json_depth", 1)]
+
+
+def test_meta_detections_are_one_per_subject_and_bucket(
+    app_db: AppDatabase, source: tuple[str, str]
+) -> None:
+    name, token = source
+    with client(app_db.app_url) as c:
+        for i in range(3):
+            post_records(c, name, token, ndjson({"limit": "json_depth", "n": i}))
+    # Another replica (a fresh app) in the same bucket adds to the count, not a row.
+    with client(app_db.app_url) as c:
+        post_records(c, name, token, ndjson({"limit": "json_depth", "n": 9}))
+        post_records(c, name, token, ndjson({"limit": "json_keys"}))  # another subject
+    assert _meta(app_db.owner_url, name) == [
+        ("tuisku.meta.source_limit_exceeded", "json_depth", 4),
+        ("tuisku.meta.source_limit_exceeded", "json_keys", 1),
+    ]
     [(sensor_free, queued)] = query(
         app_db.owner_url,
-        "SELECT d.raw_record_id IS NULL AND d.authorship = 'tuisku' AND "
-        "d.entity_keys = ARRAY['source:' || s.name], "
-        "EXISTS (SELECT 1 FROM evaluation_queue q WHERE q.detection_id = d.id) "
+        "SELECT bool_and(d.raw_record_id IS NULL AND d.authorship = 'tuisku' AND "
+        "d.entity_keys = ARRAY['source:' || s.name]), "
+        "bool_and(EXISTS (SELECT 1 FROM evaluation_queue q WHERE q.detection_id = d.id)) "
         "FROM detections d JOIN sources s ON s.id = d.source_id "
         "WHERE s.name = %s AND d.evaluator = 'tuisku'",
         (name,),
     )
     assert sensor_free and queued
-    # Five minutes later the next breach writes again, carrying the counts held meanwhile.
-    later = T0 + timedelta(minutes=6)
-    with client(app_db.app_url, clock=lambda: later, ingest_max_line_bytes=200) as c:
-        post_records(c, name, token, long_line)
-    rows = _meta(app_db.owner_url, name)
-    assert len(rows) == 2
+    later = T0 + timedelta(minutes=5)  # the next bucket
+    with client(app_db.app_url, clock=lambda: later) as c:
+        post_records(c, name, token, ndjson({"limit": "json_depth", "n": 10}))
+    assert len(_meta(app_db.owner_url, name)) == 3
 
 
-def test_wrong_content_type_is_415(app_db: AppDatabase, source: tuple[str, str]) -> None:
+def test_wrong_content_type_or_encoding_is_415(
+    app_db: AppDatabase, source: tuple[str, str]
+) -> None:
     name, token = source
     with client(app_db.app_url) as c:
         response = post_records(c, name, token, ndjson("x"), **{"Content-Type": "text/plain"})
-        gzip = post_records(c, name, token, b"\x1f\x8b", **{"Content-Encoding": "gzip"})
+        brotli = post_records(c, name, token, b"x", **{"Content-Encoding": "br"})
     assert response.status_code == 415
-    assert gzip.status_code == 415
+    assert brotli.status_code == 415
+
+
+def test_gzip_body_is_decompressed(app_db: AppDatabase, source: tuple[str, str]) -> None:
+    name, token = source
+    body = ndjson({"msg": "zipped"})
+    with client(app_db.app_url) as c:
+        response = post_records(c, name, token, gzip.compress(body), **{"Content-Encoding": "gzip"})
+        broken = post_records(c, name, token, b"\x1f\x8bnot gzip", **{"Content-Encoding": "gzip"})
+        cut = post_records(c, name, token, gzip.compress(body)[:-6], **{"Content-Encoding": "gzip"})
+    assert response.status_code == 200
+    assert response.json()["results"] == [{"line": 1, "status": "accepted", "parse": "ok"}]
+    assert broken.status_code == 400 and cut.status_code == 400
+    [(raw,)] = query(
+        app_db.owner_url,
+        "SELECT r.body FROM raw_records r JOIN sources s ON s.id = r.source_id WHERE s.name = %s",
+        (name,),
+    )
+    assert bytes(raw) == json.dumps({"msg": "zipped"}).encode()
+
+
+def test_gzip_bomb_is_413(app_db: AppDatabase, source: tuple[str, str]) -> None:
+    name, token = source
+    bomb = gzip.compress(b"\n" * 2_000_000)  # about 2 KB on the wire, 2 MB inflated
+    assert len(bomb) < 10_000
+    with client(app_db.app_url, ingest_max_body_bytes=100_000) as c:
+        response = post_records(c, name, token, bomb, **{"Content-Encoding": "gzip"})
+        otlp = c.post(
+            f"/v1/sources/{name}/otlp/v1/metrics",
+            content=bomb,
+            headers=auth(token) | {"Content-Type": "application/json", "Content-Encoding": "gzip"},
+        )
+    assert response.status_code == 413 and otlp.status_code == 413
+    assert _meta(app_db.owner_url, name) == [("tuisku.meta.source_limit_exceeded", "body_bytes", 2)]
+
+
+def test_time_budget_stops_the_request_with_503(
+    app_db: AppDatabase, source: tuple[str, str]
+) -> None:
+    name, token = source
+    body = ndjson({"sleep": 0.3, "msg": "slow"}, {"msg": "b"}, {"msg": "c"})
+    with client(app_db.app_url, ingest_request_budget_seconds=0.2) as c:
+        response = post_records(c, name, token, body)
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "1"
+    assert response.json()["results"] == [
+        {"line": 1, "status": "accepted", "parse": "ok"},
+        {"line": 2, "status": "not_processed", "reason": "time_budget_exceeded"},
+        {"line": 3, "status": "not_processed", "reason": "time_budget_exceeded"},
+    ]
+    # What was processed is committed; retrying the whole batch is safe.
+    with client(app_db.app_url) as c:
+        retry = post_records(c, name, token, body)
+    assert retry.status_code == 200
+    assert [r["status"] for r in retry.json()["results"]] == ["duplicate", "accepted", "accepted"]
+
+
+def test_parsing_runs_off_the_event_loop(app_db: AppDatabase, source: tuple[str, str]) -> None:
+    name, token = source
+    with client(app_db.app_url) as c:
+        post_records(c, name, token, ndjson({"thread": 1}))
+    [(attrs,)] = query(
+        app_db.owner_url,
+        "SELECT o.attributes FROM observations o JOIN sources s ON s.id = o.source_id "
+        "WHERE s.name = %s",
+        (name,),
+    )
+    assert attrs["on_event_loop"] is False
 
 
 def test_rate_limit_returns_429_with_retry_after(
@@ -420,7 +551,9 @@ def test_rate_limit_returns_429_with_retry_after(
     assert first.status_code == 200
     assert second.status_code == 429
     assert int(second.headers["Retry-After"]) >= 1
-    assert [k for k, _ in _meta(app_db.owner_url, name)] == ["tuisku.meta.source_rate_limited"]
+    assert _meta(app_db.owner_url, name) == [
+        ("tuisku.meta.source_rate_limited", "records_per_second", 1)
+    ]
 
 
 def test_rate_limit_is_per_source(app_db: AppDatabase, source: tuple[str, str]) -> None:
@@ -476,7 +609,7 @@ def test_read_endpoints(app_db: AppDatabase, source: tuple[str, str]) -> None:
     name, token = source
     reader = operator_token(app_db.app_url, Role.READ)
     admin_token = operator_token(app_db.app_url, Role.ADMIN)
-    approver = operator_token(app_db.app_url, Role.APPROVE, person="Alice Example")
+    approver = operator_token(app_db.owner_url, Role.APPROVE, person="Alice Example")
     with client(app_db.app_url) as c:
         post_records(
             c,
@@ -560,3 +693,54 @@ def test_declared_oversize_body_is_refused_before_it_is_read(
         )
     assert response.status_code == 413
     assert len(consumed) < 3  # the body was never read to the end
+
+
+def test_readers_return_only_the_current_derivation_by_default(
+    app_db: AppDatabase, source: tuple[str, str]
+) -> None:
+    name, token = source
+    reader = operator_token(app_db.app_url, Role.READ)
+    with client(app_db.app_url) as c:
+        post_records(c, name, token, ndjson({"kind": "dummy.v1"}, {"limit": "json_keys"}))
+    # Reprocess the first record with a "newer adapter": a second successful attempt, then a
+    # failed third one, which must leave the second current (ADR 0002 rule 3).
+    with psycopg.connect(app_db.app_url) as conn:
+        [(raw_id, source_id)] = conn.execute(
+            "SELECT r.id, r.source_id FROM raw_records r JOIN parse_attempts p "
+            "ON p.raw_record_id = r.id JOIN sources s ON s.id = r.source_id "
+            "WHERE s.name = %s AND p.status = 'ok'",
+            (name,),
+        ).fetchall()
+        [(attempt,)] = conn.execute(
+            "INSERT INTO parse_attempts (raw_record_id, adapter, adapter_version, status, "
+            "created_at) VALUES (%s, 'dummy', '0.2.0', 'ok', now()) RETURNING id",
+            (raw_id,),
+        ).fetchall()
+        conn.execute(
+            "INSERT INTO observations (raw_record_id, parse_attempt_id, source_id, kind, "
+            "received_at, eval_time, ocsf_version, attributes) "
+            "VALUES (%s, %s, %s, 'dummy.v2', %s, %s, '1.9.0', '{}')",
+            (raw_id, attempt, source_id, T0, T0),
+        )
+        conn.execute(
+            "INSERT INTO parse_attempts (raw_record_id, adapter, adapter_version, status, error, "
+            "created_at) VALUES (%s, 'dummy', '0.3.0', 'failed', 'broken', now())",
+            (raw_id,),
+        )
+    with client(app_db.app_url) as c:
+        current = c.get("/v1/observations", params={"source": name}, headers=auth(reader))
+        every = c.get(
+            "/v1/observations",
+            params={"source": name, "all_attempts": "true"},
+            headers=auth(reader),
+        )
+        dets = c.get("/v1/detections", params={"source": name}, headers=auth(reader))
+    assert [i["kind"] for i in current.json()["items"]] == ["dummy.v2"]
+    assert [i["kind"] for i in every.json()["items"]] == ["dummy.v2", "dummy.v1"]
+    # Meta-detections have no parse attempt and are always current; they carry their count.
+    [meta] = dets.json()["items"]
+    assert (meta["kind"], meta["subject"], meta["meta_count"]) == (
+        "tuisku.meta.source_limit_exceeded",
+        "json_keys",
+        1,
+    )

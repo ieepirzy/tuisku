@@ -26,6 +26,7 @@ def _filters(
     until: datetime | None = None,
     before: Annotated[int | None, Query(ge=1)] = None,
     limit: Annotated[int, Query(ge=1, le=read.MAX_LIMIT)] = 100,
+    all_attempts: bool = False,
 ) -> read.Filters:
     return read.Filters(
         kind=kind,
@@ -35,6 +36,7 @@ def _filters(
         until=until,
         before=before,
         limit=limit,
+        all_attempts=all_attempts,
     )
 
 
