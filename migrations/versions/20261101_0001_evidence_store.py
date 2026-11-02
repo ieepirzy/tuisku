@@ -678,6 +678,31 @@ CREATE TRIGGER sources_force_time BEFORE INSERT ON sources
 CREATE TRIGGER source_tokens_force_time BEFORE INSERT ON source_tokens
     FOR EACH ROW EXECUTE FUNCTION tuisku_force_creation_time();
 
+-- A disable or revocation request is stamped with the database's time, by every role, so the
+-- record of when it was asked for cannot be back-dated (ADR 0011).
+CREATE FUNCTION tuisku_force_request_time() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF TG_RELID = 'public.source_admin_requests'::regclass::oid AND TG_WHEN = 'BEFORE'
+       AND TG_OP = 'INSERT' AND TG_LEVEL = 'ROW' THEN
+        NEW.requested_at := now();
+    ELSIF TG_RELID = 'public.token_revocations'::regclass::oid AND TG_WHEN = 'BEFORE'
+       AND TG_OP = 'INSERT' AND TG_LEVEL = 'ROW' THEN
+        NEW.revoked_at := now();
+    ELSE
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER source_admin_requests_force_time BEFORE INSERT ON source_admin_requests
+    FOR EACH ROW EXECUTE FUNCTION tuisku_force_request_time();
+CREATE TRIGGER token_revocations_force_time BEFORE INSERT ON token_revocations
+    FOR EACH ROW EXECUTE FUNCTION tuisku_force_request_time();
+
 CREATE FUNCTION tuisku_current_bucket() RETURNS timestamptz
 LANGUAGE sql STABLE
 SET search_path = pg_catalog
@@ -897,5 +922,6 @@ def downgrade() -> None:
         "tuisku_xmin_is_current(xid), tuisku_queue_same_transaction(), tuisku_raw_source_name(), "
         "tuisku_meta_counters_guard(), tuisku_apply_source_request(), "
         "tuisku_apply_token_revocation(), tuisku_operator_revocation_guard(), "
-        "tuisku_apply_operator_revocation(), tuisku_force_creation_time()"
+        "tuisku_apply_operator_revocation(), tuisku_force_creation_time(), "
+        "tuisku_force_request_time()"
     )
