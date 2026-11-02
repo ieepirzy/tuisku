@@ -498,6 +498,33 @@ $$;
 CREATE TRIGGER raw_records_source_name BEFORE INSERT ON raw_records
     FOR EACH ROW EXECUTE FUNCTION tuisku_raw_source_name();
 
+-- The API role counts only its own ingest breaches, each for a source (ADR 0011). Worker meta
+-- counters (evaluation failures, notifications, backlog) are the worker's.
+CREATE FUNCTION tuisku_meta_counters_guard() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF TG_RELID NOT IN ('public.meta_counters'::regclass::oid) OR TG_WHEN <> 'BEFORE'
+       OR TG_OP NOT IN ('INSERT', 'UPDATE') OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF public.tuisku_is_worker() THEN
+        RETURN NEW;
+    END IF;
+    IF NEW.kind NOT IN ('tuisku.meta.source_limit_exceeded', 'tuisku.meta.source_rate_limited',
+                        'tuisku.meta.invalid_envelope')
+       OR NEW.source_id IS NULL THEN
+        RAISE EXCEPTION 'the API role counts only its own ingest breaches (ADR 0011)'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER meta_counters_guard BEFORE INSERT OR UPDATE ON meta_counters
+    FOR EACH ROW EXECUTE FUNCTION tuisku_meta_counters_guard();
+
 CREATE FUNCTION tuisku_current_bucket() RETURNS timestamptz
 LANGUAGE sql STABLE
 SET search_path = pg_catalog
@@ -649,8 +676,22 @@ def upgrade() -> None:
     op.execute(
         f'GRANT INSERT (observation_id, detection_id, enqueued_at) ON evaluation_queue TO "{app}"'
     )
-    # Ingest counts breach repeats (an upsert); it never deletes counters.
-    op.execute(f'GRANT SELECT, INSERT, UPDATE ON meta_counters TO "{app}"')
+    # Ingest counts breach repeats (an upsert of `count`); it never deletes counters. Column-level
+    # UPDATE only: table-level UPDATE would let it LOCK TABLE meta_counters (ADR 0011). Row-level
+    # security keeps the worker's counters out of its sight, so it cannot row-lock them either.
+    op.execute(f'GRANT SELECT, INSERT, UPDATE (count) ON meta_counters TO "{app}"')
+    op.execute("ALTER TABLE meta_counters ENABLE ROW LEVEL SECURITY")
+    op.execute(
+        f"""CREATE POLICY meta_counters_api ON meta_counters TO "{app}"
+            USING (source_id IS NOT NULL AND kind IN ('tuisku.meta.source_limit_exceeded',
+                   'tuisku.meta.source_rate_limited', 'tuisku.meta.invalid_envelope'))
+            WITH CHECK (source_id IS NOT NULL AND kind IN ('tuisku.meta.source_limit_exceeded',
+                   'tuisku.meta.source_rate_limited', 'tuisku.meta.invalid_envelope'))"""
+    )
+    op.execute(
+        f'CREATE POLICY meta_counters_worker ON meta_counters TO "{worker}" '
+        "USING (true) WITH CHECK (true)"
+    )
     op.execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "{app}"')
     op.execute(f'GRANT SELECT ON {", ".join(WORKER_READ)} TO "{worker}"')
     op.execute(f'GRANT SELECT, INSERT ON {", ".join(WORKER_INSERT)} TO "{worker}"')
@@ -681,5 +722,6 @@ def downgrade() -> None:
         "DROP FUNCTION tuisku_reject_evidence_change(), tuisku_person_tokens_owner_only(), "
         "tuisku_detections_worker_only(), tuisku_rule_links_worker_only(), tuisku_is_worker(), "
         "tuisku_current_bucket(), tuisku_derivation_same_transaction(), "
-        "tuisku_xmin_is_current(xid), tuisku_queue_same_transaction(), tuisku_raw_source_name()"
+        "tuisku_xmin_is_current(xid), tuisku_queue_same_transaction(), tuisku_raw_source_name(), "
+        "tuisku_meta_counters_guard()"
     )

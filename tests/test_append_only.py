@@ -464,3 +464,82 @@ def test_trigger_functions_refuse_to_run_on_other_tables(
         with pytest.raises(errors.InsufficientPrivilege, match="used out of place"):
             conn.execute("INSERT INTO elsewhere VALUES (1)")
         conn.rollback()
+
+
+# --- round eight: no table locks, counters only its own ------------------------------------------
+
+
+def test_the_app_role_cannot_lock_any_table(populated: AppDatabase) -> None:
+    """LOCK TABLE above ROW EXCLUSIVE needs table-level UPDATE, DELETE or TRUNCATE; the app role
+    holds none of them anywhere, so it cannot stall the worker behind a table lock."""
+    tables = [
+        t
+        for (t,) in query(
+            populated.owner_url, "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+        )
+        if t != "alembic_version"
+    ]
+    assert "meta_counters" in tables and len(tables) >= 13
+    for table in tables:
+        for mode in ("SHARE", "EXCLUSIVE", "ACCESS EXCLUSIVE"):
+            exc = _attempt(populated.app_url, f"LOCK TABLE {table} IN {mode} MODE")
+            assert isinstance(exc, errors.InsufficientPrivilege), (table, mode, exc)
+    rows = query(
+        populated.owner_url,
+        "SELECT table_name, privilege_type FROM information_schema.role_table_grants "
+        "WHERE grantee = %s AND privilege_type IN ('UPDATE', 'DELETE', 'TRUNCATE')",
+        (populated.app_role,),
+    )
+    assert rows == []  # only column-level UPDATE grants remain
+
+
+@pytest.mark.parametrize(
+    ("kind", "source"),
+    [
+        ("tuisku.meta.backlog", "id"),
+        ("tuisku.meta.evaluation_failed", "id"),
+        ("tuisku.meta.source_limit_exceeded", "NULL::bigint"),
+    ],
+)
+def test_app_role_counts_only_its_own_breaches(
+    populated: AppDatabase, kind: str, source: str
+) -> None:
+    exc = _attempt(
+        populated.app_url,
+        f"INSERT INTO meta_counters (source_id, kind, subject, bucket_start, count) "
+        f"SELECT {source}, '{kind}', 'x', now(), 1 FROM sources LIMIT 1",
+    )
+    assert isinstance(exc, errors.InsufficientPrivilege), exc
+
+
+def test_app_role_cannot_see_or_lock_worker_counters(populated: AppDatabase) -> None:
+    with psycopg.connect(populated.owner_url) as conn:
+        conn.execute(
+            "INSERT INTO meta_counters (source_id, kind, subject, bucket_start, count) "
+            "VALUES (NULL, 'tuisku.meta.backlog', %s, now(), 1)",
+            (f"probe-{uuid.uuid4().hex[:6]}",),
+        )
+    with psycopg.connect(populated.app_url) as conn:
+        [(seen,)] = conn.execute(
+            "SELECT count(*) FROM meta_counters WHERE kind = 'tuisku.meta.backlog'"
+        ).fetchall()
+        locked = conn.execute(
+            "SELECT 1 FROM meta_counters WHERE kind = 'tuisku.meta.backlog' FOR UPDATE"
+        ).fetchall()
+        conn.rollback()
+    assert seen == 0 and locked == []
+
+
+def test_the_counter_trigger_holds_without_row_level_security(populated: AppDatabase) -> None:
+    """Behind the policy: with row-level security switched off (in a transaction that is rolled
+    back), the trigger still refuses the app role a worker counter."""
+    with psycopg.connect(populated.owner_url) as conn:
+        conn.execute(f'GRANT "{populated.app_role}" TO CURRENT_USER')  # type: ignore[arg-type]
+        conn.execute("ALTER TABLE meta_counters DISABLE ROW LEVEL SECURITY")
+        conn.execute(f'SET LOCAL ROLE "{populated.app_role}"')  # type: ignore[arg-type]
+        with pytest.raises(errors.InsufficientPrivilege, match="its own ingest breaches"):
+            conn.execute(
+                "INSERT INTO meta_counters (source_id, kind, subject, bucket_start, count) "
+                "SELECT id, 'tuisku.meta.backlog', 'x', now(), 1 FROM sources LIMIT 1"
+            )
+        conn.rollback()

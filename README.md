@@ -122,6 +122,18 @@ Tuisku's trigger functions to a table of its own. The migrating role must theref
 database, or the migration stops and asks for the `REVOKE TEMP` to be run by its owner. Operator
 tokens can be created without a person (read, triage, admin) and only revoked afterwards.
 
+Tuisku expects a database of its own. `REVOKE TEMP ON DATABASE ... FROM PUBLIC` applies to the
+whole database, so any other application sharing it would lose temporary tables too. Two things
+no grant can stop remain open to any role that can log in:
+
+- **Large objects:** any role can call `lo_create()` and write large objects.
+- **Unbounded writes:** a compromised API process can still insert evidence, and with it
+  queue rows, as fast as Postgres accepts them.
+
+Give the database a disk quota, or at least disk alerts, sized to the retention policy. The
+worker's backlog check (`tuisku.meta.backlog`) pages when the queue or the notification outbox
+falls behind.
+
 The worker role alone writes rule output, so a compromised API process cannot forge it. Only the
 worker role gets `INSERT` on `detection_evidence`. A trigger lets only the worker role insert
 `tuisku`-evaluated detections and links to them. The one exception is the API's own bucketed
