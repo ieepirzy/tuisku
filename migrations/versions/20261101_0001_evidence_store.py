@@ -8,6 +8,11 @@ Layers (ADR 0002): raw_records / raw_duplicates / parse_attempts are L0, observa
 detections L2. Evidence tables are append-only (ADR 0004 sections 3-4): the app role gets only
 SELECT and INSERT on them, and row and statement triggers reject UPDATE, DELETE and TRUNCATE
 for everyone, including the owner, as a second line of defence.
+
+The worker connects as its own role (TUISKU_WORKER_ROLE, ADR 0011), so a compromised API process
+cannot forge rule output: only the worker role may insert into detection_evidence, and a trigger
+keeps tuisku-evaluated detections and links to them to the worker role, except the API's own
+bucketed ingest meta-detections.
 """
 
 import re
@@ -44,6 +49,14 @@ WORKING_TABLES = (
     "evaluation_dead_letter",
     "meta_counters",
 )
+
+# ADR 0011: the worker connects as its own role. Only it writes rule output: the API role never
+# gets INSERT on detection_evidence, and a trigger keeps tuisku-evaluated detections (and links
+# to them) to the worker, apart from the API's own ingest meta-detections.
+API_INSERT = tuple(t for t in EVIDENCE_TABLES if t != "detection_evidence")
+WORKER_READ = ("raw_records", "parse_attempts", "observations", "sources")
+WORKER_INSERT = ("detections", "detection_observations", "detection_evidence")
+WORKER_WORKING = ("evaluation_queue", "evaluation_dead_letter", "meta_counters")
 
 _ROLE_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
@@ -333,13 +346,66 @@ CREATE TRIGGER operator_tokens_person_owner_only BEFORE INSERT OR UPDATE ON oper
 """
 
 
-def _app_role() -> str | None:
-    role = context.config.attributes.get("app_role")
+def _role(name: str) -> str | None:
+    role = context.config.attributes.get(name)
     if not role:
         return None
     if not isinstance(role, str) or not _ROLE_NAME.fullmatch(role):
-        raise ValueError("app_role must be a lowercase Postgres role name")
+        raise ValueError(f"{name} must be a lowercase Postgres role name")
     return role
+
+
+def _worker_functions_sql(worker: str | None) -> str:
+    """ADR 0011 triggers. The worker role's name is fixed into the function at migration time,
+    like the grants; in single-role setups only the owner qualifies (and does everything)."""
+    worker_literal = f"'{worker}'" if worker else "NULL"  # validated against _ROLE_NAME
+    return f"""
+CREATE FUNCTION tuisku_is_worker() RETURNS boolean
+LANGUAGE sql STABLE
+SET search_path = pg_catalog
+AS $$
+    SELECT current_user = (SELECT pg_get_userbyid(relowner) FROM pg_class
+                           WHERE oid = 'public.detections'::regclass)
+        OR current_user IS NOT DISTINCT FROM {worker_literal}::name
+$$;
+
+CREATE FUNCTION tuisku_detections_worker_only() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF NEW.evaluator = 'tuisku' AND NOT public.tuisku_is_worker()
+       -- the API's own ingest meta-detections (ADR 0005): identity is the kind, bucketed
+       AND NOT (NEW.kind LIKE 'tuisku.meta.%' AND NEW.identity = NEW.kind
+                AND NEW.bucket_start IS NOT NULL)
+    THEN
+        RAISE EXCEPTION 'only the worker role writes tuisku-evaluated detections (ADR 0011)'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER detections_worker_only BEFORE INSERT ON detections
+    FOR EACH ROW EXECUTE FUNCTION tuisku_detections_worker_only();
+
+CREATE FUNCTION tuisku_rule_links_worker_only() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF NOT public.tuisku_is_worker() AND EXISTS (
+        SELECT 1 FROM public.detections d
+        WHERE d.id = NEW.detection_id AND d.evaluator = 'tuisku'
+    ) THEN
+        RAISE EXCEPTION 'only the worker role links rule output to evidence (ADR 0011)'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER detection_observations_worker_only BEFORE INSERT ON detection_observations
+    FOR EACH ROW EXECUTE FUNCTION tuisku_rule_links_worker_only();
+"""
 
 
 def upgrade() -> None:
@@ -356,12 +422,20 @@ def upgrade() -> None:
             "FOR EACH STATEMENT EXECUTE FUNCTION tuisku_reject_evidence_change()"
         )
 
-    role = _app_role()
-    if role is None:
-        return  # single-role setup: the migrating role is also the app role
-    op.execute(f'GRANT SELECT, INSERT ON {", ".join(EVIDENCE_TABLES)} TO "{role}"')
-    op.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON {", ".join(WORKING_TABLES)} TO "{role}"')
-    op.execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "{role}"')
+    app, worker = _role("app_role"), _role("worker_role")
+    op.execute(_worker_functions_sql(worker if app else None))
+    if app is None:
+        return  # single-role setup: the migrating role (the owner) does everything
+    if worker is None:
+        raise ValueError("a separate worker role is required with an app role (ADR 0011)")
+    op.execute(f'GRANT SELECT ON {", ".join(EVIDENCE_TABLES)} TO "{app}"')
+    op.execute(f'GRANT INSERT ON {", ".join(API_INSERT)} TO "{app}"')
+    op.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON {", ".join(WORKING_TABLES)} TO "{app}"')
+    op.execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "{app}"')
+    op.execute(f'GRANT SELECT ON {", ".join(WORKER_READ)} TO "{worker}"')
+    op.execute(f'GRANT SELECT, INSERT ON {", ".join(WORKER_INSERT)} TO "{worker}"')
+    op.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON {", ".join(WORKER_WORKING)} TO "{worker}"')
+    op.execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "{worker}"')
 
 
 def downgrade() -> None:
@@ -370,4 +444,7 @@ def downgrade() -> None:
         "detection_observations, detections, observations, parse_attempts, raw_duplicates, "
         "raw_records, operator_tokens, source_tokens, sources"
     )
-    op.execute("DROP FUNCTION tuisku_reject_evidence_change(), tuisku_person_tokens_owner_only()")
+    op.execute(
+        "DROP FUNCTION tuisku_reject_evidence_change(), tuisku_person_tokens_owner_only(), "
+        "tuisku_detections_worker_only(), tuisku_rule_links_worker_only(), tuisku_is_worker()"
+    )

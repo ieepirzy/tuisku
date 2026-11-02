@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     # SELECT, INSERT on evidence tables and full DML on working tables. Unset: no grants
     # (single-role development setups).
     app_role: str | None = None
+    # Role the worker connects as (ADR 0011). With app_role set, `tuisku migrate` grants it what
+    # the worker writes (rule output, firing keys, links, findings, incidents) and the app role
+    # loses those writes. Ignored in single-role setups (app_role unset).
+    worker_role: str = "tuisku_worker"
 
     # Ingest limits (ADR 0005), enforced at the HTTP boundary.
     ingest_max_body_bytes: int = Field(default=5 * 1024 * 1024, ge=1)
@@ -76,6 +80,13 @@ class Settings(BaseSettings):
         if scheme not in _ALLOWED_SCHEMES:
             # Never echo the value: it may carry a password.
             raise ValueError("must be a postgresql:// URL")
+        return value
+
+    @field_validator("worker_role")
+    @classmethod
+    def _check_worker_role(cls, value: str) -> str:
+        if not _ROLE_NAME.fullmatch(value):
+            raise ValueError("must be a lowercase Postgres role name ([a-z_][a-z0-9_]*)")
         return value
 
     @field_validator("app_role")

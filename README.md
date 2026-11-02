@@ -72,21 +72,33 @@ each raw record's newest successful parse attempt unless `all_attempts=true`) an
 
 ## Database roles
 
-Evidence tables are append-only (ADR 0004). Run `tuisku migrate` as the owning role and the
-API as a separate, non-owning app role, named by `TUISKU_APP_ROLE` when migrating:
+Evidence tables are append-only (ADR 0004). Run `tuisku migrate` as the owning role, the API as
+a non-owning app role (`TUISKU_APP_ROLE`), and the rule worker as a separate worker role
+(`TUISKU_WORKER_ROLE`, default `tuisku_worker`), both named when migrating:
 
 ```sh
-# as a superuser, once:  CREATE ROLE tuisku_app LOGIN PASSWORD '...';
-TUISKU_APP_ROLE=tuisku_app TUISKU_DATABASE_URL=<owner url> uv run tuisku migrate
+# as a superuser, once:
+#   CREATE ROLE tuisku_app LOGIN PASSWORD '...';
+#   CREATE ROLE tuisku_worker LOGIN PASSWORD '...';
+TUISKU_APP_ROLE=tuisku_app TUISKU_WORKER_ROLE=tuisku_worker \
+  TUISKU_DATABASE_URL=<owner url> uv run tuisku migrate
 TUISKU_DATABASE_URL=<tuisku_app url> uv run tuisku api
 ```
 
-With `TUISKU_APP_ROLE` set, migrations grant it `SELECT, INSERT` on evidence tables
-(`raw_records`, `raw_duplicates`, `parse_attempts`, `observations`, `detections`,
-`detection_observations`, `detection_evidence`), `SELECT, INSERT, UPDATE, DELETE` on working
-tables (`sources`, `source_tokens`, `operator_tokens`, `evaluation_queue`,
-`evaluation_dead_letter`, `meta_counters`) and `USAGE` on sequences. Grants are made by the revision that
-creates each table, so set the variable before the first `tuisku migrate`; for an existing
-database, run the same `GRANT` statements by hand. Left unset, no grants are made: a single
-role does everything, which suits local development only. Independently of roles, triggers
-reject `UPDATE`, `DELETE` and `TRUNCATE` on evidence tables for every role, owner included.
+With `TUISKU_APP_ROLE` set, migrations grant the app role `SELECT` on evidence tables and
+`INSERT` on those that ingest writes (`raw_records`, `raw_duplicates`, `parse_attempts`,
+`observations`, `detections`, `detection_observations`). They also grant it
+`SELECT, INSERT, UPDATE, DELETE` on working tables (`sources`, `source_tokens`,
+`operator_tokens`, `evaluation_queue`, `evaluation_dead_letter`, `meta_counters`) and `USAGE` on
+sequences.
+
+The worker role alone writes rule output, so a compromised API process cannot forge it. Only the
+worker role gets `INSERT` on `detection_evidence`. A trigger lets only the worker role insert
+`tuisku`-evaluated detections and links to them. The one exception is the API's own bucketed
+ingest meta-detections, whose identity is their kind.
+
+Grants are made by the revision that creates each table, so set both variables before the first
+`tuisku migrate`. For an existing database, run the same `GRANT` statements by hand. With
+`TUISKU_APP_ROLE` unset no grants are made, and the owning role does everything; that suits
+local development only. Independently of roles, triggers reject `UPDATE`, `DELETE` and
+`TRUNCATE` on evidence tables for every role, owner included.
