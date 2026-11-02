@@ -48,8 +48,9 @@ able to forge rule output or firing keys.
   - `sources`: `SELECT`, `INSERT`, `UPDATE (disabled_at)`. `source_tokens`: `SELECT`,
     `INSERT`, `UPDATE (revoked_at, last_used_at)`. Neither can be deleted, and sources are
     renamed only by the owner.
-  - `operator_tokens`: `SELECT`, `INSERT`, `UPDATE`, never `DELETE`; person-bound and approve
-    tokens stay owner-only (ADR 0005).
+  - `operator_tokens`: `SELECT`, `INSERT` of tokens without a person (read, triage, admin;
+    person-bound and approve tokens stay owner-only, ADR 0005), `UPDATE (revoked_at)` only,
+    never `DELETE`.
   - `findings`: `UPDATE` of the triage columns only (`status`, `suppressed_until`,
     `suppression_reason`, `suppressed_at`, `count_at_suppression`, `updated_at`).
   - `incidents`: `UPDATE` of `status`, `disposition` and `updated_at` only.
@@ -60,7 +61,8 @@ able to forge rule output or firing keys.
     30 days from the finding's first suppression, so a lift and re-suppress does not restart the
     clock.
   - `finding_events`, `incident_events`: `INSERT` only with an `operator:<uid>` actor naming a
-    live (unrevoked) operator token, and only triage kinds (`status_changed` and `suppressed`
+    live operator token (not revoked, not expired, holding `triage` or `admin`), and only
+    triage kinds (`status_changed` and `suppressed`
     for findings; `status_changed`, `reopened` and `note` for incidents) (a trigger).
   - `notifications`: nothing. The pages triage causes are written by owner triggers running as
     `SECURITY DEFINER`, whoever made the change: a finding leaving `suppressed` (to `open`,
@@ -74,6 +76,15 @@ able to forge rule output or firing keys.
   claims, updates or deletes, events with `system`, `rule:` or `investigator:` actors or
   non-triage kinds, and the worker's meta kinds (`evaluation_failed`,
   `notification_undeliverable`, `backlog`) in any bucket.
+- **Functions and temporary tables.** No `tuisku_*` function is executable by PUBLIC. Firing a
+  trigger needs no `EXECUTE`. Only the read-only helpers `tuisku_is_worker()`,
+  `tuisku_xmin_is_current()` and `tuisku_current_bucket()` are granted, to both runtime roles.
+  Every trigger function checks `TG_RELID`, `TG_WHEN`, `TG_OP` and `TG_LEVEL`, and refuses to
+  run anywhere but on its own table. PUBLIC has no `TEMP` on the database, and the migration
+  stops if a runtime role still has it. So no role can attach a Tuisku trigger function,
+  least of all a `SECURITY DEFINER` pager, to a table of its own.
+- **Delivery order.** The drain delivers the most severe notification first, then the oldest,
+  so a backlog of lesser pages never holds back a newer high-severity one.
 - **The worker role** writes all of the above that the API cannot. A queued row whose parse
   attempt was superseded is never dropped as stale: no reprocessing run exists yet, so the
   worker raises a `tuisku.meta.evaluation_failed` (subject `superseded_derivation`) and

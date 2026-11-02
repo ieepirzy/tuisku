@@ -624,3 +624,27 @@ def test_notification_created_at_is_the_database_clock(fresh_database_url: str) 
         ).fetchall()
         conn.rollback()
     assert created == now
+
+
+# --- round seven: a backlog never starves a newer, more severe page ---------------------------
+
+
+def test_the_drain_delivers_the_most_severe_page_first(fresh_database_url: str) -> None:
+    url = fresh_database_url
+    with psycopg.connect(url) as conn:  # 600 old low-severity pages, then one critical
+        conn.execute(
+            "INSERT INTO notifications (dedupe_key, kind, severity_id, payload, created_at) "
+            "SELECT 'low:' || g, 'finding_occurrence', 1, '{}', now() "
+            "FROM generate_series(1, 600) g"
+        )
+        conn.execute(
+            "INSERT INTO notifications (dedupe_key, kind, severity_id, payload, created_at) "
+            "VALUES ('critical', 'finding_opened', 5, '{}', now())"
+        )
+    notifier = RecordingNotifier()
+    run_async(url, lambda conn: notify.drain(conn, notifier, T, limit=10))
+    kinds = notifier.kinds()
+    assert kinds[0] == "finding_opened" and len(kinds) == 10
+    # Then the rest by age.
+    run_async(url, lambda conn: notify.drain(conn, notifier, T, limit=1000))
+    assert len(notifier.sent) == 601

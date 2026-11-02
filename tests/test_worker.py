@@ -280,11 +280,12 @@ def test_overflow_finding_at_the_open_findings_cap(fresh_database_url: str) -> N
     )
     assert sorted(g[0][0] for g in groups) == ["svc-c", "svc-d"]
     kinds = [n["kind"] for n in notifier.sent if n.get("rule", "").startswith("0ce68af0")]
+    # Delivered most severe first: the overflow pages (high) before the openings (medium).
     assert kinds == [
-        "finding_opened",
-        "finding_opened",
         "finding_overflow_group",
         "finding_overflow_group",
+        "finding_opened",
+        "finding_opened",
     ]
     # Detection kept working: every refusal fired.
     assert fired(url).count(SERVICE_RULE) == 4

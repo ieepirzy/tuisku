@@ -532,3 +532,135 @@ def test_closing_the_incident_of_a_suppressed_finding_pages_its_thresholds(
     run_worker(app_db.worker_url, rules, Clock(AT + timedelta(minutes=21)), notifier)
     pages = [n for n in notifier.sent if n.get("finding_uid") == uid]
     assert [(n["kind"], n["threshold"]) for n in pages] == [("finding_threshold", 10)]
+
+
+# --- round seven: the temp-table attack on the definer pagers ---------------------------------
+
+_PAGERS = [
+    (
+        "tuisku_page_lifted_thresholds",
+        "CREATE TEMP TABLE f (uid uuid, status text, count bigint, count_at_suppression bigint, "
+        "severity_id smallint, rule_id uuid, rule_rev int, title text, entity_keys text[]); "
+        "CREATE TRIGGER t AFTER UPDATE OF status ON f FOR EACH ROW "
+        "EXECUTE FUNCTION public.tuisku_page_lifted_thresholds()",
+        "INSERT INTO f VALUES (gen_random_uuid(), 'suppressed', 1000, 0, 0, gen_random_uuid(), 1, "
+        "'forged', '{}'); UPDATE f SET status = 'open'",
+    ),
+    (
+        "tuisku_page_reopened_incident",
+        "CREATE TEMP TABLE i (uid uuid, status text, severity_id smallint, title text, "
+        "entity_keys text[]); CREATE TRIGGER t AFTER UPDATE OF status ON i FOR EACH ROW "
+        "EXECUTE FUNCTION public.tuisku_page_reopened_incident()",
+        "INSERT INTO i VALUES (gen_random_uuid(), 'contained', 0, 'forged', '{}'); "
+        "UPDATE i SET status = 'investigating'",
+    ),
+    (
+        "tuisku_page_backlog",
+        "CREATE TEMP TABLE b (uid uuid, severity_id smallint, title text, subject text, "
+        "entity_keys text[], kind text); CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW "
+        "EXECUTE FUNCTION public.tuisku_page_backlog()",
+        "INSERT INTO b SELECT gen_random_uuid(), 0, 'junk', 'x', '{}', 'tuisku.meta.backlog' "
+        "FROM generate_series(1, 50)",
+    ),
+]
+
+
+@pytest.mark.parametrize(("function", "setup", "fire"), _PAGERS)
+def test_the_api_role_cannot_create_a_temp_table_to_run_a_pager(
+    app_db: AppDatabase, function: str, setup: str, fire: str
+) -> None:
+    """The round-seven probe as the API role: no TEMP, so no table of its own to trigger on."""
+    exc = _refused(app_db.app_url, setup)
+    assert "permission denied" in str(exc)
+
+
+@pytest.mark.parametrize(("function", "setup", "fire"), _PAGERS)
+def test_even_with_temp_the_api_role_cannot_attach_a_pager(
+    app_db: AppDatabase, function: str, setup: str, fire: str
+) -> None:
+    """Behind the missing TEMP: given TEMP (in a transaction that is rolled back), the API role
+    still cannot attach the function, because PUBLIC has no EXECUTE on it."""
+    with psycopg.connect(app_db.owner_url) as conn:
+        dbname = conn.info.dbname
+        conn.execute(f'GRANT "{app_db.app_role}" TO CURRENT_USER')  # type: ignore[arg-type]
+        conn.execute(f'GRANT TEMP ON DATABASE "{dbname}" TO "{app_db.app_role}"')  # type: ignore[arg-type]
+        conn.execute(f'SET LOCAL ROLE "{app_db.app_role}"')  # type: ignore[arg-type]
+        with pytest.raises(
+            errors.InsufficientPrivilege, match=f"permission denied for function public.{function}"
+        ):
+            _run_all(conn, setup)
+        conn.rollback()
+
+
+@pytest.mark.parametrize(("function", "setup", "fire"), _PAGERS)
+def test_a_pager_refuses_to_run_on_any_other_table(
+    app_db: AppDatabase, function: str, setup: str, fire: str
+) -> None:
+    """Behind EXECUTE: even the owner, who may attach it, cannot make it write a page from a
+    table of its own."""
+    with psycopg.connect(app_db.owner_url) as conn:
+        [(before,)] = conn.execute("SELECT count(*) FROM notifications").fetchall()
+        _run_all(conn, setup)
+        with pytest.raises(errors.InsufficientPrivilege, match="used out of place"):
+            _run_all(conn, fire)
+        conn.rollback()
+        [(after,)] = conn.execute("SELECT count(*) FROM notifications").fetchall()
+    assert after == before
+
+
+@pytest.mark.parametrize(
+    ("expires", "roles", "message"),
+    [
+        ("now() - interval '1 minute'", "{triage}", "no live operator token"),
+        ("NULL", "{read}", "no live operator token"),
+    ],
+)
+def test_operator_events_need_an_unexpired_triage_token(
+    app_db: AppDatabase, tmp_path: Path, expires: str, roles: str, message: str
+) -> None:
+    uid, *_ = _agent_finding(app_db, tmp_path)
+    token = str(uuid.uuid4())
+    with psycopg.connect(app_db.owner_url) as conn:
+        conn.execute(  # type: ignore[arg-type]
+            "INSERT INTO operator_tokens (uid, name, roles, token_sha256, expires_at) "
+            f"VALUES (%s, 'x', %s, sha256(%s::bytea), {expires})",
+            (token, roles, token.encode()),
+        )
+    exc = _refused(
+        app_db.app_url,
+        "INSERT INTO finding_events (finding_id, actor, kind) SELECT id, %(actor)s, "
+        "'status_changed' FROM findings WHERE uid = %(uid)s",
+        {"actor": f"operator:{token}", "uid": uid},
+    )
+    assert message in str(exc)
+
+
+@pytest.mark.parametrize(
+    ("function", "event"),
+    [
+        ("tuisku_force_event_time", "BEFORE INSERT"),
+        ("tuisku_check_firing_identity", "BEFORE INSERT"),
+        ("tuisku_events_operator_only", "BEFORE INSERT"),
+        ("tuisku_findings_triage_guard", "BEFORE UPDATE"),
+        ("tuisku_incidents_triage_guard", "BEFORE UPDATE"),
+    ],
+)
+def test_revision_0002_trigger_functions_refuse_other_tables(
+    app_db: AppDatabase, function: str, event: str
+) -> None:
+    with psycopg.connect(app_db.owner_url) as conn:
+        conn.execute("CREATE TEMP TABLE elsewhere (i int)")
+        conn.execute("INSERT INTO elsewhere VALUES (1)")
+        args = "('at')" if function == "tuisku_force_event_time" else "()"
+        conn.execute(  # type: ignore[arg-type]
+            f"CREATE TRIGGER t {event} ON elsewhere FOR EACH ROW "
+            f"EXECUTE FUNCTION public.{function}{args}"
+        )
+        fire = (
+            "INSERT INTO elsewhere VALUES (2)"
+            if "INSERT" in event
+            else "UPDATE elsewhere SET i = 3"
+        )
+        with pytest.raises(errors.InsufficientPrivilege, match="used out of place"):
+            conn.execute(fire)  # type: ignore[arg-type]
+        conn.rollback()

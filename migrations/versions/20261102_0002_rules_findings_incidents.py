@@ -329,6 +329,11 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
 BEGIN
+    IF TG_RELID NOT IN ('public.finding_events'::regclass::oid, 'public.incident_events'::regclass::oid, 'public.finding_detections'::regclass::oid, 'public.incident_findings'::regclass::oid, 'public.finding_overflow_groups'::regclass::oid, 'public.rule_firings'::regclass::oid, 'public.pack_loads'::regclass::oid, 'public.notification_deliveries'::regclass::oid, 'public.notifications'::regclass::oid) OR TG_WHEN <> 'BEFORE' OR TG_OP NOT IN ('INSERT')
+       OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
     -- TG_ARGV[0] names the timestamp column of the table.
     NEW := jsonb_populate_record(NEW, jsonb_build_object(TG_ARGV[0], now()));
     RETURN NEW;
@@ -349,6 +354,11 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
 BEGIN
+    IF TG_RELID NOT IN ('public.rule_firings'::regclass::oid) OR TG_WHEN <> 'BEFORE' OR TG_OP NOT IN ('INSERT')
+       OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
     IF NOT EXISTS (
         SELECT 1 FROM public.detections d
         WHERE d.id = NEW.firing_detection_id AND d.evaluator = 'tuisku'
@@ -395,6 +405,11 @@ AS $$
 DECLARE
     kinds text[];
 BEGIN
+    IF TG_RELID NOT IN ('public.finding_events'::regclass::oid, 'public.incident_events'::regclass::oid) OR TG_WHEN <> 'BEFORE' OR TG_OP NOT IN ('INSERT')
+       OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
     IF public.tuisku_is_worker() THEN
         RETURN NEW;
     END IF;
@@ -406,8 +421,10 @@ BEGIN
     IF NEW.actor !~ '^operator:[0-9a-f-]{{36}}$' OR NOT EXISTS (
         SELECT 1 FROM public.operator_tokens t
         WHERE t.uid = substring(NEW.actor FROM 10)::uuid AND t.revoked_at IS NULL
+          AND (t.expires_at IS NULL OR t.expires_at > now())
+          AND t.roles && ARRAY['triage', 'admin']::text[]
     ) THEN
-        RAISE EXCEPTION 'no live operator token %', NEW.actor
+        RAISE EXCEPTION 'no live operator token with the triage role: %', NEW.actor
             USING ERRCODE = 'insufficient_privilege';
     END IF;
     kinds := CASE TG_TABLE_NAME
@@ -445,6 +462,11 @@ AS $$
 DECLARE
     began timestamptz;
 BEGIN
+    IF TG_RELID NOT IN ('public.findings'::regclass::oid) OR TG_WHEN <> 'BEFORE' OR TG_OP NOT IN ('UPDATE')
+       OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
     IF public.tuisku_is_worker() THEN
         RETURN NEW;
     END IF;
@@ -500,6 +522,11 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
 BEGIN
+    IF TG_RELID NOT IN ('public.incidents'::regclass::oid) OR TG_WHEN <> 'BEFORE' OR TG_OP NOT IN ('UPDATE')
+       OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
     IF public.tuisku_is_worker() THEN
         RETURN NEW;
     END IF;
@@ -540,6 +567,11 @@ AS $$
 DECLARE
     threshold integer;
 BEGIN
+    IF TG_RELID NOT IN ('public.findings'::regclass::oid) OR TG_WHEN <> 'AFTER' OR TG_OP NOT IN ('UPDATE')
+       OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
     IF OLD.status = 'suppressed' AND NEW.status IN ('open', 'acknowledged', 'resolved') THEN
         FOREACH threshold IN ARRAY ARRAY[10, 100, 1000] LOOP
             IF coalesce(OLD.count_at_suppression, NEW.count) < threshold
@@ -577,6 +609,11 @@ SECURITY DEFINER
 SET search_path = pg_catalog
 AS $$
 BEGIN
+    IF TG_RELID NOT IN ('public.incidents'::regclass::oid) OR TG_WHEN <> 'AFTER' OR TG_OP NOT IN ('UPDATE')
+       OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
     IF OLD.status IN ('contained', 'resolved') AND NEW.status = 'investigating' THEN
         INSERT INTO public.notifications (dedupe_key, kind, severity_id, payload, created_at)
         VALUES (
@@ -607,6 +644,11 @@ SECURITY DEFINER
 SET search_path = pg_catalog
 AS $$
 BEGIN
+    IF TG_RELID NOT IN ('public.detections'::regclass::oid) OR TG_WHEN <> 'AFTER' OR TG_OP NOT IN ('INSERT')
+       OR TG_LEVEL <> 'ROW' THEN
+        RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
     INSERT INTO public.notifications (dedupe_key, kind, severity_id, payload, created_at)
     VALUES (
         'backlog:' || NEW.uid,
@@ -639,6 +681,24 @@ def _role(name: str) -> str | None:
     return role
 
 
+# ADR 0011: no tuisku_* function is callable by PUBLIC (see revision 0001); this revision's
+# functions, the SECURITY DEFINER pagers included, get the same treatment.
+REVOKE_FUNCTIONS_SQL = """
+DO $$
+DECLARE
+    f regprocedure;
+BEGIN
+    FOR f IN
+        SELECT p.oid::regprocedure FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public' AND p.proname LIKE 'tuisku\\_%'
+    LOOP
+        EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC', f);
+    END LOOP;
+END
+$$;
+"""
+
+
 def upgrade() -> None:
     op.execute(TABLES_SQL)
     op.execute(FORCE_TIME_FUNCTION_SQL)
@@ -650,6 +710,7 @@ def upgrade() -> None:
     op.execute(FIRING_IDENTITY_FUNCTION_SQL)
     op.execute(EVENT_ACTOR_SQL)
     op.execute(TRIAGE_GUARD_SQL)
+    op.execute(REVOKE_FUNCTIONS_SQL)
     # The evidence trigger function comes from revision 0001.
     for table in EVIDENCE_TABLES:
         op.execute(
