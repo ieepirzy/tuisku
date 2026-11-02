@@ -65,7 +65,7 @@ def test_golden(path: Path) -> None:
 
 def test_registered() -> None:
     assert registry.get("harava") is ADAPTER
-    assert ADAPTER.version == "1.0.0"
+    assert ADAPTER.version == "1.1.0"
 
 
 class TestRefusals:
@@ -474,6 +474,28 @@ class TestOtlp:
         assert obs.attributes["is_monotonic"] is True
         assert obs.event_time == datetime(2026, 11, 1, 9, 14, 3, 512000, tzinfo=UTC)
         assert obs.flags == ()
+
+    @pytest.mark.parametrize("value", ["-1", "-1000000000000000"])
+    def test_negative_counter_is_not_a_sample(self, value: str) -> None:
+        good = dp("2", detector="email", location="query", encoding="percent")
+        bad = dp(value, detector="phone", location="host", encoding="plain")
+        r = parse(otlp([good, bad]))
+        assert [o.kind for o in r.observations] == ["metric.sample", "harava.unknown"]
+        assert "negative_counter" in r.observations[1].flags
+
+    def test_negative_double_is_not_a_sample(self) -> None:
+        point = {k: v for k, v in GOOD.items() if k != "asInt"} | {"asDouble": -0.5}
+        (obs,) = parse(otlp([point])).observations
+        assert obs.kind == "harava.unknown" and "negative_counter" in obs.flags
+
+    @pytest.mark.parametrize("monotonic", [{"isMonotonic": False}, {"isMonotonic": None}])
+    def test_non_monotonic_sum_is_not_a_sample(self, monotonic: dict[str, Any]) -> None:
+        body = json.loads(otlp([GOOD], **monotonic))
+        if monotonic["isMonotonic"] is None:  # absent: OTLP's default is false
+            del body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0]["sum"]["isMonotonic"]
+        (obs,) = parse(json.dumps(body)).observations
+        assert obs.kind == "harava.unknown"
+        assert "non_monotonic_sum" in obs.flags and "non_cumulative_sum" not in obs.flags
 
     def test_temporality_enum_name(self) -> None:
         r = parse(otlp([GOOD], aggregationTemporality="AGGREGATION_TEMPORALITY_CUMULATIVE"))

@@ -1,6 +1,6 @@
 [
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [
       {
         "attack": [],
@@ -61,7 +61,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [
       {
         "attack": [],
@@ -118,7 +118,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {
@@ -147,7 +147,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {
@@ -171,7 +171,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {
@@ -197,7 +197,7 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {
@@ -222,15 +222,15 @@
     ]
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "error": "wrapper time is not a valid RFC 3339 timestamp"
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "error": "docker json-file record has no string 'log'"
   },
   {
-    "adapter": "harava@1.0.0",
+    "adapter": "harava@1.1.0",
     "detections": [],
     "observations": [
       {

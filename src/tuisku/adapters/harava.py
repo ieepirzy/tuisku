@@ -24,7 +24,10 @@ Harava itself never logs. Anything else is a parse failure.
 OTLP: an ``ExportMetricsServiceRequest`` in OTLP/JSON encoding, detected by a top-level
 ``resourceMetrics``. Each datapoint of a cumulative sum becomes a ``metric.sample``. Other metrics
 (gauges, histograms, non-cumulative sums), malformed metrics and datapoints that cannot be read
-become flagged ``harava.unknown`` observations; the rest of the request is kept.
+become flagged ``harava.unknown`` observations; the rest of the request is kept. A sum that is
+not monotonic (``isMonotonic`` false or absent) is flagged ``non_monotonic_sum`` and a negative
+value on a monotonic counter ``negative_counter``: both become ``harava.unknown``, so no rule
+ever sums a value that can go down.
 
 Privacy: Harava never logs the refused URL, the matched value or a hash of either, and its
 metrics never carry caller, host or URL. This adapter adds no field for any of them.
@@ -788,6 +791,10 @@ def _sample(
     except AdapterError as exc:
         raise _Skip("invalid_time", str(exc)) from None
     value = _value(dp)
+    if value < 0:
+        # A monotonic counter never goes below zero; a negative start could cancel a whole
+        # stage's sum downstream. Kept as harava.unknown, flagged.
+        raise _Skip("negative_counter", "monotonic counter value is negative")
     for label, allowed in KNOWN_LABELS.get(name, {}).items():
         if labels.get(label) not in allowed:
             flags.append("unknown_label_value")
@@ -895,7 +902,11 @@ def _metric(
         except AdapterError as exc:
             raise _Skip("invalid_metric", str(exc)) from None
         temporality = _temporality(data)
-        if mtype == "sum" and temporality == "cumulative":
+        monotonic = data.get("isMonotonic", False)
+        if mtype == "sum" and temporality == "cumulative" and monotonic is False:
+            # An up-down counter: its deltas can be negative, so rules never sum it.
+            flags.append("non_monotonic_sum")
+        elif mtype == "sum" and temporality == "cumulative":
             extra = _bound_unmapped(
                 {k: v for k, v in metric.items() if k not in ("name", "unit", "sum")},
                 MAX_UNMAPPED_REPEATED,
@@ -906,7 +917,9 @@ def _metric(
                 return _samples(name, data, common, flags, context | _section("metric", extra))
             except AdapterError as exc:
                 raise _Skip("invalid_metric", str(exc)) from None
-        if mtype == "sum":
+        if "non_monotonic_sum" in flags:
+            pass
+        elif mtype == "sum":
             flags.append("non_cumulative_sum")
         else:
             flags.append("unsupported_metric_type")
@@ -1009,7 +1022,7 @@ def _parse_otlp(obj: dict[str, Any], json_flags: tuple[str, ...]) -> ParseResult
 
 class HaravaAdapter:
     name = "harava"
-    version = "1.0.0"
+    version = "1.1.0"
 
     def parse(self, raw: RawRecord, options: Mapping[str, Any]) -> ParseResult:
         if len(raw.body) > MAX_OTLP_BYTES:
