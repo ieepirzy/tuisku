@@ -100,6 +100,14 @@ def run_migrations(settings: Settings, revision: str = "head") -> None:
             cfg.attributes["connection"] = conn
             # Logging is already configured by the caller (the CLI).
             cfg.attributes["skip_logging_config"] = True
+            # Revisions read the app role from here to decide whether to GRANT (ADR 0004).
+            cfg.attributes["app_role"] = settings.app_role
+            cfg.attributes["worker_role"] = settings.worker_role
+            cfg.attributes["app_role_limits"] = {
+                "connection_limit": settings.app_role_connection_limit,
+                "statement_timeout_seconds": settings.app_role_statement_timeout_seconds,
+                "idle_in_transaction_seconds": settings.app_role_idle_in_transaction_seconds,
+            }
             command.upgrade(cfg, revision)
             conn.commit()
     finally:
