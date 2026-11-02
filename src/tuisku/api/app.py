@@ -9,17 +9,23 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import anyio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from psycopg_pool import AsyncConnectionPool
 
 from tuisku import __version__, db
+from tuisku.adapters import builtin as _builtin_adapters  # noqa: F401  (registers adapters)
+from tuisku.api import ingest, read
+from tuisku.api.deps import Clock, system_clock
+from tuisku.api.ratelimit import RateLimiter, RefusalCounter
 from tuisku.config import Settings
 
 log = logging.getLogger(__name__)
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, *, clock: Clock | None = None) -> FastAPI:
+    """Build the app. ``clock`` sets received_at on ingest; tests and replay inject one."""
     settings = settings if settings is not None else Settings()
     # Fail fast at construction when the database is not configured.
     settings.require_database_url()
@@ -32,10 +38,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            await ingest.flush_refusals(app)
             await db.close_pool(pool)
 
     app = FastAPI(title="Tuisku", version=__version__, lifespan=lifespan)
     app.state.settings = settings
+    app.state.clock = clock if clock is not None else system_clock
+    app.state.rate_limiter = RateLimiter(
+        settings.ingest_rate_per_second, settings.ingest_rate_burst
+    )
+    app.state.refusals = RefusalCounter(settings.ingest_rate_breach_flush_seconds)
+    # Bounded worker threads for adapters, so parsing never blocks the event loop.
+    app.state.parse_limiter = anyio.CapacityLimiter(settings.ingest_parse_threads)
+    app.include_router(ingest.router)
+    app.include_router(read.router)
 
     @app.get("/v1/health")
     async def health() -> dict[str, str]:

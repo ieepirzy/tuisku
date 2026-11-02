@@ -16,6 +16,7 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "communityid>=1.5.0",
     "idna>=3.20",
+    "anyio>=4",
 ]
 
 [project.scripts]

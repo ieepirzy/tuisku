@@ -1,0 +1,112 @@
+"""Meta-detections for ingest limit breaches (ADR 0005 "Breaches").
+
+A breach is never silently absorbed. It becomes a detection with kind ``tuisku.meta.<name>``,
+evaluator and authorship ``tuisku``, no raw record, and ``source:<name>`` as an entity key.
+
+At most one is written per source, kind, subject and 5-minute bucket: the unique index on
+``detections (source_id, kind, subject, bucket_start)`` with ``ON CONFLICT DO NOTHING``
+enforces it across API replicas. The subject is the limit name, so a breach of one limit
+cannot hide a breach of another. Every breach, the first included, increments
+``meta_counters`` for that bucket; detections are append-only, so the count is never written
+into the detection itself.
+
+Buckets are 5-minute slices of the database clock (``tuisku_current_bucket()``), never of the
+caller's clock: the database lets the API role write a meta-detection only for the current
+bucket, so a compromised API cannot pre-claim a future bucket and silence a later breach.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from psycopg import AsyncConnection
+
+from tuisku import db
+from tuisku.adapters import OCSF_VERSION, Severity
+from tuisku.store.admin import Source
+from tuisku.store.ingest import enqueue
+
+BUCKET = timedelta(minutes=5)
+_EPOCH = datetime(2000, 1, 1, tzinfo=UTC)
+
+LIMIT_EXCEEDED = "tuisku.meta.source_limit_exceeded"
+RATE_LIMITED = "tuisku.meta.source_rate_limited"
+INVALID_ENVELOPE = "tuisku.meta.invalid_envelope"
+
+_TITLES = {
+    LIMIT_EXCEEDED: ("Source exceeded an ingest limit", Severity.MEDIUM),
+    RATE_LIMITED: ("Source was rate limited", Severity.LOW),
+    INVALID_ENVELOPE: ("Source sent malformed ingest envelopes", Severity.LOW),
+}
+
+
+def bucket_start(now: datetime) -> datetime:
+    """The start of the 5-minute bucket containing ``now``."""
+    return now - (now - _EPOCH) % BUCKET
+
+
+async def record_breach(
+    conn: AsyncConnection[Any],
+    source: Source,
+    kind: str,
+    subject: str,
+    *,
+    n: int = 1,
+    details: dict[str, Any],
+    now: datetime,
+) -> bool:
+    """Count ``n`` breaches and write the bucket's meta-detection if it has none yet.
+
+    Runs in the caller's transaction. Returns True when a detection row was written.
+    """
+    # The bucket comes from the database clock, the only clock the database trusts: the trigger
+    # on detections accepts the API's meta-detections only for the current bucket (ADR 0011).
+    got = await db.fetch_one(conn, "SELECT tuisku_current_bucket() AS bucket")
+    assert got is not None
+    bucket: datetime = got["bucket"]
+    await conn.execute(
+        "INSERT INTO meta_counters (source_id, kind, subject, bucket_start, count) "
+        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT ON CONSTRAINT meta_counters_key "
+        "DO UPDATE SET count = meta_counters.count + EXCLUDED.count",
+        (source.id, kind, subject, bucket, n),
+    )
+    title, severity = _TITLES[kind]
+    explanation = {
+        "bucket_start": bucket.isoformat(),
+        "bucket_seconds": int(BUCKET.total_seconds()),
+        "subject": subject,
+        "counter": "meta_counters",  # repeats in this bucket are counted there
+        **details,
+    }
+    row = await db.fetch_one(
+        conn,
+        "INSERT INTO detections (source_id, evaluator, authorship, kind, identity, title, "
+        "severity_id, event_time, received_at, eval_time, ocsf_version, rule_ref, "
+        "entity_keys, explanation, subject, bucket_start) "
+        "VALUES (%s, 'tuisku', 'tuisku', %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, "
+        "%s::jsonb, %s, %s) "
+        "ON CONFLICT (source_id, kind, subject, bucket_start) WHERE bucket_start IS NOT NULL "
+        "DO NOTHING RETURNING id",
+        (
+            source.id,
+            kind,
+            kind,
+            title,
+            int(severity),
+            now,
+            now,
+            now,
+            OCSF_VERSION,
+            json.dumps({"engine": "tuisku", "name": "ingest_limits"}),
+            [f"source:{source.name}"],
+            json.dumps(explanation),
+            subject,
+            bucket,
+        ),
+    )
+    if row is None:
+        return False
+    await enqueue(conn, observation_ids=[], detection_ids=[row["id"]], enqueued_at=now)
+    return True
