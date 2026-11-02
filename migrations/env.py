@@ -23,6 +23,21 @@ if config.config_file_name is not None and not config.attributes.get("skip_loggi
 
 target_metadata = None
 
+# Revisions read the app and worker roles (TUISKU_APP_ROLE, TUISKU_WORKER_ROLE) from
+# config.attributes, so they stay importable without a database or settings. `tuisku migrate`
+# sets them already.
+if "app_role" not in config.attributes:
+    config.attributes["app_role"] = Settings().app_role
+if "worker_role" not in config.attributes:
+    config.attributes["worker_role"] = Settings().worker_role
+if "app_role_limits" not in config.attributes:
+    _settings = Settings()
+    config.attributes["app_role_limits"] = {
+        "connection_limit": _settings.app_role_connection_limit,
+        "statement_timeout_seconds": _settings.app_role_statement_timeout_seconds,
+        "idle_in_transaction_seconds": _settings.app_role_idle_in_transaction_seconds,
+    }
+
 
 def _database_url(settings: Settings) -> str:
     return to_sqlalchemy_url(settings.require_database_url())
