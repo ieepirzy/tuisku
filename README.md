@@ -164,13 +164,21 @@ record keeps the source name it arrived with in `source_name`. They grant
 only observations and detections inserted in the same transaction), plus `USAGE` on
 sequences. A trigger sets each raw record's `source_name` from `sources`, whatever the writer
 supplied. Only the worker role claims, updates or deletes queue rows, or touches
-`evaluation_dead_letter`. For triage the API role gets `SELECT` on findings, incidents and
-their tables. On `findings` it may update only the status and suppression columns, and on
-`incidents` only status and disposition. A trigger requires each such change to come with its
-operator event in the same transaction, and caps a suppression at 30 days from the finding's
-first suppression. It may also insert `finding_events` and `incident_events` with an operator
-actor and a triage kind. It cannot write notifications at all: the pages triage causes are
-written by owner-defined triggers (ADR 0011 lists exactly what each role can write).
+`evaluation_dead_letter`. No `tuisku_*` database function is executable by PUBLIC. Only the
+read-only helpers `tuisku_is_worker()`, `tuisku_xmin_is_current()` and
+`tuisku_current_bucket()` are granted to the runtime roles. Every trigger function refuses to
+run on any table but its own, and PUBLIC has no `TEMP` on the database, so no role can attach
+Tuisku's trigger functions to a table of its own. The migrating role must therefore own the
+database, or the migration stops and asks for the `REVOKE TEMP` to be run by its owner. Operator
+tokens can be created without a person (read, triage, admin) and only revoked afterwards. For
+triage the API role gets `SELECT` on findings, incidents and their tables. On `findings` it may
+update only the status and suppression columns, and on `incidents` only status and
+disposition. A trigger requires each such change to come with its operator event in the same
+transaction, and caps a suppression at 30 days from the finding's first suppression. It may
+also insert `finding_events` and `incident_events` with an operator actor (a live, unexpired
+token with the triage role) and a triage kind. It cannot write notifications at all: the pages
+triage causes are written by owner-defined triggers. ADR 0011 lists exactly what each role can
+write.
 
 Only the worker role writes rule output: `tuisku`-evaluated detections and their links,
 `detection_evidence`, `rule_firings`, `findings`, `incidents`, `finding_detections`,
