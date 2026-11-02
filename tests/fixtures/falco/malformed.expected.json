@@ -1,0 +1,559 @@
+[
+  {
+    "adapter": "falco@1.0.0",
+    "error": "invalid JSON at position 1"
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "error": "expected a JSON object"
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "error": "field 'rule' must be a non-empty string"
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "error": "field 'rule' must be a non-empty string"
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [],
+    "observations": [
+      {
+        "attributes": {},
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-10-30T12:00:00+00:00",
+        "flags": [
+          "no_rule"
+        ],
+        "kind": "falco.unknown",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "hostname": "node-9",
+          "msg": "no rule key at all",
+          "time": "2026-10-30T12:00:00Z"
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [],
+        "event_time": null,
+        "explanation": {
+          "matched_rule": "Wrong types everywhere",
+          "priority": null,
+          "source": null,
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Wrong types everywhere",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": null,
+          "rule": "Wrong types everywhere",
+          "source": null,
+          "tags": []
+        },
+        "severity": 0,
+        "title": "Wrong types everywhere"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {},
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": null,
+        "flags": [
+          "output_fields_invalid",
+          "event_time_missing"
+        ],
+        "kind": "falco.event",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "record": {
+            "hostname": 12,
+            "output": {
+              "x": 1
+            },
+            "output_fields": "proc.name=sh",
+            "priority": 5,
+            "source": [
+              "syscall"
+            ],
+            "tags": "T1059",
+            "time": "yesterday",
+            "uuid": "not a uuid!"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [],
+        "event_time": "2026-10-30T13:00:00+00:00",
+        "explanation": {
+          "matched_rule": "Wrong field types",
+          "priority": "Warning",
+          "source": "syscall",
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Wrong field types",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "Warning",
+          "rule": "Wrong field types",
+          "source": "syscall",
+          "tags": []
+        },
+        "severity": 3,
+        "title": "Wrong field types"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "container": {
+            "image": {
+              "name": "bad image name"
+            }
+          },
+          "k8s": {
+            "namespace": "Bad_NS",
+            "pod": "x"
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-10-30T13:00:00+00:00",
+        "flags": [],
+        "kind": "falco.event",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "output_fields": {
+            "container.id": "host",
+            "evt.time": "13:00:00.000000000",
+            "evt.type": "execve",
+            "fd.cip": "999.1.1.1",
+            "fd.cport": 70000,
+            "proc.name": [
+              "sh"
+            ],
+            "proc.pid": "4242",
+            "proc.ppid": true,
+            "user.uid": -5
+          },
+          "record": {
+            "time": "2026-10-30T13:00:00Z"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [
+          "T1059.004"
+        ],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [],
+        "event_time": "2026-10-30T13:00:00+00:00",
+        "explanation": {
+          "attack_tags": [
+            "T1059.004"
+          ],
+          "matched_rule": "Tag tricks",
+          "priority": "Notice",
+          "source": "syscall",
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Tag tricks",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "Notice",
+          "rule": "Tag tricks",
+          "source": "syscall",
+          "tags": [
+            "T１０５９",
+            "T1059\n",
+            "t1059",
+            "T10590",
+            "T1059.01",
+            "mitre_",
+            "mitre_Execution",
+            "T1059.004",
+            "T1059.004"
+          ]
+        },
+        "severity": 2,
+        "title": "Tag tricks"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {},
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-10-30T13:00:00+00:00",
+        "flags": [],
+        "kind": "falco.event",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "output_fields": {
+            "evt.time": 5
+          },
+          "record": {
+            "tags": [
+              "T１０５９",
+              "T1059\n",
+              "t1059",
+              "T10590",
+              "T1059.01",
+              "mitre_",
+              "mitre_Execution",
+              7,
+              null,
+              "T1059.004",
+              "T1059.004"
+            ],
+            "time": "2026-10-30T13:00:00Z"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [],
+        "event_time": null,
+        "explanation": {
+          "matched_rule": "Out of range time",
+          "priority": "Notice",
+          "source": null,
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Out of range time",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "Notice",
+          "rule": "Out of range time",
+          "source": null,
+          "tags": []
+        },
+        "severity": 2,
+        "title": "Out of range time"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {},
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": null,
+        "flags": [
+          "event_time_missing"
+        ],
+        "kind": "falco.event",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "output_fields": {
+            "evt.time": 99999999999999999999999
+          },
+          "record": {
+            "time": "1970-01-01T00:00:00Z"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "error": "non-standard JSON constant"
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [],
+        "event_time": "2026-10-30T13:30:00+00:00",
+        "explanation": {
+          "matched_rule": "Rule with\\x0acontrol\\x07chars\\x85",
+          "priority": "info",
+          "rule_control_chars_escaped": true,
+          "source": "syscall",
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Rule with\\x0acontrol\\x07chars\\x85",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "info",
+          "rule": "Rule with\\x0acontrol\\x07chars\\x85",
+          "source": "syscall",
+          "tags": []
+        },
+        "severity": 1,
+        "title": "Rule with\\x0acontrol\\x07chars\\x85"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "event_time_ns": 1793367000000000000
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-10-30T13:30:00+00:00",
+        "flags": [
+          "control_chars"
+        ],
+        "kind": "falco.event",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "output_fields": {
+            "evt.time": 1793367000000000000
+          },
+          "record": {
+            "time": "2026-10-30T13:30:00Z"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [],
+        "event_time": "2026-10-30T13:31:00+00:00",
+        "explanation": {
+          "matched_rule": "Non-exec process event",
+          "priority": "Notice",
+          "source": "syscall",
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Non-exec process event",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "Notice",
+          "rule": "Non-exec process event",
+          "source": "syscall",
+          "tags": []
+        },
+        "severity": 2,
+        "title": "Non-exec process event"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "event_time_ns": 1793367060000000000,
+          "process": {
+            "name": "gdb",
+            "pid": 4100
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-10-30T13:31:00+00:00",
+        "flags": [],
+        "kind": "falco.event",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "output_fields": {
+            "evt.time": 1793367060000000000,
+            "evt.type": "ptrace"
+          },
+          "record": {
+            "time": "2026-10-30T13:31:00Z",
+            "uuid": "5D0B0F8E-1B7A-4C1E-9D2A-2F0E6C1A9B0"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [],
+        "event_time": "2026-10-30T13:40:00+00:00",
+        "explanation": {
+          "matched_rule": "Unicode � and � in rule",
+          "priority": "Notice",
+          "source": "syscall",
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Unicode � and � in rule",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "Notice",
+          "rule": "Unicode � and � in rule",
+          "source": "syscall",
+          "tags": []
+        },
+        "severity": 2,
+        "title": "Unicode � and � in rule"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "process": {
+            "name": "a�b"
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-10-30T13:40:00+00:00",
+        "flags": [
+          "invalid_unicode_replaced",
+          "timezone_assumed_utc"
+        ],
+        "kind": "falco.event",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "record": {
+            "time": "2026-10-30 13:40:00"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "adapter": "falco@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {},
+        "authorship": "community",
+        "entity_keys": [],
+        "event_time": "2026-10-30T13:30:00+00:00",
+        "explanation": {
+          "matched_rule": "Back\\\\slash A\\\\x01 and \\u202ebidi",
+          "priority": "Notice",
+          "rule_control_chars_escaped": true,
+          "source": "syscall",
+          "summary": "Falco rule matched"
+        },
+        "identity": "falco:Back\\\\slash A\\\\x01 and \\u202ebidi",
+        "kind": "falco.rule",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "attack_version": null,
+          "engine": "falco",
+          "priority": "Notice",
+          "rule": "Back\\\\slash A\\\\x01 and \\u202ebidi",
+          "source": "syscall",
+          "tags": []
+        },
+        "severity": 2,
+        "title": "Back\\\\slash A\\\\x01 and \\u202ebidi"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "event_time_ns": 1793367000000000000,
+          "process": {
+            "name": "curl",
+            "pid": 5
+          }
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-10-30T13:30:00+00:00",
+        "flags": [
+          "control_chars"
+        ],
+        "kind": "falco.event",
+        "ocsf_class_uid": null,
+        "unmapped": {
+          "output_fields": {
+            "evt.time": 1793367000000000000,
+            "evt.type": "connect",
+            "fd.name": "/run/example.sock",
+            "fd.type": "unix"
+          },
+          "record": {
+            "time": "2026-10-30T13:50:00Z"
+          }
+        }
+      }
+    ]
+  }
+]
