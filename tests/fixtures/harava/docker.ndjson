@@ -1,0 +1,9 @@
+{"log":"2026-11-01 09:14:03,512 WARNING harava.api outbound data refused: caller=agents urls=1 findings=email/query/percent\n","stream":"stderr","time":"2026-11-01T09:14:03.512874213Z"}
+{"log":"2026-11-01 09:15:40,207 WARNING harava.api destination refused: caller=agents classes=capture_sink\n","stream":"stderr","time":"2026-11-01T09:15:40.208001930Z"}
+{"log":"2026-11-01 09:30:00,001 ERROR harava.mcp MCP refuses to serve: HARAVA_MCP_API_TOKEN is not a token the API accepts\n","stream":"stderr","time":"2026-11-01T09:30:00.001532001Z","attrs":{"tag":"harava-mcp"}}
+{"log":"2026-11-01 09:31:12,045 INFO harava.api applied migration 0007_frontier\n","stream":"stderr","time":"2026-11-01T09:31:12.045700000Z"}
+{"log":"2026-11-01 09:31:12,045 INFO harava.api partial line wit","stream":"stderr","time":"2026-11-01T09:31:12.045700000Z"}
+{"log":"ail/query/plain,phone/host/plain\n","stream":"stderr","time":"2026-11-01T09:31:12.045800000Z"}
+{"log":"2026-11-01 09:31:12,045 INFO harava.api ok\n","stream":"stderr","time":"yesterday"}
+{"stream":"stderr","time":"2026-11-01T09:31:12.045700000Z"}
+{"log":"INFO:     Application startup complete.\n","stream":"stderr","time":"2026-11-01T09:31:12.045700000Z"}
