@@ -4,13 +4,13 @@ incident transition table and the metric delta algorithm."""
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from tests.conftest import REPO_ROOT
+from tests.worker_support import PACKS, QUIET_BACKLOG
 from tuisku.rules.fingerprint import finding_fingerprint, group_value, overflow_fingerprint
 from tuisku.rules.match import match
 from tuisku.rules.packs import PackError, load_rule_set
@@ -22,8 +22,8 @@ from tuisku.rules.predicates import (
     evaluate,
     prepare_value,
 )
-
-PACKS = REPO_ROOT / "packs"
+from tuisku.store.lifecycle import INCIDENT_STATES, attachable_at, incident_transition_allowed
+from tuisku.worker.metrics import Sample, series_deltas
 
 # --- predicates ---------------------------------------------------------------------------------
 
@@ -366,6 +366,73 @@ def test_group_values_are_normalised_without_collisions() -> None:
     assert group_value({"b": 1, "a": 2}) == '{"a":2,"b":1}'
 
 
+# --- incident transitions -----------------------------------------------------------------------
+
+
+def test_incident_transition_table() -> None:
+    allowed = {
+        (a, b)
+        for a in INCIDENT_STATES
+        for b in INCIDENT_STATES
+        if incident_transition_allowed(a, b)
+    }
+    expected = {
+        (a, b)
+        for i, a in enumerate(INCIDENT_STATES)
+        for j, b in enumerate(INCIDENT_STATES)
+        if a != "closed" and j > i
+    } | {("contained", "investigating"), ("resolved", "investigating")}
+    assert allowed == expected
+
+
+def test_attachable_window_and_lifetime() -> None:
+    t0 = datetime(2026, 11, 1, tzinfo=UTC)
+    f = {
+        "status": "open",
+        "first_seen": t0,
+        "last_seen": t0 + timedelta(hours=20),
+        "window_seconds": 3600,
+        "max_lifetime_seconds": 86400,
+    }
+    assert attachable_at(f, t0 + timedelta(hours=21))
+    assert not attachable_at(f, t0 + timedelta(hours=21, seconds=1))  # past the window
+    f["last_seen"] = t0 + timedelta(hours=23, minutes=30)
+    assert not attachable_at(f, t0 + timedelta(hours=24, seconds=1))  # past the lifetime
+    assert not attachable_at(f | {"status": "resolved"}, t0 + timedelta(hours=23, minutes=31))
+
+
+# --- metric deltas ------------------------------------------------------------------------------
+
+
+def _s(i: int, minute: int, value: float, start: str | None = "s0", temporality="cumulative"):
+    return Sample(
+        id=i,
+        time=datetime(2026, 11, 1, 10, minute, tzinfo=UTC),
+        value=value,
+        start_time=start,
+        temporality=temporality,
+    )
+
+
+def test_deltas_are_never_negative() -> None:
+    never = lambda _s: False  # noqa: E731
+    seq = [_s(1, 0, 5, temporality="delta"), _s(2, 10, -1e15, temporality="delta")]
+    assert series_deltas(seq, None, never) == {1: 5, 2: 0}
+    reset = [_s(1, 0, 10), _s(2, 10, -3)]  # a negative value after a reset counts as zero
+    assert series_deltas(reset, None, lambda _s: True) == {1: 10, 2: 0}
+
+
+def test_series_deltas() -> None:
+    never = lambda _s: False  # noqa: E731
+    always = lambda _s: True  # noqa: E731
+    seq = [_s(1, 0, 10), _s(2, 10, 15), _s(3, 20, 4), _s(4, 30, 7, start="s1")]
+    assert series_deltas(seq, None, never) == {1: 0, 2: 5, 3: 4, 4: 7}  # baseline, +5, reset x2
+    assert series_deltas(seq, None, always)[1] == 10
+    assert series_deltas(seq[1:], seq[0], never) == {2: 5, 3: 4, 4: 7}
+    deltas = [_s(1, 0, 3, temporality="delta"), _s(2, 10, 2, temporality="delta")]
+    assert series_deltas(deltas, None, never) == {1: 3, 2: 2}
+
+
 def test_authorship_tuisku_is_reserved_for_builtin_packs(tmp_path: Path) -> None:
     root = _pack(tmp_path, _rule())
     manifest = root / "p" / "pack.yaml"
@@ -380,6 +447,57 @@ def test_deep_yaml_is_a_pack_error(tmp_path: Path) -> None:
     (root / "p" / "rules" / "0.yaml").write_text("[" * 20000 + "]" * 20000)
     with pytest.raises(PackError):
         load_rule_set([root])
+
+
+def test_merge_keys_order_and_truncation() -> None:
+    from tuisku.worker.fold import merge_keys
+
+    keys, cut = merge_keys(["z:1", "a:1"], ["m:1", "b:1", "a:1"], cap=3)
+    assert keys == ["z:1", "a:1", "b:1"] and cut
+    assert merge_keys(["z:1"], ["b:1"], cap=3) == (["z:1", "b:1"], False)
+
+
+def test_advisory_locks_are_taken_in_sorted_order() -> None:
+    import asyncio
+
+    from tuisku.worker.engine import Worker
+
+    calls: list[int] = []
+
+    class FakeConn:  # records the group_locks key of each row lock taken
+        async def execute(self, query: str, params: tuple[str]) -> None:
+            if "FOR UPDATE" in query:
+                calls.append(int(params[0]))
+
+    worker = Worker(
+        rule_set=load_rule_set([], builtin=[PACKS]),
+        clock=lambda: datetime.now(UTC),
+        config=QUIET_BACKLOG,
+    )
+    asyncio.run(worker._lock(FakeConn(), [9, -4, 3, 1]))  # type: ignore[arg-type]
+    assert calls == [-4, 1, 3, 9]
+
+
+def test_window_filters_push_static_predicates_and_group_values() -> None:
+    from psycopg import sql
+
+    from tuisku.worker.engine import window_filters
+
+    rs = load_rule_set([], builtin=[PACKS])
+    [trend] = [r for r in rs.rules if r.name == "harava.destination_refused_trend"]
+    env = {
+        "layer": "observation",
+        "kind": "metric.sample",
+        "source": "edge",
+        "attributes": {"metric": "harava.destination.refused", "labels": {"stage": "hop"}},
+    }
+    rendered = [f.as_string(None) for f in window_filters(trend, env)]  # type: ignore[arg-type]
+    assert rendered == [
+        "(t.attributes ->> 'metric') = 'harava.destination.refused'",
+        "coalesce(r.source_name, s.name) = 'edge'",
+        "(t.attributes #>> '{labels,stage}') = 'hop'",
+    ]
+    assert isinstance(window_filters(trend, env)[0], sql.Composable)
 
 
 def test_null_counts_as_missing_for_predicates_but_not_for_grouping(tmp_path: Path) -> None:
