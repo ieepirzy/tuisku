@@ -119,6 +119,9 @@ CREATE TABLE raw_records (
     id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     uid         uuid NOT NULL DEFAULT gen_random_uuid() UNIQUE,
     source_id   bigint NOT NULL REFERENCES sources (id),
+    -- The source's name when the record arrived: evidence keeps it even if the source is
+    -- renamed later, and rules match on it (ADR 0011).
+    source_name text NOT NULL CHECK (char_length(source_name) BETWEEN 1 AND 63),
     token_id    bigint NOT NULL REFERENCES source_tokens (id),
     -- NDJSON: digest of the UTF-8 bytes of the envelope's raw string; OTLP: of the body.
     sha256      bytea NOT NULL CHECK (octet_length(sha256) = 32),
@@ -370,6 +373,71 @@ AS $$
         OR current_user IS NOT DISTINCT FROM {worker_literal}::name
 $$;
 
+-- True when a row's inserting transaction is this one (or one of its subtransactions). A row
+-- whose inserting transaction is still in progress and that we can see can only be our own
+-- (another session's uncommitted rows are invisible), so its xmin, widened to 64 bits with the
+-- current epoch, must have pg_xact_status() 'in progress'.
+CREATE FUNCTION tuisku_xmin_is_current(x xid) RETURNS boolean
+LANGUAGE plpgsql STABLE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    cur      bigint := pg_current_xact_id()::text::bigint;
+    full_xid bigint := ((cur >> 32) << 32) + x::text::bigint;
+BEGIN
+    IF full_xid - cur > 2147483648 THEN
+        full_xid := full_xid - 4294967296;  -- the xid is from the previous epoch
+    END IF;
+    RETURN full_xid >= 3 AND pg_xact_status(full_xid::text::xid8) = 'in progress';
+END
+$$;
+
+-- Derivations come with their raw record (ADR 0002, ADR 0011): for any role but the worker and
+-- the owner, a parse attempt is accepted only for a raw record inserted in this transaction, and
+-- an observation or sensor detection only for a parse attempt inserted in this transaction for
+-- the same raw record. Otherwise the API role could add an `ok` attempt to a victim's raw
+-- record, make its real rows stale and hide them from rules and readers, or attach fake rows.
+CREATE FUNCTION tuisku_derivation_same_transaction() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF public.tuisku_is_worker() THEN
+        RETURN NEW;
+    END IF;
+    IF TG_TABLE_NAME = 'parse_attempts' THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM public.raw_records r
+            WHERE r.id = NEW.raw_record_id AND public.tuisku_xmin_is_current(r.xmin)
+        ) THEN
+            RAISE EXCEPTION 'a parse attempt is written with its raw record (ADR 0011)'
+                USING ERRCODE = 'insufficient_privilege';
+        END IF;
+        RETURN NEW;
+    ELSIF TG_TABLE_NAME = 'detections' THEN
+        IF NEW.evaluator <> 'sensor' THEN
+            RETURN NEW;  -- tuisku-evaluated rows: tuisku_detections_worker_only()
+        END IF;
+    END IF;
+    -- An observation or a sensor detection.
+    IF NOT EXISTS (
+        SELECT 1 FROM public.parse_attempts p
+        WHERE p.id = NEW.parse_attempt_id AND p.raw_record_id = NEW.raw_record_id
+          AND public.tuisku_xmin_is_current(p.xmin)
+    ) THEN
+        RAISE EXCEPTION 'a derived row is written with its parse attempt (ADR 0011)'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER parse_attempts_same_transaction BEFORE INSERT ON parse_attempts
+    FOR EACH ROW EXECUTE FUNCTION tuisku_derivation_same_transaction();
+CREATE TRIGGER observations_same_transaction BEFORE INSERT ON observations
+    FOR EACH ROW EXECUTE FUNCTION tuisku_derivation_same_transaction();
+CREATE TRIGGER detections_same_transaction BEFORE INSERT ON detections
+    FOR EACH ROW EXECUTE FUNCTION tuisku_derivation_same_transaction();
+
 CREATE FUNCTION tuisku_current_bucket() RETURNS timestamptz
 LANGUAGE sql STABLE
 SET search_path = pg_catalog
@@ -408,11 +476,25 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
 BEGIN
-    IF NOT public.tuisku_is_worker() AND EXISTS (
+    IF public.tuisku_is_worker() THEN
+        RETURN NEW;
+    END IF;
+    IF EXISTS (
         SELECT 1 FROM public.detections d
         WHERE d.id = NEW.detection_id AND d.evaluator = 'tuisku'
     ) THEN
         RAISE EXCEPTION 'only the worker role links rule output to evidence (ADR 0011)'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    -- Ingest links a sensor detection to observations of the same record, in the same
+    -- transaction; never existing rows to each other.
+    IF NOT EXISTS (
+        SELECT 1 FROM public.detections d JOIN public.observations o
+            ON o.parse_attempt_id = d.parse_attempt_id
+        WHERE d.id = NEW.detection_id AND o.id = NEW.observation_id
+          AND public.tuisku_xmin_is_current(d.xmin) AND public.tuisku_xmin_is_current(o.xmin)
+    ) THEN
+        RAISE EXCEPTION 'a sensor detection is linked with its record (ADR 0011)'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
     RETURN NEW;
@@ -445,12 +527,18 @@ def upgrade() -> None:
         raise ValueError("a separate worker role is required with an app role (ADR 0011)")
     op.execute(f'GRANT SELECT ON {", ".join(EVIDENCE_TABLES)} TO "{app}"')
     op.execute(f'GRANT INSERT ON {", ".join(API_INSERT)} TO "{app}"')
-    op.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON {", ".join(API_ADMIN)} TO "{app}"')
+    # Sources and tokens: created by the API role, then only disabled or revoked; never renamed
+    # or deleted (renames go through the owner CLI), so evidence keeps its provenance.
+    op.execute(f'GRANT SELECT, INSERT ON {", ".join(API_ADMIN)} TO "{app}"')
+    op.execute(f'GRANT UPDATE (disabled_at) ON sources TO "{app}"')
+    op.execute(f'GRANT UPDATE (revoked_at, last_used_at) ON source_tokens TO "{app}"')
     # Tokens are revoked, never deleted, so their history stays (ADR 0005).
     op.execute(f'GRANT SELECT, INSERT, UPDATE ON operator_tokens TO "{app}"')
     # Ingest only enqueues; only the worker claims, updates or deletes queue rows, so the API
     # cannot drop or park a row before it is evaluated (ADR 0011).
-    op.execute(f'GRANT INSERT ON evaluation_queue TO "{app}"')
+    op.execute(
+        f'GRANT INSERT (observation_id, detection_id, enqueued_at) ON evaluation_queue TO "{app}"'
+    )
     # Ingest counts breach repeats (an upsert); it never deletes counters.
     op.execute(f'GRANT SELECT, INSERT, UPDATE ON meta_counters TO "{app}"')
     op.execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "{app}"')
@@ -469,5 +557,6 @@ def downgrade() -> None:
     op.execute(
         "DROP FUNCTION tuisku_reject_evidence_change(), tuisku_person_tokens_owner_only(), "
         "tuisku_detections_worker_only(), tuisku_rule_links_worker_only(), tuisku_is_worker(), "
-        "tuisku_current_bucket()"
+        "tuisku_current_bucket(), tuisku_derivation_same_transaction(), "
+        "tuisku_xmin_is_current(xid)"
     )

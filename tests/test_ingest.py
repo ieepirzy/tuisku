@@ -726,8 +726,9 @@ def test_readers_return_only_the_current_derivation_by_default(
     with client(app_db.app_url) as c:
         post_records(c, name, token, ndjson({"kind": "dummy.v1"}, {"limit": "json_keys"}))
     # Reprocess the first record with a "newer adapter": a second successful attempt, then a
-    # failed third one, which must leave the second current (ADR 0002 rule 3).
-    with psycopg.connect(app_db.app_url) as conn:
+    # failed third one, which must leave the second current (ADR 0002 rule 3). Reprocessing is
+    # not the API's: only the owner (or worker) may add attempts to an existing record.
+    with psycopg.connect(app_db.owner_url) as conn:
         [(raw_id, source_id)] = conn.execute(
             "SELECT r.id, r.source_id FROM raw_records r JOIN parse_attempts p "
             "ON p.raw_record_id = r.id JOIN sources s ON s.id = r.source_id "

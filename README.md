@@ -151,9 +151,15 @@ TUISKU_DATABASE_URL=<tuisku_worker url> uv run tuisku worker
 
 With `TUISKU_APP_ROLE` set, migrations grant the app role `SELECT` on evidence tables and
 `INSERT` on those that ingest writes (`raw_records`, `raw_duplicates`, `parse_attempts`,
-`observations`, `detections`, `detection_observations`). They also grant it
-`SELECT, INSERT, UPDATE, DELETE` on `sources` and `source_tokens`, `SELECT, INSERT, UPDATE` on
-`operator_tokens` and `meta_counters`, `INSERT` only on `evaluation_queue`, and `USAGE` on
+`observations`, `detections`, `detection_observations`). Triggers accept the API role's parse
+attempts only for a raw record inserted in the same transaction, and its observations, sensor
+detections and their links only for an attempt from that transaction. The API role therefore
+cannot make a stored record's rows stale or attach rows to it. The migrations also grant it
+`SELECT, INSERT` on `sources` and `source_tokens`, but only `UPDATE (disabled_at)` and
+`UPDATE (revoked_at, last_used_at)` respectively. Renames go through the owner CLI, and each raw
+record keeps the source name it arrived with in `source_name`. They grant
+`SELECT, INSERT, UPDATE` on `operator_tokens` and `meta_counters`, and
+`INSERT (observation_id, detection_id, enqueued_at)` on `evaluation_queue`, plus `USAGE` on
 sequences. Only the worker role claims, updates or deletes queue rows, or touches
 `evaluation_dead_letter`. For triage the API role gets `SELECT` on findings, incidents and
 their tables. On `findings` it may update only the status and suppression columns, and on
