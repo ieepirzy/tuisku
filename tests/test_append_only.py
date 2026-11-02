@@ -250,3 +250,110 @@ def test_app_role_cannot_link_rule_output(populated: AppDatabase, statement: str
         conn.execute(_TUISKU_DETECTION, ("pack.rule", "a74b77e6-92fb-4d32-a9c3-955719118fdb", None))
     exc = _attempt(populated.app_url, statement)
     assert isinstance(exc, errors.InsufficientPrivilege), exc
+
+
+# --- derivations come with their raw record (ADR 0011) -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        # The round-five probe: an `ok` attempt that would make the victim's rows stale.
+        "INSERT INTO parse_attempts (raw_record_id, adapter, adapter_version, status, "
+        "created_at) SELECT max(id), 'dummy', 'x', 'ok', now() FROM raw_records",
+        # Fake rows attached to an existing attempt.
+        "INSERT INTO observations (raw_record_id, parse_attempt_id, source_id, kind, "
+        "received_at, eval_time, ocsf_version, attributes) SELECT p.raw_record_id, p.id, "
+        "r.source_id, 'dummy.fake', now(), now(), '1.9.0', '{}' FROM parse_attempts p "
+        "JOIN raw_records r ON r.id = p.raw_record_id WHERE p.status = 'ok' LIMIT 1",
+        "INSERT INTO detections (raw_record_id, parse_attempt_id, source_id, evaluator, "
+        "authorship, kind, identity, title, severity_id, received_at, eval_time, "
+        "ocsf_version, rule_ref) SELECT p.raw_record_id, p.id, r.source_id, 'sensor', "
+        "'community', 'dummy.fake', 'x', 't', 1, now(), now(), '1.9.0', '{}' "
+        "FROM parse_attempts p JOIN raw_records r ON r.id = p.raw_record_id "
+        "WHERE p.status = 'ok' LIMIT 1",
+        # Existing rows linked to each other.
+        # (the trigger runs before the primary key, so even an existing pair is refused by it)
+        "INSERT INTO detection_observations (detection_id, observation_id) SELECT d.id, o.id "
+        "FROM detections d, observations o WHERE d.evaluator = 'sensor' LIMIT 1",
+    ],
+)
+def test_app_role_cannot_add_to_existing_records(populated: AppDatabase, statement: str) -> None:
+    exc = _attempt(populated.app_url, statement)
+    assert isinstance(exc, errors.InsufficientPrivilege), exc
+    assert "ADR 0011" in str(exc)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE sources SET name = 'renamed'",
+        "UPDATE sources SET adapter = 'zeek'",
+        "UPDATE sources SET adapter_options = '{}'",
+        "DELETE FROM sources WHERE false",
+        "UPDATE source_tokens SET token_sha256 = token_sha256",
+        "UPDATE source_tokens SET source_id = source_id",
+        "DELETE FROM source_tokens WHERE false",
+        # Queue rows are enqueued fresh, never pre-leased or pre-failed.
+        "INSERT INTO evaluation_queue (observation_id, claimed_until) "
+        "SELECT max(id), 'infinity' FROM observations",
+        "INSERT INTO evaluation_queue (observation_id, attempts) "
+        "SELECT max(id), 99 FROM observations",
+    ],
+)
+def test_app_role_cannot_rename_delete_or_preload(populated: AppDatabase, statement: str) -> None:
+    exc = _attempt(populated.app_url, statement)
+    assert isinstance(exc, errors.InsufficientPrivilege), exc
+    assert "permission denied" in str(exc)
+
+
+def test_app_role_disables_and_revokes_only(populated: AppDatabase) -> None:
+    for statement in [
+        "UPDATE sources SET disabled_at = disabled_at",
+        "UPDATE source_tokens SET revoked_at = revoked_at, last_used_at = last_used_at",
+    ]:
+        assert _attempt(populated.app_url, statement) is None, statement
+
+
+def test_raw_records_keep_the_source_name_they_arrived_with(populated: AppDatabase) -> None:
+    name = f"n{uuid.uuid4().hex[:10]}"
+    token = new_source(populated.app_url, name)
+    with client(populated.app_url) as c:
+        post_records(c, name, token, ndjson({"msg": "named"}))
+    with psycopg.connect(populated.owner_url) as conn:  # an owner rename, out of band
+        conn.execute("UPDATE sources SET name = %s WHERE name = %s", (name + "x", name))
+    [(stored, current)] = query(
+        populated.owner_url,
+        "SELECT r.source_name, s.name FROM raw_records r JOIN sources s ON s.id = r.source_id "
+        "WHERE s.name = %s",
+        (name + "x",),
+    )
+    assert (stored, current) == (name, name + "x")
+
+
+def test_a_fresh_attempt_cannot_be_pinned_on_another_record(populated: AppDatabase) -> None:
+    """Even with a raw record and attempt of its own in the transaction, the API role cannot
+    hang rows of that attempt on a victim's raw record."""
+    with psycopg.connect(populated.app_url) as conn:
+        [(source_id, token_id, victim)] = conn.execute(
+            "SELECT r.source_id, r.token_id, r.id FROM raw_records r ORDER BY r.id LIMIT 1"
+        ).fetchall()
+        [(raw_id,)] = conn.execute(
+            "INSERT INTO raw_records (source_id, source_name, token_id, sha256, received_at, "
+            "transport, body, body_size) SELECT %s, name, %s, sha256(gen_random_uuid()::text::"
+            "bytea), now(), 'ndjson', 'x', 1 FROM sources WHERE id = %s RETURNING id",
+            (source_id, token_id, source_id),
+        ).fetchall()
+        [(attempt,)] = conn.execute(
+            "INSERT INTO parse_attempts (raw_record_id, adapter, adapter_version, status, "
+            "created_at) VALUES (%s, 'dummy', '0.1.0', 'ok', now()) RETURNING id",
+            (raw_id,),
+        ).fetchall()
+        with pytest.raises(errors.InsufficientPrivilege, match="ADR 0011"):
+            conn.execute(
+                "INSERT INTO observations (raw_record_id, parse_attempt_id, source_id, kind, "
+                "received_at, eval_time, ocsf_version, attributes) VALUES (%s, %s, %s, "
+                "'dummy.fake', now(), now(), '1.9.0', '{}')",
+                (victim, attempt, source_id),
+            )
+        conn.rollback()

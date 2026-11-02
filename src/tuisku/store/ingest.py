@@ -242,12 +242,13 @@ async def _insert_raw(
 ) -> dict[str, Any] | None:
     return await db.fetch_one(
         conn,
-        "INSERT INTO raw_records (source_id, token_id, sha256, received_at, transport, "
-        "collector, body, body_size, truncated) "
-        "VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s) "
+        "INSERT INTO raw_records (source_id, source_name, token_id, sha256, received_at, "
+        "transport, collector, body, body_size, truncated) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s) "
         "ON CONFLICT (source_id, sha256) DO NOTHING RETURNING id, uid",
         (
             credential.source.id,
+            credential.source.name,
             credential.token_id,
             digest,
             received_at,
