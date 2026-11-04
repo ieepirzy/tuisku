@@ -420,7 +420,7 @@ def test_api_role_cannot_hide_a_page(app_db: AppDatabase, bypass: str) -> None:
     )
     assert fired_for_victim == [(1,)]
     assert any(
-        n["kind"] == "finding_opened" and n["rule"] == f"{FALCO_CRITICAL}@1" for n in notifier.sent
+        n["kind"] == "finding_opened" and n["rule"] == f"{FALCO_CRITICAL}@2" for n in notifier.sent
     )
 
 
