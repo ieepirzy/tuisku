@@ -1,5 +1,5 @@
 id: 6b04c7bd-b094-4ddf-b409-a32d2ec2a326
-rev: 1
+rev: 2
 name: sensors-default.suricata_severity_1
 title: Suricata alert with severity 1
 description: The Suricata adapter maps alert severity 1, and only 1, to severity_id 4 (high).
@@ -13,4 +13,4 @@ finding:
   group_by: [identity, entity_keys.0]
   window: 1h
   max_lifetime: 24h
-incident: none
+incident: open

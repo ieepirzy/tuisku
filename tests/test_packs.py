@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 import yaml
 
+from tests.support import query
 from tests.worker_support import (
     PACKS,
     Clock,
@@ -120,3 +121,6 @@ def test_pack_fixture(
             run_worker(fresh_database_url, rules, clock, before_pair=explode)
             clock.advance(minutes=1)
     assert fired(fresh_database_url) == sorted(case["fires"])
+    if "incidents" in case:
+        [(n,)] = query(fresh_database_url, "SELECT count(*) FROM incidents")
+        assert n == case["incidents"], f"expected {case['incidents']} incidents, got {n}"
