@@ -86,8 +86,9 @@ are mutable working objects that keep a history.
    Findings and incidents are mutable projections. Every change to one writes a
    `finding_events` or `incident_events` row.
 5. **Idempotent ingestion.** `raw_records` has `UNIQUE (source_id, sha256)`. For NDJSON records,
-   `sha256` is the digest of the UTF-8 bytes of the envelope's `raw` string. For OTLP, it is the
-   digest of the request body bytes. It does not cover the envelope
+   `sha256` is the digest of the UTF-8 bytes of the envelope's `raw` string; for OTLP logs, of
+   the log record's `body.stringValue` (ADR 0005, amended 2026-11-13). For OTLP metrics, it is
+   the digest of the request body bytes. It does not cover the envelope
    itself, because `collector` metadata such as path or offset changes when a shipper re-reads a
    rotated file. A re-delivery inserts nothing and is reported as a duplicate. Each duplicate
    receipt is recorded in `raw_duplicates (raw_record_id, received_at, token_id)`, so a burst of
