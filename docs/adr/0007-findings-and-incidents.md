@@ -135,6 +135,30 @@ The first implementation writes structured logs only. Which channels page whom i
 decision, configured outside this repository. Notifications carry ids, titles, severities and
 entity keys, never L0 bodies.
 
+**Alertmanager** (added 2026-11-13). The log stays on for every notification. When
+`TUISKU_NOTIFY_ALERTMANAGER_URL` is set, each one is also POSTed as one alert to
+`/api/v2/alerts` of that Alertmanager; routing to people stays in the deployment's Alertmanager
+configuration.
+
+- **One alert per request**, so each outbox row gets its own `delivered` or `failed` record.
+  The notification uid is a label, so Alertmanager never merges two pages.
+- **What leaves Tuisku:** fixed labels (`alertname`, `source="tuisku"`, `tuisku_kind`,
+  `severity`, `notification_uid`, `meta`) plus static labels from configuration; a `summary`
+  that is the rule's or meta-detection's title (pack-authored or fixed text); and a
+  description of ids only. No entity keys and no telemetry values by default, because an
+  Alertmanager receiver may be an outside service; entity keys are opt-in, as an annotation.
+- **Severity** is the OCSF caption of `severity_id`, lowercased (`informational` to `fatal`,
+  `unknown`, `other`), not Prometheus' `critical`/`warning`/`info`, so no distinction is lost;
+  a deployment matches on it in its routes.
+- **Delivery semantics are the outbox's.** A non-2xx or a timeout is a failed delivery, retried
+  with the same backoff, and `notification_undeliverable` still pages at 10 failures. The
+  notifier runs off the event loop (a thread). A notifier may say its channel is down as a
+  whole (a timeout, a connection error, a 5xx); the drain then records that failure and ends
+  the pass, leaving the rest due, so an outage costs one timeout per pass rather than one per
+  queued notification and never stalls evaluation for long. A 4xx refuses only that alert.
+- `endsAt` is not sent: a page is an event, and Alertmanager resolves it after its own
+  `resolve_timeout`.
+
 ## Consequences
 
 - Volume control (window, lifetime, group-by) is part of each rule and explicit, not a global
