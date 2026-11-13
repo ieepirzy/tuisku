@@ -40,8 +40,9 @@ MAX_ERROR_CHARS = 500
 
 
 class Transport(StrEnum):
-    NDJSON = "ndjson"
-    OTLP_JSON = "otlp_json"
+    NDJSON = "ndjson"  # one NDJSON envelope's ``raw`` string
+    OTLP_JSON = "otlp_json"  # a whole OTLP/HTTP JSON metrics request body
+    OTLP_LOGS_JSON = "otlp_logs_json"  # one OTLP/HTTP JSON logRecord's ``body.stringValue``
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,6 +467,7 @@ async def store_truncated(
     limit: int,
     collector: Mapping[str, Any],
     ctx: IngestContext,
+    transport: Transport = Transport.NDJSON,
 ) -> RecordOutcome:
     """Store an over-long record cut to ``limit`` bytes, flagged ``truncated`` and unparsed.
 
@@ -482,7 +484,7 @@ async def store_truncated(
                 body_size=len(body),
                 truncated=True,
                 collector_json=_dumps(dict(collector)),
-                transport=Transport.NDJSON,
+                transport=transport,
                 received_at=ctx.received_at,
             )
             if raw is None:
