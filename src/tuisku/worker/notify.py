@@ -4,16 +4,19 @@ Notifications are written to the ``notifications`` outbox inside the evaluation 
 keyed by a ``dedupe_key`` with ``ON CONFLICT DO NOTHING``: a notification exists only if the
 insert actually happened, so a retried or re-claimed evaluation never pages twice. After the
 transaction commits, :func:`drain` hands undelivered rows to the notifier and marks them
-delivered. The first notifier writes structured log lines only; which channels page whom is a
-deployment decision outside this repository.
+delivered. :class:`LogNotifier` writes structured log lines and is always on;
+``tuisku.worker.alertmanager`` adds an Alertmanager channel when one is configured. Which
+receivers page whom is a deployment decision outside this repository.
 
 Notifications carry ids, titles, severities and entity keys, never L0 bodies.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -31,11 +34,30 @@ class Notifier(Protocol):
     def deliver(self, notification: dict[str, Any]) -> None: ...
 
 
+class NotifierUnavailable(Exception):
+    """Raised by a notifier whose channel is down as a whole (a timeout, a refused connection,
+    a 5xx), rather than refusing this one notification. :func:`drain` records the failure for
+    the notification as usual and ends the pass there, so a dead channel costs one timeout per
+    pass, not one per due notification; the rest stay due for the next pass."""
+
+
 class LogNotifier:
     """Writes one JSON line per notification to the ``tuisku.notify`` logger."""
 
     def deliver(self, notification: dict[str, Any]) -> None:
         log.warning("notification %s", json.dumps(notification, default=str, sort_keys=True))
+
+
+@dataclass(frozen=True, slots=True)
+class FanOutNotifier:
+    """Delivers to each notifier in order. The first error fails the delivery (the earlier
+    notifiers have already run, so a retry repeats them: put the log first)."""
+
+    notifiers: Sequence[Notifier]
+
+    def deliver(self, notification: dict[str, Any]) -> None:
+        for notifier in self.notifiers:
+            notifier.deliver(notification)
 
 
 async def emit(
@@ -94,6 +116,11 @@ async def drain(
     pack pages on it, which a deployment routes to another channel) and retries continue at
     the capped interval. Delivery is at-least-once: a crash after delivering and before
     committing re-delivers.
+
+    ``notifier.deliver`` runs in a thread (``asyncio.to_thread``), so a slow channel never
+    blocks the event loop (the health listener keeps answering). A
+    :class:`NotifierUnavailable` ends the pass after that notification's ``failed`` row; the
+    notifications not yet tried get no row and stay due, as if beyond ``limit``.
     """
     delivered = 0
     async with conn.transaction():
@@ -133,13 +160,16 @@ async def drain(
                 "kind": row["kind"],
                 "severity_id": row["severity_id"],
                 "created_at": row["created_at"].isoformat(),
+                "meta": bool(row["meta"]),
                 **row["payload"],
             }
+            unavailable = False
             try:
-                notifier.deliver(message)
+                await asyncio.to_thread(notifier.deliver, message)
             except Exception as exc:  # isolate: record and carry on with the next one
                 log.error("notifier failed for %s: %s", row["uid"], type(exc).__name__)
                 status, error = "failed", type(exc).__name__
+                unavailable = isinstance(exc, NotifierUnavailable)
             else:
                 status, error = "delivered", None
                 delivered += 1
@@ -159,4 +189,6 @@ async def drain(
                     },
                     now=now,
                 )
+            if unavailable:
+                break  # the channel is down: the rest wait for the next pass
     return delivered
