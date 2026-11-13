@@ -15,6 +15,7 @@ from tuisku.config import Settings
 from tuisku.rules.packs import RuleSet, load_rule_set
 from tuisku.worker import health
 from tuisku.worker.engine import Worker, WorkerConfig
+from tuisku.worker.export import ExportConfig, Exporter
 
 log = logging.getLogger(__name__)
 MAX_BACKOFF_SECONDS = 60.0
@@ -48,6 +49,20 @@ def worker_config(settings: Settings) -> WorkerConfig:
     )
 
 
+def exporter(settings: Settings) -> Exporter:
+    """The event exporter (ADR 0012). Always present: disabled, it keeps the queue bounded."""
+    url = settings.export_otlp_logs_url
+    return Exporter(
+        ExportConfig(
+            url=url.get_secret_value() if url is not None else None,
+            batch_size=settings.export_batch_size,
+            timeout_seconds=settings.export_timeout_seconds,
+            redact_entity_kinds=settings.export_redacted_kinds,
+            build_revision=settings.build_revision,
+        )
+    )
+
+
 def _system_clock() -> datetime:
     return datetime.now(UTC)
 
@@ -64,7 +79,14 @@ def run_worker(settings: Settings, *, once: bool = False, check_only: bool = Fal
         )
     if check_only:
         return 0
-    worker = Worker(rule_set=rule_set, clock=_system_clock, config=worker_config(settings))
+    worker = Worker(
+        rule_set=rule_set,
+        clock=_system_clock,
+        config=worker_config(settings),
+        exporter=exporter(settings),
+    )
+    if not worker.exporter or not worker.exporter.enabled:
+        log.info("event export disabled (TUISKU_EXPORT_OTLP_LOGS_URL unset)")
 
     async def main() -> None:
         server = None
