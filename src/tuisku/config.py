@@ -16,6 +16,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _ALLOWED_SCHEMES = frozenset({"postgresql", "postgres"})
 # A plain, unquoted Postgres role name: it is interpolated into GRANT statements.
 _ROLE_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+# An entity key's kind: the part before its first ':' (ADR 0008).
+_ENTITY_KIND = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 
 
 class ConfigError(RuntimeError):
@@ -107,6 +109,37 @@ class Settings(BaseSettings):
     worker_health_host: str = "0.0.0.0"
     # Optional dead-man's-switch URL, fetched after each healthy pass. May carry a secret.
     worker_deadman_url: SecretStr | None = None
+
+    # Export of finding and incident events (ADR 0012): OTLP/HTTP JSON logs to this full URL
+    # (e.g. http://collector:4318/v1/logs). Unset: export is disabled and the worker discards
+    # queued events older than worker_backlog_seconds. Held as a secret: a URL may carry one.
+    export_otlp_logs_url: SecretStr | None = None
+    export_batch_size: int = Field(default=100, ge=1, le=10_000)
+    export_timeout_seconds: float = Field(default=10.0, gt=0, le=300)
+    # Entity keys of these kinds are exported as <kind>:sha256:<hex of the value>.
+    export_redact_entity_kinds: str = "user,email"
+
+    @field_validator("export_otlp_logs_url")
+    @classmethod
+    def _check_export_url(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None or not value.get_secret_value().strip():
+            return None
+        parts = urlsplit(value.get_secret_value())
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError("must be an http:// or https:// URL")  # never echo the value
+        return value
+
+    @field_validator("export_redact_entity_kinds")
+    @classmethod
+    def _check_redact_kinds(cls, value: str) -> str:
+        kinds = [k.strip() for k in value.split(",") if k.strip()]
+        if not all(_ENTITY_KIND.fullmatch(k) for k in kinds):
+            raise ValueError("must be comma-separated entity key kinds ([a-z0-9-]+)")
+        return ",".join(kinds)
+
+    @property
+    def export_redacted_kinds(self) -> frozenset[str]:
+        return frozenset(k for k in self.export_redact_entity_kinds.split(",") if k)
 
     @field_validator("database_url")
     @classmethod

@@ -19,6 +19,7 @@ One pass (:meth:`Worker.run_once`):
    lease expiries and crashes never burn them; lock conflicts become counted failures after 20.
    The queue row is deleted once every rule has succeeded or been dead-lettered for it.
 4. **Deliver** the notifications the committed transactions queued.
+5. **Export** one batch of finding and incident events to the sink (ADR 0012).
 
 Idempotency: every firing and link inserts a ``rule_firings`` key (``(rule, rev, row)``, plus
 ``(rule, rev, group, window start)`` for correlations) in the same transaction as its effects,
@@ -52,6 +53,7 @@ from tuisku.store import meta
 from tuisku.store.ingest import enqueue
 from tuisku.store.lifecycle import set_finding_status
 from tuisku.worker import fold, notify
+from tuisku.worker.export import Exporter
 from tuisku.worker.metrics import compute_deltas
 
 log = logging.getLogger(__name__)
@@ -95,6 +97,7 @@ class Stats:
     expired_findings: int = 0
     backlog: int = 0
     delivered: int = 0
+    exported: int = 0
 
 
 class _Transient(Exception):
@@ -355,6 +358,8 @@ class Worker:
     name: str = field(default_factory=lambda: f"{socket.gethostname()}:{os.getpid()}"[:200])
     # Test hook: called at the start of each pair evaluation (rule, row envelope).
     before_pair: Callable[[Rule, Mapping[str, Any]], None] | None = None
+    # Export of finding and incident events (ADR 0012), after the drain; None: not run.
+    exporter: Exporter | None = None
     # When the last healthy pass ended (time.monotonic()): every step ran, and the oldest
     # undelivered notification is within backlog_after. Served by the worker's own health
     # listener (tuisku.worker.health), never by the API (ADR 0011 "Availability limits").
@@ -407,6 +412,12 @@ class Worker:
             notify.drain(conn, self.notifier, self.clock(), backoff=self.config.notify_backoff),
             0,
         )
+        if self.exporter is not None:
+            stats.exported = await self._step(
+                "export",
+                self.exporter.run(conn, self.config.backlog_after, self.clock()),
+                0,
+            )
         backlog = self.config.backlog_after.total_seconds()
         if self._skipped == 0 and undelivered_age is not None and undelivered_age <= backlog:
             self.healthy_at = time.monotonic()
