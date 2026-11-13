@@ -1,4 +1,4 @@
-"""The export queue (ADR 0012, revision 0003): filled by an owner trigger, drained by the worker
+"""The export queue (ADR 0012, revision 0004): filled by an owner trigger, drained by the worker
 role, invisible to the API role (ADR 0011)."""
 
 from __future__ import annotations
@@ -88,15 +88,15 @@ def test_the_queue_grants_are_exactly_select_and_delete_for_the_worker(
 # --- the migration ------------------------------------------------------------------------------
 
 
-def test_revision_0003_declares_itself_not_expand_only() -> None:
+def test_revision_0004_declares_itself_not_expand_only() -> None:
     from tests.test_migration_conventions import VERSIONS, expand_only_declarations
 
-    [path] = VERSIONS.glob("*_0003_*.py")
+    [path] = VERSIONS.glob("*_0004_*.py")
     # It adds a trigger function, triggers on existing tables and grants (AGENTS.md).
     assert expand_only_declarations(path.read_text()) == [False]
 
 
-def test_revision_0003_installs_deferred_triggers_and_downgrades_cleanly(
+def test_revision_0004_installs_deferred_triggers_and_downgrades_cleanly(
     empty_database_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from alembic import command
@@ -105,7 +105,7 @@ def test_revision_0003_installs_deferred_triggers_and_downgrades_cleanly(
 
     url = empty_database_url
     settings = make_settings(url)
-    run_migrations(settings, "0002")
+    run_migrations(settings, "0003")
     assert query(url, "SELECT to_regclass('export_queue') IS NULL") == [(True,)]
     run_migrations(settings)
     triggers = query(
@@ -120,11 +120,11 @@ def test_revision_0003_installs_deferred_triggers_and_downgrades_cleanly(
     monkeypatch.setenv("TUISKU_DATABASE_URL", url)
     cfg = alembic_config(settings)
     cfg.attributes["skip_logging_config"] = True
-    command.downgrade(cfg, "0002")
+    command.downgrade(cfg, "0003")
     assert query(
         url,
         "SELECT to_regclass('export_queue') IS NULL, "
         "NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'tuisku_enqueue_export')",
     ) == [(True, True)]
     run_migrations(settings)  # and up again
-    assert query(url, "SELECT version_num FROM alembic_version") == [("0003",)]
+    assert query(url, "SELECT version_num FROM alembic_version") == [("0004",)]

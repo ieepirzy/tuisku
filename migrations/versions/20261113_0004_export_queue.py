@@ -1,7 +1,7 @@
 """Export queue for finding and incident events (ADR 0012).
 
-Revision ID: 0003
-Revises: 0002
+Revision ID: 0004
+Revises: 0003
 Create Date: 2026-11-13
 
 Every ``finding_events`` and ``incident_events`` row is exported at least once to an
@@ -31,8 +31,8 @@ from collections.abc import Sequence
 
 from alembic import context, op
 
-revision: str = "0003"
-down_revision: str | Sequence[str] | None = "0002"
+revision: str = "0004"
+down_revision: str | Sequence[str] | None = "0003"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

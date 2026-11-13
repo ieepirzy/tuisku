@@ -22,7 +22,7 @@ OTLP/HTTP logs receiver, processors, and an exporter to the store.
 
 ### What is exported
 
-Every row of `finding_events` and `incident_events` committed after revision 0003, once each
+Every row of `finding_events` and `incident_events` committed after revision 0004, once each
 and at least once, as one OTLP log record over OTLP/HTTP JSON to
 `TUISKU_EXPORT_OTLP_LOGS_URL` (a full URL, such as `http://collector:4318/v1/logs`). Events
 committed before the migration are not backfilled: a backfill is a data migration, and with
@@ -181,5 +181,5 @@ a disabled replica discards what an enabled one could not send within the backlo
   deduplicate on `record_uid` and order by `event.at`.
 - The sink's own durability (retention lock, replication) is the deployment's to configure;
   Tuisku's guarantee ends at the 2xx.
-- Revision 0003 adds a trigger function, triggers on existing tables and grants, so it is not
+- Revision 0004 adds a trigger function, triggers on existing tables and grants, so it is not
   expand-only by the migration-safety convention, although an older image runs unchanged on it.
