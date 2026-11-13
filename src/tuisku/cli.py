@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
@@ -22,6 +23,7 @@ from pydantic import ValidationError
 
 from tuisku.config import ConfigError, Settings
 from tuisku.rules.packs import PackError as PackLoadError
+from tuisku.store.admin import EnsureConflict
 
 
 class UsageError(Exception):
@@ -78,6 +80,41 @@ def _add_admin_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]
     )
     add.add_argument("--token-label")
     add.add_argument("--token-expires-at", type=_timestamp)
+
+    ensure = source_sub.add_parser(
+        "ensure",
+        help="idempotently create a source and register a token taken from the environment",
+        description="Create the source if it is absent and register the tsk_src_ token held in "
+        "the environment variable --token-env if its SHA-256 is not registered yet. An existing "
+        "source with another adapter or other options, a disabled source, and a token that is "
+        "revoked, expired or registered to another source are errors; nothing is changed. The "
+        "token is never printed. Exit status 0 when the source and token are in place.",
+    )
+    ensure.add_argument("name")
+    ensure.add_argument("--adapter", required=True)
+    ensure.add_argument(
+        "--option",
+        action="append",
+        default=[],
+        type=_key_value,
+        metavar="KEY=VALUE",
+        help="adapter option with a string value (repeatable)",
+    )
+    ensure.add_argument(
+        "--option-json",
+        action="append",
+        default=[],
+        type=_key_json,
+        metavar="KEY=JSON",
+        help="adapter option with a JSON value (repeatable)",
+    )
+    ensure.add_argument(
+        "--token-env",
+        required=True,
+        metavar="VAR",
+        help="name of the environment variable that holds the tsk_src_ token",
+    )
+    ensure.add_argument("--token-label", help="label for the token, if it is registered now")
 
     disable = source_sub.add_parser("disable", help="disable a source: its tokens stop working")
     disable.add_argument("name")
@@ -173,6 +210,38 @@ def _print_token(token: str, what: str) -> None:
     print(f"tuisku: {what}; store the token now, it is not shown again", file=sys.stderr)
 
 
+def _ensure_source(args: argparse.Namespace, settings: Settings) -> None:
+    from tuisku.store import admin
+    from tuisku.store.tokens import is_source_token
+
+    token = os.environ.get(args.token_env, "").strip()
+    if not token:
+        raise UsageError(f"environment variable {args.token_env} is unset or empty")
+    if not is_source_token(token):
+        # Never echo the value: it may be a real secret of another kind.
+        raise UsageError(
+            f"environment variable {args.token_env} does not hold a source token "
+            "(tsk_src_ followed by 43 URL-safe base64 characters)"
+        )
+    options = dict(args.option) | dict(args.option_json)
+    result = _with_connection(
+        settings,
+        lambda conn: admin.ensure_source(
+            conn, args.name, args.adapter, options, token, label=args.token_label
+        ),
+    )
+    if result.source_created:
+        print(f"tuisku: created source {args.name} (adapter {args.adapter})", file=sys.stderr)
+    if result.token_registered:
+        print(f"tuisku: registered token {result.token_uid} for {args.name}", file=sys.stderr)
+    if not (result.source_created or result.token_registered):
+        print(
+            f"tuisku: source {args.name} and token {result.token_uid} already in place; "
+            "nothing to do",
+            file=sys.stderr,
+        )
+
+
 def _run_admin(args: argparse.Namespace, settings: Settings) -> None:
     from tuisku import adapters
     from tuisku.adapters import builtin as _builtin  # noqa: F401  (registers adapters)
@@ -220,10 +289,12 @@ def _run_admin(args: argparse.Namespace, settings: Settings) -> None:
         return
 
     command = args.source_command
-    if command == "add":
-        if args.adapter not in adapters.names():
-            available = ", ".join(adapters.names()) or "none"
-            raise UsageError(f"unknown adapter {args.adapter!r} (available: {available})")
+    if command in ("add", "ensure") and args.adapter not in adapters.names():
+        available = ", ".join(adapters.names()) or "none"
+        raise UsageError(f"unknown adapter {args.adapter!r} (available: {available})")
+    if command == "ensure":
+        _ensure_source(args, settings)
+    elif command == "add":
         options = dict(args.option) | dict(args.option_json)
 
         async def add(conn: AsyncConnection[Any]) -> tuple[Any, Any]:
@@ -297,5 +368,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     except LookupError as exc:  # store.admin.NotFoundError
         print(f"tuisku: {exc}", file=sys.stderr)
+        return 1
+    except EnsureConflict as exc:
+        print(f"tuisku: refused: {exc}", file=sys.stderr)
         return 1
     return 0
