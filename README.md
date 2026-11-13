@@ -27,6 +27,8 @@ decisions.
 
 ```sh
 uv run tuisku source add edge-suricata --adapter suricata   # prints a tsk_src_ token once
+# Declarative, for deploy Jobs: create if absent, register the token held in $EDGE_TOKEN
+uv run tuisku source ensure edge-suricata --adapter suricata --token-env EDGE_TOKEN
 uv run tuisku source token add edge-suricata --label rotation-2027
 uv run tuisku source token list edge-suricata              # uids and dates, never secrets
 uv run tuisku source token revoke edge-suricata <token-uid>
@@ -52,8 +54,20 @@ trigger refuses them for any other role, so the app role the API uses can never 
 Only the SHA-256 of a token is stored; copy it when it is printed. Adapter options are
 `--option key=value` (string) or `--option-json key=<json>`.
 
+`tuisku source ensure NAME --adapter ADAPTER [--option ...] [--option-json ...] --token-env VAR
+[--token-label LABEL]` lets a deployment generate a source's token itself (`tsk_src_` followed
+by 43 URL-safe base64 characters, e.g. `"tsk_src_" + secrets.token_urlsafe(32)`) and keep it in
+its own secret store. It is idempotent and safe to run on every deploy: it creates the source if
+it is absent and registers the token in `VAR` if its SHA-256 is not registered yet, never prints
+the token, and exits 0 when there is nothing to do. It never changes what exists: a source with
+another adapter or other options (compared as JSON), a disabled source, and a token that is
+revoked, expired or registered to another source are errors (exit 1), and a missing or malformed
+token is a usage error (exit 2). Like `source add`, it needs `SELECT, INSERT` on `sources` and
+`source_tokens`, which the app role has; it does not need the database owner.
+
 Shippers post NDJSON envelopes (`{"raw": "<line>", "collector": {...}}`) to
-`POST /v1/sources/{source}/records`, or OTLP/HTTP JSON metrics to
+`POST /v1/sources/{source}/records`, OTLP/HTTP JSON logs to
+`POST /v1/sources/{source}/otlp/v1/logs`, or OTLP/HTTP JSON metrics to
 `POST /v1/sources/{source}/otlp/v1/metrics`, with `Authorization: Bearer tsk_src_...`, plain or
 `Content-Encoding: gzip`. Limits (ADR 0005) are settings: `TUISKU_INGEST_MAX_BODY_BYTES`
 (5 MiB, on the wire and after decompression), `TUISKU_INGEST_MAX_LINES` (5000),
@@ -64,6 +78,22 @@ one `tuisku.meta.*` detection per source, kind, subject (the limit) and 5-minute
 repeats are counted in `meta_counters`. Buckets are slices of the database clock, and the
 database accepts the API's meta-detections only for its own ingest kinds and the current bucket,
 so a bucket cannot be claimed in advance.
+
+On the OTLP logs endpoint each `logRecord` is one record, handled as one NDJSON line: its raw
+record is `body.stringValue`, byte for byte, parsed by the source's adapter, and the line limits
+apply per record (`TUISKU_INGEST_MAX_LINES` counts log records). A body of any other kind (say,
+a `kvlistValue` made by a collector-side JSON parser) is `rejected` as `body_not_string`: ship
+raw lines and let Tuisku parse them. The record's `collector` is the resource attributes merged
+with its own attributes (the record's win), under their OpenTelemetry names (`k8s.node.name`,
+`k8s.pod.name`, `log.file.path`, ...), plus `otlp.observed_time_unix_nano` and
+`otlp.time_unix_nano` when set; like any `collector` it is receipt metadata that no adapter
+reads, and the 4 KiB cap applies. A body that is not an OTLP/JSON logs request is 400. The answer
+is an `ExportLogsServiceResponse`: `partialSuccess.rejectedLogRecords` counts rejected records,
+and `results` lists every record's outcome. For the OpenTelemetry Collector, a `filelog`
+receiver and an `otlphttp` exporter with `encoding: json`, `logs_endpoint` set to the URL above
+and `headers: {Authorization: "Bearer ${env:TOKEN}"}` is enough. Keep its batches under the
+body and record limits, because the Collector does not retry a 413, and keep its sending queue
+and retries on: 429 and 503 are retried after `Retry-After`.
 
 Adapters run in a bounded pool of worker threads (`TUISKU_INGEST_PARSE_THREADS`). A request that
 runs past `TUISKU_INGEST_REQUEST_BUDGET_SECONDS` (10 s) stops before its next line, commits
