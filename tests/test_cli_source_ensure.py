@@ -126,6 +126,8 @@ def test_ensure_refuses_tokens_it_must_not_reuse(
     assert _ensure(name) == 1
     err = capsys.readouterr().err
     assert "registered to another source" in err and token not in err
+    # The refusal rolled back the source it was about to create.
+    assert query(env.owner_url, "SELECT count(*) FROM sources WHERE name = %s", (name,)) == [(0,)]
     # A revoked token is not brought back.
     [(uid,)] = query(
         env.owner_url,
@@ -142,6 +144,25 @@ def test_ensure_refuses_tokens_it_must_not_reuse(
     assert main(["source", "disable", other]) == 0
     assert _ensure(other) == 1
     assert "is disabled" in capsys.readouterr().err
+
+
+def test_ensure_refuses_an_expired_token(
+    env: AppDatabase, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    name = _name()
+    token = new_source_token()
+    monkeypatch.setenv(ENV, token)
+    assert _ensure(name) == 0
+    query(
+        env.owner_url,
+        "UPDATE source_tokens SET expires_at = now() - interval '1 day' "
+        "WHERE token_sha256 = %s RETURNING id",
+        (hashlib.sha256(token.encode()).digest(),),
+    )
+    capsys.readouterr()
+    assert _ensure(name) == 1
+    err = capsys.readouterr().err
+    assert "has expired" in err and token not in err
 
 
 @pytest.mark.parametrize(

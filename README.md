@@ -83,17 +83,23 @@ On the OTLP logs endpoint each `logRecord` is one record, handled as one NDJSON 
 record is `body.stringValue`, byte for byte, parsed by the source's adapter, and the line limits
 apply per record (`TUISKU_INGEST_MAX_LINES` counts log records). A body of any other kind (say,
 a `kvlistValue` made by a collector-side JSON parser) is `rejected` as `body_not_string`: ship
-raw lines and let Tuisku parse them. The record's `collector` is the resource attributes merged
-with its own attributes (the record's win), under their OpenTelemetry names (`k8s.node.name`,
-`k8s.pod.name`, `log.file.path`, ...), plus `otlp.observed_time_unix_nano` and
-`otlp.time_unix_nano` when set; like any `collector` it is receipt metadata that no adapter
-reads, and the 4 KiB cap applies. A body that is not an OTLP/JSON logs request is 400. The answer
-is an `ExportLogsServiceResponse`: `partialSuccess.rejectedLogRecords` counts rejected records,
-and `results` lists every record's outcome. For the OpenTelemetry Collector, a `filelog`
-receiver and an `otlphttp` exporter with `encoding: json`, `logs_endpoint` set to the URL above
-and `headers: {Authorization: "Bearer ${env:TOKEN}"}` is enough. Keep its batches under the
-body and record limits, because the Collector does not retry a 413, and keep its sending queue
-and retries on: 429 and 503 are retried after `Retry-After`.
+raw lines and let Tuisku parse them. The record's `collector` keeps the resource attributes and
+the record's own attributes apart, `{"resource": {...}, "attributes": {...}}`, under their
+OpenTelemetry names (`k8s.node.name`, `log.file.path`, ...), plus `observed_time_unix_nano` and
+`time_unix_nano` when set, so an attribute derived from log content cannot pose as the
+resource. Like any `collector` it is receipt metadata that no adapter reads, and the 4 KiB cap
+applies. Bad metadata never costs the record: malformed attributes, or attributes nested deeper
+than 32 values or with more than 4,092 keys, replace the collector with a
+`tuisku_collector_dropped` marker and raise a meta-detection, and the record is stored and
+parsed. A body that is not an OTLP/JSON logs request is 400. The answer is an
+`ExportLogsServiceResponse` (`partialSuccess.rejectedLogRecords` counts rejected records) plus a
+`tuisku` summary of counts and at most 100 rejected record numbers, small whatever the batch
+size, because an OTLP exporter reads at most 64 KiB of it. For the OpenTelemetry Collector, a
+`filelog` receiver and an `otlphttp` exporter with `encoding: json`, `logs_endpoint` set to the
+URL above and `headers: {Authorization: "Bearer ${env:TOKEN}"}` is enough. Keep its batches
+(`sending_queue` batch or `batch` processor `send_batch_max_size`) at or below
+`TUISKU_INGEST_MAX_LINES` records and under the body limit, because the Collector does not retry
+a 413, and keep its sending queue and retries on: 429 and 503 are retried after `Retry-After`.
 
 Adapters run in a bounded pool of worker threads (`TUISKU_INGEST_PARSE_THREADS`). A request that
 runs past `TUISKU_INGEST_REQUEST_BUDGET_SECONDS` (10 s) stops before its next line, commits
@@ -109,7 +115,10 @@ token bucket held **in each API replica's memory**: with N replicas a source can
 N times the configured rate. An exhausted bucket answers 429 with `Retry-After`. Refusals are
 counted in process. The first refusal per source is recorded at once; the rest are written at
 most every `TUISKU_INGEST_RATE_BREACH_FLUSH_SECONDS` (10 s) and at shutdown, never once per
-refused request.
+refused request. Requests refused whole for a body over the limit (413), too many lines or
+records (413) or a body that is not OTLP/JSON logs (400) are counted the same way, per source
+and limit. The OTLP logs endpoint also refuses a source whose bucket is empty before it decodes
+the body.
 
 Operator tokens with the `read` role (or `triage`/`admin`) can read evidence:
 `GET /v1/observations`, `GET /v1/detections` (filters `kind`, `source`, `entity_key`, `since`,
