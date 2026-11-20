@@ -598,7 +598,7 @@ def test_a_sink_that_refuses_everything_keeps_the_queue_and_backs_off(
     assert queued(url) == n and exp.failures == 1 and exp.isolated == 0
     assert export_failed(url) == []
     tried = len(sink.posts) - before
-    assert tried <= 5  # 8, 4, 2, 1, then one probe or stub: then it backs off
+    assert tried <= 8  # 8, 4, 2, 1, then at most 4 probes: then it backs off
     export_round(url, exp)  # backing off: nothing is sent
     assert len(sink.posts) - before == tried and queued(url) == n
 
@@ -628,8 +628,93 @@ def test_a_sink_that_takes_only_stubs_cannot_turn_the_queue_into_stubs(
         ticks.now += 5.0
     sink.answer = lambda records: (200, b"{}") if records[0].get("error") else (400, b"{}")
     export_round(url, exp)
-    isolated = 0 if outage else 1
-    assert exp.isolated == isolated and queued(url) == n - isolated and exp.failures >= 1
+    # Every probe is a real record, and the sink takes none: nothing is stubbed.
+    assert exp.isolated == 0 and queued(url) == n and exp.failures >= 1
+
+
+def _rounds(url: str, exp: Exporter, ticks: Ticks, n: int = 30) -> None:
+    """Export rounds, skipping each backoff, until the queue is empty (or ``n`` rounds)."""
+    for _ in range(n):
+        export_round(url, exp)
+        if queued(url) == 0:
+            return
+        ticks.now += 600.0
+
+
+def test_two_bad_records_at_the_head_are_isolated(fresh_database_url: str, sink: Sink) -> None:
+    """The review's case: the two oldest records are refused by content (one transaction's
+    events share a big snapshot). A probe refused in turn must not blame the sink when a
+    further record is accepted."""
+    url = fresh_database_url
+    enable_export(url)
+    harava_finding(url, Clock(T0))
+    n = queued(url)
+    bad = {r[0] for r in query(url, "SELECT event ->> 'uid' FROM export_queue ORDER BY id LIMIT 2")}
+
+    def answer(records: list[dict[str, Any]]) -> tuple[int, bytes]:
+        refused = any(r["record_uid"] in bad and "error" not in r for r in records)
+        return (413, b"{}") if refused else (200, b"{}")
+
+    sink.answer = answer
+    ticks = Ticks()
+    exp = exporter(sink.url, ticks, batch_size=8)
+    _rounds(url, exp, ticks)
+    assert queued(url) == 0 and exp.isolated == 2
+    delivered = [r for p in sink.posts if p["_status"] == 200 for r in sink.records([p])]
+    assert {r["record_uid"] for r in delivered if "error" in r} == bad
+    assert len({r["record_uid"] for r in delivered}) == n
+
+
+def test_a_flaky_sink_does_not_stub_sound_records(fresh_database_url: str, sink: Sink) -> None:
+    """One replica of the sink's fleet answers 400 to everything: here only every third request
+    is accepted. Every record still arrives whole, none as a stub."""
+    url = fresh_database_url
+    enable_export(url)
+    harava_finding(url, Clock(T0))
+    n = queued(url)
+    count = [0]
+
+    def answer(records: list[dict[str, Any]]) -> tuple[int, bytes]:
+        count[0] += 1
+        return (200, b"{}") if count[0] % 3 == 0 else (400, b"{}")
+
+    sink.answer = answer
+    ticks = Ticks()
+    exp = exporter(sink.url, ticks, batch_size=8)
+    _rounds(url, exp, ticks, 60)
+    assert queued(url) == 0 and exp.isolated == 0
+    delivered = [r for p in sink.posts if p["_status"] == 200 for r in sink.records([p])]
+    assert not [r for r in delivered if "error" in r]
+    assert len({r["record_uid"] for r in delivered}) == n
+
+
+def test_a_refused_stub_of_an_unencodable_record_is_kept(
+    fresh_database_url: str, sink: Sink
+) -> None:
+    """The sink takes the other records but refuses the stub sent for a record that cannot be
+    encoded: that is the sink's to fix. The row is kept, nothing is dropped, and it backs off."""
+    url = fresh_database_url
+    enable_export(url)
+    harava_finding(url, Clock(T0))
+    n = queued(url)
+    with psycopg.connect(url) as conn:
+        [(bad_id,)] = conn.execute(
+            "UPDATE export_queue SET state = jsonb_build_object('rule_ref', 'not an object') "
+            "WHERE id = (SELECT min(id) FROM export_queue WHERE stream = 'finding') RETURNING id"
+        ).fetchall()
+
+    def answer(records: list[dict[str, Any]]) -> tuple[int, bytes]:
+        refused = any(r.get("error", "").startswith("unencodable") for r in records)
+        return (400, b"{}") if refused else (200, b"{}")
+
+    sink.answer = answer
+    exp = exporter(sink.url, batch_size=8)
+    export_round(url, exp)
+    assert exp.failures == 1 and exp.isolated == 0
+    # The probe was delivered; the rest waits behind the backoff, the bad row with it.
+    assert (bad_id,) in query(url, "SELECT id FROM export_queue")
+    assert queued(url) == n - 1
+    assert [s for s, _ in export_failed(url)] == []
 
 
 def harava_finding_again(url: str) -> None:

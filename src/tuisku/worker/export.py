@@ -17,11 +17,11 @@ the delete sends the batch again, and consumers deduplicate on ``record_uid`` (t
   off: 5 s doubling to 5 minutes, in this process's memory (it restarts from zero with the
   process; the worker role cannot write the queue).
 - A 400 or 413 halves the batch, down to one record. A record refused on its own is the
-  record's fault only if the sink accepts others (a real batch since the last failure, or the
-  next record sent alone as a probe); then a stub that names it replaces it and
-  ``tuisku.meta.export_failed`` (subject ``refused``) pages. A refused probe or stub means the
-  sink is at fault: every row is kept and delivery backs off. No row is ever dropped because
-  the sink refuses it.
+  record's fault only if the sink accepts others: up to 4 other records, smallest first, are
+  sent alone as probes, and the record is resent right after one is accepted. Refused that way
+  twice, it is replaced by a stub that names it, and ``tuisku.meta.export_failed`` (subject
+  ``refused``) pages. If no probe is accepted, or the stub is refused, the sink is at fault:
+  every row is kept and delivery backs off. No row is ever dropped because the sink refuses it.
 - A row that cannot be encoded is sent as such a stub (subject ``unencodable``); it never holds
   up the rows behind it.
 - An OTLP partial success (``partialSuccess.rejectedLogRecords``) is not retried, as OTLP
@@ -73,6 +73,8 @@ SCOPE = "tuisku.export"
 MAX_RESPONSE_BYTES = 64 * 1024
 DISCARD_LIMIT = 1000  # leftover rows deleted per round once export is off
 REFUSED = (400, 413)  # the sink refuses this content: halve the batch, then isolate the row
+PROBES = 4  # other records sent alone to show the sink works, before blaming the sink
+REFUSALS_TO_STUB = 2  # refusals of a record alone, each right after a proof, before a stub
 DEFAULT_KINDS = frozenset({"ip", "caller", "identity"})
 
 # OTLP SeverityNumber for each severity_id (OCSF: 0 Unknown ... 6 Fatal).
@@ -430,9 +432,6 @@ class Exporter:
     _retry_at: float = field(default=0.0, init=False)
     _batch: int = field(default=0, init=False)
     _pseudonyms: Pseudonyms | None = field(default=None, init=False, repr=False)
-    # The sink accepted a real batch since the last failure: only then is a record it refuses
-    # on its own taken to be the record's fault, not the sink's.
-    _proven: bool = field(default=False, init=False)
     isolated: int = field(default=0, init=False)  # records replaced by stubs, since start
 
     def __post_init__(self) -> None:
@@ -541,7 +540,6 @@ class Exporter:
             self.config.backoff_base_seconds * 2 ** min(self.failures - 1, 30),
         )
         self._retry_at = self.monotonic() + delay
-        self._proven = False
         log.warning("%s; %d consecutive failures, retrying in %.0fs", why, self.failures, delay)
 
     async def _deliver(self, conn: AsyncConnection[Any], done: Round) -> None:
@@ -613,7 +611,6 @@ class Exporter:
         )
         done.delivered += len(encoded) - rejected
         done.stubs += len(stubs)
-        self._proven = True
 
     async def _post_one(self, conn: AsyncConnection[Any], one: Encoded) -> int | None:
         """Send one record on its own, under a renewed lease. None after a failure (backing off)
@@ -632,41 +629,67 @@ class Exporter:
             return None
         return status
 
+    async def _prove(self, conn: AsyncConnection[Any], one: Encoded, done: Round) -> bool:
+        """Show that the sink accepts records other than ``one``: send up to ``PROBES`` other
+        queued records alone, smallest first (a size limit refuses big records, and the events of
+        one transaction share one big snapshot), and stop at the first it accepts, which is then
+        delivered. False when none is accepted (the sink is at fault, delivery backs off), or
+        after a failure or a lost lease."""
+        rows = await db.fetch_all(
+            conn,
+            "SELECT id, stream, event, state FROM export_queue WHERE id <> %s "
+            "ORDER BY pg_column_size(event) + pg_column_size(state), id LIMIT %s",
+            (one.queue_id, PROBES),
+        )
+        if not rows:
+            self._failed(
+                "the export sink refuses the only queued record; nothing else can show "
+                "whether the record or the sink is at fault"
+            )
+            return False
+        assert self._pseudonyms is not None
+        for row in rows:
+            probe = encode(row, self._pseudonyms, self._rev)
+            status = await self._post_one(conn, probe)
+            if status is None:
+                return False
+            if 200 <= status < 300:
+                await self._settle(conn, [probe], b"", done)
+                return True
+            if status not in REFUSED:
+                self._failed(f"export of one record failed: HTTP {status}")
+                return False
+        self._failed(f"the export sink refuses {len(rows)} distinct records on their own")
+        return False
+
     async def _isolate(
         self, conn: AsyncConnection[Any], one: Encoded, status: int, done: Round
     ) -> int | None:
         """The sink refuses this one record. That is the record's fault only if the sink accepts
-        others: unless a real batch was accepted since the last failure, the next record is sent
-        on its own as a probe first. Then a stub replaces the record (and pages). A refused
-        probe or stub means the sink is at fault: every row is kept and delivery backs off. A
-        row is never dropped because the sink refuses it."""
+        others: the record is sent again, alone, right after the sink accepted another record
+        (``_prove``), and must be refused that way twice before a stub replaces it (and pages).
+        So a flaky sink does not stub sound records. A sink that accepts none of the probes, or
+        refuses the stub, is at fault: every row is kept and delivery backs off. A row is never
+        dropped because the sink refuses it."""
         log.error("export sink refused queue row %s on its own (HTTP %d)", one.queue_id, status)
-        if not self._proven:
-            nxt = await db.fetch_one(
-                conn,
-                "SELECT id, stream, event, state FROM export_queue WHERE id > %s ORDER BY id "
-                "LIMIT 1",
-                (one.queue_id,),
-            )
-            if nxt is None:
-                self._failed(
-                    "the export sink refuses the only queued record; nothing else can show "
-                    "whether the record or the sink is at fault"
-                )
+        for _ in range(REFUSALS_TO_STUB):
+            if not await self._prove(conn, one, done):
                 return None
-            assert self._pseudonyms is not None
-            probe = encode(nxt, self._pseudonyms, self._rev)
-            probed = await self._post_one(conn, probe)
-            if probed is None:
+            if one.stub:
+                # Already the smallest form, and refused while the sink takes other records:
+                # still the sink's to fix (its schema, its limits); keep the row and back off.
+                self._failed(f"the export sink refuses a stub (HTTP {status})")
                 return None
-            if not 200 <= probed < 300:
-                self._failed(f"the export sink refuses records (HTTP {probed})")
+            again = await self._post_one(conn, one)
+            if again is None:
                 return None
-            await self._settle(conn, [probe], b"", done)  # proven now
-        if one.stub:
-            # Already the smallest form: a refused stub is the sink's fault.
-            self._failed(f"the export sink refuses a stub (HTTP {status})")
-            return None
+            if 200 <= again < 300:  # a flaky sink: delivered after all
+                await self._settle(conn, [one], b"", done)
+                return again
+            if again not in REFUSED:
+                self._failed(f"export of one record failed: HTTP {again}")
+                return None
+            status = again
         row = await db.fetch_one(
             conn, "SELECT id, stream, event FROM export_queue WHERE id = %s", (one.queue_id,)
         )
@@ -678,10 +701,6 @@ class Exporter:
             self._failed(f"the export sink refuses a stub (HTTP {sent})")
             return None
         self.isolated += 1
-        # One isolation per proof: the next record refused on its own needs the sink to accept
-        # a real record again first, so a sink that takes only stubs cannot turn the queue
-        # into stubs.
-        self._proven = False
         log.error(
             "export queue row %s (record %s) was replaced by a stub; %d so far",
             one.queue_id,
