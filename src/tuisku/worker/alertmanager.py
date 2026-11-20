@@ -19,15 +19,18 @@ The alert:
 
 No entity keys or telemetry values are sent, because the receiver may be an external service.
 ``TUISKU_NOTIFY_ALERTMANAGER_INCLUDE_ENTITIES=true`` adds the entity keys as an
-``entity_keys`` annotation (never as labels).
+``entity_keys`` annotation (never as labels): a JSON array of at most 32 keys, each without
+control characters and cut to 256 characters. They are still untrusted text.
 
-Delivery runs in a thread (``notify.drain`` uses ``asyncio.to_thread``) with a socket timeout.
-A 2xx is delivered. A 4xx other than 408 and 429 refuses this one alert
-(:class:`AlertmanagerRejected`). Anything else, a timeout or a connection error means the
-channel is down (:class:`AlertmanagerUnavailable`, a ``NotifierUnavailable``): the drain records
-the failure and leaves the rest of its batch for the next pass. Redirects are not followed.
-The URL may carry credentials; it is never logged or put in an error, and ``user:password`` in
-it is sent as HTTP basic auth.
+Delivery runs in a thread (``notify.drain`` uses ``asyncio.to_thread``) through
+``http.client``, under a total deadline: a watchdog shuts the socket down when the timeout is
+spent, so a server that answers slowly, byte by byte, is cut off too. A 2xx is delivered. A 400
+or 422 refuses this one alert (:class:`AlertmanagerRejected`). Anything else (a 3xx, since
+redirects are not followed; 401, 403, 404, 405, 408, 413, 429; a 5xx), a timeout or a
+connection error means the channel is down for every alert (:class:`AlertmanagerUnavailable`, a
+``NotifierUnavailable``): the drain records the failure and leaves the rest of its batch for the
+next pass. No environment proxy is used. The URL may carry credentials, only with https; it is
+never logged or put in an error, and ``user:password`` in it is sent as HTTP basic auth.
 """
 
 from __future__ import annotations
@@ -36,22 +39,30 @@ import base64
 import http.client
 import json
 import re
-import urllib.error
-import urllib.request
+import socket
+import threading
+import unicodedata
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit
 
 from pydantic import SecretStr
 
-from tuisku.config import ALERTMANAGER_SOURCE
+from tuisku.config import ALERTMANAGER_SOURCE, check_alertmanager_url
 from tuisku.worker.notify import NotifierUnavailable
 
 ALERTNAME = "TuiskuNotification"
 ALERTS_PATH = "/api/v2/alerts"
-MAX_RESPONSE_BYTES = 64 * 1024
 MAX_SUMMARY_CHARS = 1024
 MAX_ENTITY_KEYS = 32
+MAX_ENTITY_KEY_CHARS = 256
+# Statuses that refuse one alert; every other non-2xx is the channel failing for all of them.
+REJECTS = frozenset({400, 422})
+# A test swaps the https class for a plain one to see the basic-auth header on the wire.
+_CONNECTIONS: dict[str, type[http.client.HTTPConnection]] = {
+    "http": http.client.HTTPConnection,
+    "https": http.client.HTTPSConnection,
+}
 
 # OCSF severity_id -> the ``severity`` label: the OCSF caption, lowercased. Unmapped values
 # (and 0) are "unknown".
@@ -73,11 +84,11 @@ _ID_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,199}$")
 
 
 class AlertmanagerRejected(Exception):
-    """Alertmanager refused this alert (a 4xx other than 408 or 429)."""
+    """Alertmanager refused this alert (400 or 422)."""
 
 
 class AlertmanagerUnavailable(NotifierUnavailable):
-    """Alertmanager could not be reached, or answered with something other than 2xx or 4xx."""
+    """Alertmanager could not be reached, or answered with a status that fails every alert."""
 
 
 class AlertmanagerTimeout(AlertmanagerUnavailable):
@@ -94,6 +105,16 @@ def _ids(notification: Mapping[str, Any]) -> list[tuple[str, str]]:
     if isinstance(row, Mapping):
         pairs += [("row_layer", row.get("layer")), ("row_uid", row.get("uid"))]
     return [(k, v) for k, v in pairs if isinstance(v, str) and _ID_VALUE.fullmatch(v)]
+
+
+def _entity_keys(keys: list[Any]) -> str:
+    """A JSON array: at most MAX_ENTITY_KEYS keys, control and format characters removed, each
+    cut to MAX_ENTITY_KEY_CHARS."""
+    clean = [
+        "".join(c for c in str(k) if unicodedata.category(c) not in ("Cc", "Cf"))
+        for k in keys[:MAX_ENTITY_KEYS]
+    ]
+    return json.dumps([k[:MAX_ENTITY_KEY_CHARS] for k in clean], ensure_ascii=False)
 
 
 def build_alert(
@@ -126,7 +147,7 @@ def build_alert(
     if include_entities:
         keys = notification.get("entity_keys")
         if isinstance(keys, list) and keys:
-            annotations["entity_keys"] = ", ".join(str(k) for k in keys[:MAX_ENTITY_KEYS])
+            annotations["entity_keys"] = _entity_keys(keys)
     return {
         "labels": labels,
         "annotations": annotations,
@@ -134,25 +155,17 @@ def build_alert(
     }
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
-        return None  # a 3xx surfaces as an HTTPError: never re-sent elsewhere, never as a GET
-
-
-def _endpoint(base_url: str) -> tuple[str, dict[str, str]]:
-    """The alerts URL without credentials, and the basic-auth header for any in the URL."""
+def _endpoint(base_url: str) -> tuple[str, str, int | None, str, dict[str, str]]:
+    """(scheme, host, port, alerts path, headers): the basic-auth header for credentials in the
+    URL, which only https may carry."""
+    check_alertmanager_url(base_url)
     parts = urlsplit(base_url)
-    headers: dict[str, str] = {}
+    headers = {"Content-Type": "application/json"}
     if parts.username is not None:
         userpass = f"{unquote(parts.username)}:{unquote(parts.password or '')}"
         headers["Authorization"] = "Basic " + base64.b64encode(userpass.encode()).decode()
-    netloc = parts.hostname or ""
-    if ":" in netloc:
-        netloc = f"[{netloc}]"  # IPv6 literal
-    if parts.port is not None:
-        netloc += f":{parts.port}"
     path = parts.path.rstrip("/") + ALERTS_PATH
-    return urlunsplit((parts.scheme, netloc, path, "", "")), headers
+    return parts.scheme, parts.hostname or "", parts.port, path, headers
 
 
 class AlertmanagerNotifier:
@@ -167,11 +180,12 @@ class AlertmanagerNotifier:
         include_entities: bool = False,
         timeout_seconds: float = 5.0,
     ) -> None:
-        self._url, self._headers = _endpoint(url.get_secret_value())
+        self._scheme, self._host, self._port, self._path, self._headers = _endpoint(
+            url.get_secret_value()
+        )
         self.static_labels = dict(static_labels or {})
         self.include_entities = include_entities
         self.timeout_seconds = timeout_seconds
-        self._opener = urllib.request.build_opener(_NoRedirect)
 
     def __repr__(self) -> str:  # never the URL
         return f"AlertmanagerNotifier(static_labels={self.static_labels!r})"
@@ -184,30 +198,49 @@ class AlertmanagerNotifier:
 
     def post(self, alerts: list[dict[str, Any]]) -> None:
         body = json.dumps(alerts, separators=(",", ":"), sort_keys=True).encode()
-        request = urllib.request.Request(
-            self._url,
-            data=body,
-            method="POST",
-            headers={"Content-Type": "application/json", **self._headers},
-        )
-        # Errors are re-raised `from None` with a status only: the originals carry the URL.
+        # http.client, not urllib: no redirects, no environment proxies, and the socket is in
+        # reach of the watchdog that enforces the total deadline.
+        port = self._port or (443 if self._scheme == "https" else 80)
+        conn = _CONNECTIONS[self._scheme](self._host, port, timeout=self.timeout_seconds)
+        expired = threading.Event()
+
+        def cut() -> None:
+            expired.set()
+            sock = conn.sock  # during a TLS handshake, the plain socket under it
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)  # wakes a blocked connect, send or recv
+                except OSError:
+                    pass
+
+        watchdog = threading.Timer(self.timeout_seconds, cut)
+        watchdog.daemon = True
+        status: int | None = None
+        failure: str | None = None
+        watchdog.start()
         try:
-            with self._opener.open(request, timeout=self.timeout_seconds) as response:
-                response.read(MAX_RESPONSE_BYTES)
-                status = response.status
-        except urllib.error.HTTPError as exc:
-            status = exc.code
-            exc.close()
-        except TimeoutError:
-            raise AlertmanagerTimeout("timed out") from None
-        except urllib.error.URLError as exc:
-            if isinstance(exc.reason, TimeoutError):
-                raise AlertmanagerTimeout("timed out") from None
-            raise AlertmanagerUnavailable(type(exc.reason).__name__) from None
+            conn.connect()  # bounded by the socket timeout, which equals the total
+            if expired.is_set():
+                raise TimeoutError
+            conn.request("POST", self._path, body=body, headers=self._headers)
+            response = conn.getresponse()
+            status = response.status
+            response.close()  # the body is not needed, and could be slow
         except (OSError, http.client.HTTPException) as exc:
-            raise AlertmanagerUnavailable(type(exc).__name__) from None
+            # Raised below, outside this block, so nothing is chained: the originals can
+            # carry the address.
+            failure = "timeout" if isinstance(exc, TimeoutError) else type(exc).__name__
+        finally:
+            watchdog.cancel()
+            conn.close()
+        # Once the watchdog has fired, nothing read counts: a shut-down socket reads as end of
+        # input, which can look like a complete response.
+        if failure == "timeout" or expired.is_set():
+            raise AlertmanagerTimeout("timed out")
+        if failure is not None or status is None:
+            raise AlertmanagerUnavailable(failure or "no response")
         if 200 <= status < 300:
             return
-        if 400 <= status < 500 and status not in (408, 429):
+        if status in REJECTS:
             raise AlertmanagerRejected(f"HTTP {status}")
         raise AlertmanagerUnavailable(f"HTTP {status}")

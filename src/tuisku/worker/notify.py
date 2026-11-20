@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -93,6 +94,7 @@ class Backoff:
 
 
 DEFAULT_BACKOFF = Backoff()
+DRAIN_BUDGET_SECONDS = 10.0
 
 
 async def drain(
@@ -101,6 +103,7 @@ async def drain(
     now: datetime,
     limit: int = 500,
     backoff: Backoff = DEFAULT_BACKOFF,
+    budget_seconds: float = DRAIN_BUDGET_SECONDS,
 ) -> int:
     """Deliver the notifications that are due, meta pages first, then most severe first and then
     oldest first; returns
@@ -118,9 +121,11 @@ async def drain(
     committing re-delivers.
 
     ``notifier.deliver`` runs in a thread (``asyncio.to_thread``), so a slow channel never
-    blocks the event loop (the health listener keeps answering). A
-    :class:`NotifierUnavailable` ends the pass after that notification's ``failed`` row; the
-    notifications not yet tried get no row and stay due, as if beyond ``limit``.
+    blocks the event loop (the health listener keeps answering). The drain holds its
+    transaction and the worker's pass while it delivers, so it is bounded: no new delivery
+    starts once ``budget_seconds`` have passed (the first always does), and a
+    :class:`NotifierUnavailable` ends the pass after that notification's ``failed`` row. Either
+    way the notifications not yet tried get no row and stay due, as if beyond ``limit``.
     """
     delivered = 0
     async with conn.transaction():
@@ -154,14 +159,18 @@ async def drain(
             "ORDER BY meta DESC, severity_id DESC, created_at, id LIMIT %s",
             (backoff.cap_seconds, backoff.base_seconds, limit),
         )
-        for row in rows:
+        started = time.monotonic()
+        for index, row in enumerate(rows):
+            if index and time.monotonic() - started >= budget_seconds:
+                break  # budget spent: the rest wait for the next pass
             message = {
+                **row["payload"],
+                # The outbox's own fields last, so a payload can never override them.
                 "uid": str(row["uid"]),
                 "kind": row["kind"],
                 "severity_id": row["severity_id"],
                 "created_at": row["created_at"].isoformat(),
                 "meta": bool(row["meta"]),
-                **row["payload"],
             }
             unavailable = False
             try:

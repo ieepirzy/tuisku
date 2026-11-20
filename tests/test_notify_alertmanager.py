@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import http.client
 import json
 import logging
+import os
 import threading
 import time
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -21,8 +23,10 @@ from pydantic import SecretStr, ValidationError
 
 from tests.conftest import REPO_ROOT, make_settings
 from tests.support import query
-from tests.worker_support import run_async
+from tests.worker_support import Clock, RecordingNotifier, builtin_rules, run_async
+from tests.worker_support import run_worker as run_test_worker
 from tuisku.config import ALERTMANAGER_OWN_LABELS, Settings
+from tuisku.worker import alertmanager as alertmanager_module
 from tuisku.worker import notify
 from tuisku.worker.alertmanager import (
     AlertmanagerNotifier,
@@ -32,7 +36,7 @@ from tuisku.worker.alertmanager import (
     build_alert,
     severity_label,
 )
-from tuisku.worker.run import build_notifier, run_worker
+from tuisku.worker.run import build_notifier, run_worker, worker_config
 
 UID = "3f0e9a52-8c1d-4f6e-9a57-0d2b7c1e4a10"
 FINDING_UID = "5b3c2a10-1d2e-4f3a-8b9c-0a1b2c3d4e5f"
@@ -69,6 +73,7 @@ class FakeAlertmanager:
     status: int = 200
     delay: float = 0.0
     location: str | None = None
+    drip: float = 0.0  # seconds between bytes of a response that never finishes its headers
     requests: list[dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -87,6 +92,17 @@ def alertmanager() -> Iterator[FakeAlertmanager]:
             fake.requests.append({"path": self.path, "headers": dict(self.headers), "body": body})
             if fake.delay:
                 time.sleep(fake.delay)
+            if fake.drip:
+                try:
+                    self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Slow: ")
+                    for _ in range(int(3 / fake.drip)):
+                        self.wfile.flush()
+                        time.sleep(fake.drip)
+                        self.wfile.write(b"a")
+                except OSError:
+                    pass
+                self.close_connection = True
+                return
             self.send_response(fake.status)
             if fake.location:
                 self.send_header("Location", fake.location)
@@ -185,8 +201,17 @@ def test_no_entity_keys_or_telemetry_by_default() -> None:
 
 def test_include_entities_adds_an_annotation_never_a_label() -> None:
     alert = build_alert(notification(), static_labels={}, include_entities=True)
-    assert alert["annotations"]["entity_keys"] == "user:alice.example, ip:192.0.2.7"
+    assert json.loads(alert["annotations"]["entity_keys"]) == ["user:alice.example", "ip:192.0.2.7"]
     assert "alice" not in json.dumps(alert["labels"])
+
+
+def test_opt_in_entity_keys_are_cleaned_and_capped() -> None:
+    keys = ["user:a\x1b[31mb\nc\u202ed", "x" * 1000, *[f"host:h{i}" for i in range(40)]]
+    alert = build_alert(notification(entity_keys=keys), static_labels={}, include_entities=True)
+    sent = json.loads(alert["annotations"]["entity_keys"])
+    assert sent[0] == "user:a[31mbcd"  # no ESC, newline or bidi override
+    assert sent[1] == "x" * 256
+    assert len(sent) == 32
 
 
 def test_description_drops_values_that_are_not_ids() -> None:
@@ -210,6 +235,8 @@ def test_labels_json_is_parsed_and_validated(monkeypatch: pytest.MonkeyPatch) ->
         '{"team": 1}',
         '{"bad-name": "x"}',
         '{"team": ""}',
+        '{"team": "  "}',
+        '{"__name__": "x"}',
         '{"alertname": "Other"}',
         '{"severity": "low"}',
         '{"source": "elsewhere"}',
@@ -222,12 +249,20 @@ def test_labels_json_is_parsed_and_validated(monkeypatch: pytest.MonkeyPatch) ->
 def test_alertmanager_url_is_validated_and_never_echoed() -> None:
     for bad in (
         f"ftp://u:{SECRET}@am:9093",
-        f"http://u:{SECRET}@am:9093/?token=x",
-        f"http://u:{SECRET}@:9093",
+        f"https://u:{SECRET}@am:9093/?token=x",
+        f"https://u:{SECRET}@:9093",
+        f"http://u:{SECRET}@am:9093",  # credentials only over https
+        f"https://u:{SECRET}@am:0",
+        f"https://u:{SECRET}@am:9093/a b",
+        f"https://u:{SECRET}@am:9093/a\x07",
+        f"https://u:{SECRET}@am:9093/\u00e4",
+        f" https://u:{SECRET}@am:9093",
     ):
         with pytest.raises(ValidationError) as excinfo:
             Settings(notify_alertmanager_url=bad)  # type: ignore[arg-type]
         assert SECRET not in str(excinfo.value)
+    with pytest.raises(ValueError):
+        AlertmanagerNotifier(SecretStr(f"http://u:{SECRET}@am:9093"))
     settings = Settings(notify_alertmanager_url=f"https://u:{SECRET}@am:9093/")  # type: ignore[arg-type]
     assert SECRET not in repr(settings) and SECRET not in str(settings.model_dump())
     assert Settings(notify_alertmanager_url="").notify_alertmanager_url is None  # type: ignore[arg-type]
@@ -242,7 +277,7 @@ def test_log_notifier_alone_is_the_default() -> None:
 
 def test_worker_settings_pick_alertmanager_alongside_the_log() -> None:
     settings = Settings(
-        notify_alertmanager_url=f"http://u:{SECRET}@am:9093",  # type: ignore[arg-type]
+        notify_alertmanager_url=f"https://u:{SECRET}@am:9093",  # type: ignore[arg-type]
         notify_alertmanager_labels_json={"team": "sec"},
         notify_alertmanager_timeout_seconds=2.5,
     )
@@ -256,11 +291,21 @@ def test_worker_settings_pick_alertmanager_alongside_the_log() -> None:
     assert SECRET not in repr(am)
 
 
+def test_drain_budget_comes_from_settings() -> None:
+    assert worker_config(Settings()).notify_drain_budget == timedelta(seconds=10)
+    budget = worker_config(Settings(notify_drain_budget_seconds=2.5)).notify_drain_budget
+    assert budget == timedelta(seconds=2.5)
+
+
 # --- HTTP ----------------------------------------------------------------------------------------
 
 
-def test_posts_one_alert_with_basic_auth_from_the_url(alertmanager: FakeAlertmanager) -> None:
-    url = alertmanager.url.replace("http://", f"http://tuisku:{SECRET}@") + "/prefix/"
+def test_posts_one_alert_with_basic_auth_from_the_url(
+    alertmanager: FakeAlertmanager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Credentials need https; plain HTTP stands in for TLS here to see the header on the wire.
+    monkeypatch.setitem(alertmanager_module._CONNECTIONS, "https", http.client.HTTPConnection)
+    url = alertmanager.url.replace("http://", f"https://tuisku:{SECRET}@") + "/prefix/"
     AlertmanagerNotifier(SecretStr(url)).deliver(notification())
     [request] = alertmanager.requests
     assert request["path"] == "/prefix/api/v2/alerts"
@@ -275,55 +320,113 @@ def test_posts_one_alert_with_basic_auth_from_the_url(alertmanager: FakeAlertman
     [
         (500, AlertmanagerUnavailable),
         (503, AlertmanagerUnavailable),
-        (429, AlertmanagerUnavailable),
-        (400, AlertmanagerRejected),
         (302, AlertmanagerUnavailable),
+        (307, AlertmanagerUnavailable),
+        # 4xx that fail every alert: the channel is misconfigured or overloaded.
+        (401, AlertmanagerUnavailable),
+        (403, AlertmanagerUnavailable),
+        (404, AlertmanagerUnavailable),
+        (405, AlertmanagerUnavailable),
+        (408, AlertmanagerUnavailable),
+        (413, AlertmanagerUnavailable),
+        (429, AlertmanagerUnavailable),
+        # 4xx that refuse this one alert.
+        (400, AlertmanagerRejected),
+        (422, AlertmanagerRejected),
     ],
 )
 def test_non_2xx_raises(alertmanager: FakeAlertmanager, status: int, error: type) -> None:
     alertmanager.status = status
     alertmanager.location = alertmanager.url + "/elsewhere"
-    url = alertmanager.url.replace("http://", f"http://u:{SECRET}@")
     with pytest.raises(error) as excinfo:
-        AlertmanagerNotifier(SecretStr(url)).deliver(notification())
-    assert SECRET not in str(excinfo.value) and "127.0.0.1" not in str(excinfo.value)
-    # Nothing chained: urllib's own errors carry the URL.
-    assert excinfo.value.__cause__ is None and excinfo.value.__context__ is None
+        notifier(alertmanager).deliver(notification())
+    assert_no_url(excinfo.value)
     assert [r["path"] for r in alertmanager.requests] == ["/api/v2/alerts"]  # no redirect
+
+
+def assert_no_url(exc: BaseException) -> None:
+    assert "127.0.0.1" not in str(exc) and SECRET not in str(exc)
+    # Nothing chained: the underlying errors can carry the address.
+    assert exc.__cause__ is None and exc.__context__ is None
 
 
 def test_timeout_raises(alertmanager: FakeAlertmanager) -> None:
     alertmanager.delay = 1.0
-    with pytest.raises(AlertmanagerTimeout):
+    with pytest.raises(AlertmanagerTimeout) as excinfo:
         notifier(alertmanager, timeout_seconds=0.2).deliver(notification())
+    assert_no_url(excinfo.value)
+
+
+def test_a_slow_drip_is_cut_off_at_the_total_timeout(alertmanager: FakeAlertmanager) -> None:
+    alertmanager.drip = 0.05  # a byte every 50 ms: no single read ever times out
+    started = time.monotonic()
+    with pytest.raises(AlertmanagerTimeout) as excinfo:
+        notifier(alertmanager, timeout_seconds=0.5).deliver(notification())
+    assert time.monotonic() - started < 1.5  # the drip would last 3 s
+    assert_no_url(excinfo.value)
 
 
 def test_refused_connection_is_unavailable(alertmanager: FakeAlertmanager) -> None:
     gone = AlertmanagerNotifier(SecretStr("http://127.0.0.1:1"))
-    with pytest.raises(AlertmanagerUnavailable):
+    with pytest.raises(AlertmanagerUnavailable) as excinfo:
         gone.deliver(notification())
+    assert not isinstance(excinfo.value, AlertmanagerTimeout)
+    assert "127.0.0.1" not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None and excinfo.value.__context__ is None
+
+
+def test_environment_proxies_are_not_used(
+    alertmanager: FakeAlertmanager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in list(os.environ):
+        if name.lower().endswith("proxy"):  # including any no_proxy exemption for 127.0.0.1
+            monkeypatch.delenv(name)
+    for name in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://127.0.0.1:1")
+    notifier(alertmanager).deliver(notification())
+    assert len(alertmanager.requests) == 1
 
 
 # --- through the outbox --------------------------------------------------------------------------
 
 
-def queue_notification(url: str, kind: str = "finding_opened") -> str:
+def queue_notification(
+    url: str, kind: str = "finding_opened", payload: dict[str, Any] | None = None
+) -> str:
+    payload = payload or {"title": "Synthetic", "entity_keys": ["user:alice.example"]}
     with psycopg.connect(url) as conn:
         row = conn.execute(
             "INSERT INTO notifications (dedupe_key, kind, severity_id, payload, created_at) "
             "VALUES (%s, %s, 4, %s, now()) RETURNING uid",
-            (
-                f"test:{uuid.uuid4()}",
-                kind,
-                json.dumps({"title": "Synthetic", "entity_keys": ["user:alice.example"]}),
-            ),
+            (f"test:{uuid.uuid4()}", kind, json.dumps(payload)),
         ).fetchone()
     assert row is not None
     return str(row[0])
 
 
-def drain(url: str, notifier: notify.Notifier) -> int:
-    return run_async(url, lambda conn: notify.drain(conn, notifier, NOW, backoff=NO_WAIT))
+def drain(
+    url: str,
+    notifier: notify.Notifier,
+    backoff: notify.Backoff = NO_WAIT,
+    budget_seconds: float = notify.DRAIN_BUDGET_SECONDS,
+) -> int:
+    return run_async(
+        url,
+        lambda conn: notify.drain(
+            conn, notifier, NOW, backoff=backoff, budget_seconds=budget_seconds
+        ),
+    )
+
+
+def failures(url: str) -> dict[str, int]:
+    return {
+        str(uid): n
+        for uid, n in query(
+            url,
+            "SELECT n.uid, count(d.id) FILTER (WHERE d.status = 'failed') FROM notifications n "
+            "LEFT JOIN notification_deliveries d ON d.notification_id = n.id GROUP BY n.uid",
+        )
+    }
 
 
 def outcomes(url: str) -> list[tuple[str, str, str | None]]:
@@ -445,3 +548,84 @@ def test_pages_about_tuisku_itself_are_labelled_meta(
     assert drain(fresh_database_url, notifier(alertmanager)) == 2
     labels = {a["labels"]["notification_uid"]: a["labels"]["meta"] for a in alertmanager.alerts}
     assert labels == {meta_uid: "true", rule_uid: "false"}
+
+
+def test_an_outage_leaves_untried_rows_due_with_no_failures(
+    fresh_database_url: str, alertmanager: FakeAlertmanager
+) -> None:
+    url = fresh_database_url
+    first, second, third = (queue_notification(url) for _ in range(3))
+    alertmanager.status = 503
+    for _ in range(notify.ALERT_AFTER_FAILURES):
+        assert drain(url, notifier(alertmanager)) == 0
+    # Retried at once (no backoff here), the oldest is tried every pass; the others never are.
+    assert failures(url) == {first: notify.ALERT_AFTER_FAILURES, second: 0, third: 0}
+    assert query(
+        url, "SELECT count(*) FROM detections WHERE kind = 'tuisku.meta.notification_undeliverable'"
+    ) == [(1,)]
+    alertmanager.status = 200
+    assert drain(url, notifier(alertmanager)) == 3
+    assert {uid for uid, status, _ in outcomes(url) if status == "delivered"} == {
+        first,
+        second,
+        third,
+    }
+
+
+def test_with_backoff_an_outage_moves_on_to_the_next_row(
+    fresh_database_url: str, alertmanager: FakeAlertmanager
+) -> None:
+    url = fresh_database_url
+    first, second = queue_notification(url), queue_notification(url)
+    alertmanager.status = 500
+    slow = notify.Backoff(base_seconds=60, cap_seconds=60)
+    assert drain(url, notifier(alertmanager), backoff=slow) == 0
+    assert failures(url) == {first: 1, second: 0}
+    assert drain(url, notifier(alertmanager), backoff=slow) == 0  # the first is backing off
+    assert failures(url) == {first: 1, second: 1}
+    assert drain(url, notifier(alertmanager), backoff=slow) == 0  # nothing is due
+    assert len(alertmanager.requests) == 2
+
+
+def test_the_drain_budget_stops_the_pass_and_leaves_the_rest_due(
+    fresh_database_url: str, alertmanager: FakeAlertmanager
+) -> None:
+    url = fresh_database_url
+    for _ in range(3):
+        queue_notification(url)
+    alertmanager.delay = 0.4
+    assert drain(url, notifier(alertmanager), budget_seconds=0.6) == 2
+    assert [status for _, status, _ in outcomes(url)] == ["delivered"] * 2  # no row for the 3rd
+    alertmanager.delay = 0
+    assert drain(url, notifier(alertmanager)) == 1
+
+
+def test_the_worker_applies_its_drain_budget(
+    fresh_database_url: str, alertmanager: FakeAlertmanager
+) -> None:
+    for _ in range(2):
+        queue_notification(fresh_database_url)
+    alertmanager.delay = 0.4
+    stats = run_test_worker(
+        fresh_database_url,
+        builtin_rules(),
+        Clock(NOW),
+        notifier(alertmanager),  # type: ignore[arg-type]
+        notify_drain_budget=timedelta(seconds=0.2),
+    )
+    assert stats.delivered == 1
+
+
+def test_a_payload_cannot_override_the_outbox_fields(fresh_database_url: str) -> None:
+    forged = {"uid": "forged", "kind": "forged", "severity_id": 0, "meta": True, "created_at": "x"}
+    uid = queue_notification(fresh_database_url, payload={"title": "T", **forged})
+    recorder = RecordingNotifier()
+    assert drain(fresh_database_url, recorder) == 1
+    [sent] = recorder.sent
+    assert (sent["uid"], sent["kind"], sent["severity_id"], sent["meta"]) == (
+        uid,
+        "finding_opened",
+        4,
+        False,
+    )
+    assert sent["created_at"] != "x"
