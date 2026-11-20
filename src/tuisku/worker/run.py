@@ -67,6 +67,7 @@ def exporter(settings: Settings) -> Exporter:
             batch_size=settings.export_batch_size,
             timeout_seconds=settings.export_timeout_seconds,
             build_revision=settings.build_revision,
+            statement_timeout_seconds=settings.worker_statement_timeout_seconds,
         )
     )
 

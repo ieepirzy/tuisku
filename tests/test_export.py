@@ -506,14 +506,23 @@ def test_a_worker_that_exports_while_the_database_does_not_enqueue_pages(
     }
 
 
-def test_tuisku_migrate_sets_the_flag_from_the_export_url(fresh_database_url: str) -> None:
+def test_tuisku_migrate_sets_the_flag_only_when_asked(fresh_database_url: str) -> None:
     from tuisku.migrate import run_migrations
 
     url = fresh_database_url
-    run_migrations(make_settings(url, export_otlp_logs_url="http://collector.example/v1/logs"))
-    assert query(url, "SELECT enabled FROM export_state") == [(True,)]
+    flag = "SELECT enabled FROM export_state"
+    run_migrations(make_settings(url, export_enqueue="on"))
+    assert query(url, flag) == [(True,)]
+    # A run without the setting, or with only the URL, never turns export off (or on).
     run_migrations(make_settings(url))
-    assert query(url, "SELECT enabled FROM export_state") == [(False,)]
+    run_migrations(make_settings(url, export_otlp_logs_url="http://collector.example/v1/logs"))
+    assert query(url, flag) == [(True,)]
+    run_migrations(make_settings(url, export_enqueue="off"))
+    assert query(url, flag) == [(False,)]
+    run_migrations(make_settings(url, export_otlp_logs_url="http://collector.example/v1/logs"))
+    assert query(url, flag) == [(False,)]
+    with pytest.raises(ValidationError):
+        make_settings(url, export_enqueue="yes")
 
 
 # --- what the sink refuses or cannot be encoded -------------------------------------------------
@@ -536,40 +545,129 @@ def test_a_partial_success_pages(fresh_database_url: str, sink: Sink) -> None:
     assert paged, notifier.kinds()
 
 
-@pytest.mark.parametrize("stub_refused", [False, True])
-def test_a_record_the_sink_refuses_is_isolated(
-    fresh_database_url: str, sink: Sink, stub_refused: bool
+@pytest.mark.parametrize("position", ["head", "middle"])
+def test_one_bad_record_among_good_ones_is_isolated(
+    fresh_database_url: str, sink: Sink, position: str
 ) -> None:
-    """A 400 halves the batch down to the one record; that record is replaced by a stub (or,
-    refused too, dropped), it pages, and every other record is delivered."""
+    """A 400 halves the batch down to the one record. The sink accepts the others (at the head
+    of the queue, a fresh exporter first proves it with a probe), so the record is at fault: a
+    stub replaces it, it pages, and every other record is delivered."""
     url = fresh_database_url
     enable_export(url)
     harava_finding(url, Clock(T0))
     n = queued(url)
-    [(bad_uid,)] = query(
-        url,
-        "SELECT event ->> 'uid' FROM export_queue WHERE stream = 'incident' ORDER BY id LIMIT 1",
-    )
+    which = "ORDER BY id LIMIT 1" if position == "head" else "ORDER BY id OFFSET 5 LIMIT 1"
+    [(bad_uid,)] = query(url, f"SELECT event ->> 'uid' FROM export_queue {which}")  # type: ignore[arg-type]
 
     def answer(records: list[dict[str, Any]]) -> tuple[int, bytes]:
-        poisoned = [r for r in records if r["record_uid"] == bad_uid]
-        if poisoned and (stub_refused or "error" not in poisoned[0]):
-            return 400, b"{}"
-        return 200, b"{}"
+        poisoned = [r for r in records if r["record_uid"] == bad_uid and "error" not in r]
+        return (400, b"{}") if poisoned else (200, b"{}")
 
     sink.answer = answer
-    done = export_round(url, exporter(sink.url, batch_size=8))
-    assert queued(url) == 0
+    exp = exporter(sink.url, batch_size=8)
+    done = export_round(url, exp)
+    assert queued(url) == 0 and exp.failures == 0
     delivered = [r for p in sink.posts if p["_status"] == 200 for r in sink.records([p])]
     assert len({r["record_uid"] for r in delivered} - {bad_uid}) == n - 1
-    stubs = [r for r in delivered if r["record_uid"] == bad_uid]
-    if stub_refused:
-        assert stubs == [] and done.stubs == 0
-    else:
-        [stub] = stubs
-        assert stub["error"] == "refused: HTTP 400" and stub["event"]["uid"] == bad_uid
+    [stub] = [r for r in delivered if r["record_uid"] == bad_uid]
+    assert stub["error"] == "refused: HTTP 400" and stub["event"]["uid"] == bad_uid
+    assert done.stubs == 1 and exp.isolated == 1
     [(subject, details)] = export_failed(url)
-    assert subject == "refused" and details["stub_delivered"] is not stub_refused
+    assert subject == "refused" and details["isolated_since_start"] == 1
+
+
+@pytest.mark.parametrize("proven", [False, True])
+def test_a_sink_that_refuses_everything_keeps_the_queue_and_backs_off(
+    fresh_database_url: str, sink: Sink, proven: bool
+) -> None:
+    """A refused probe or stub means the sink, not the record, is at fault: nothing is
+    dropped or stubbed, and delivery backs off, whether or not the sink worked before."""
+    url = fresh_database_url
+    enable_export(url)
+    harava_finding(url, Clock(T0))
+    ticks = Ticks()
+    exp = exporter(sink.url, ticks, batch_size=8)
+    if proven:  # it worked a moment ago
+        export_round(url, exp)
+        assert queued(url) == 0
+        harava_finding_again(url)
+    n = queued(url)
+    before = len(sink.posts)
+    sink.answer = lambda records: (400, b"{}")
+    export_round(url, exp)
+    assert queued(url) == n and exp.failures == 1 and exp.isolated == 0
+    assert export_failed(url) == []
+    tried = len(sink.posts) - before
+    assert tried <= 5  # 8, 4, 2, 1, then one probe or stub: then it backs off
+    export_round(url, exp)  # backing off: nothing is sent
+    assert len(sink.posts) - before == tried and queued(url) == n
+
+
+def test_a_sink_that_takes_only_stubs_cannot_turn_the_queue_into_stubs(
+    fresh_database_url: str, sink: Sink
+) -> None:
+    url = fresh_database_url
+    enable_export(url)
+    harava_finding(url, Clock(T0))
+    ticks = Ticks()
+    exp = exporter(sink.url, ticks, batch_size=8)
+    export_round(url, exp)  # the sink worked
+    with psycopg.connect(url) as conn:  # four more events
+        for _ in range(4):
+            conn.execute(
+                "INSERT INTO finding_events (finding_id, actor, kind, new_value) SELECT id, "
+                "'system', 'status_changed', '{\"status\": \"open\"}' FROM findings LIMIT 1"
+            )
+    n = queued(url)
+    assert n == 4
+    sink.answer = lambda records: (200, b"{}") if records[0].get("error") else (400, b"{}")
+    export_round(url, exp)
+    assert exp.isolated == 1 and queued(url) == n - 1 and exp.failures == 1
+
+
+def harava_finding_again(url: str) -> None:
+    """More events: the agent finding resolved by triage."""
+    triager = operator_token(url, Role.TRIAGE)
+    with client(url, clock=Clock(T0)) as c:
+        r = c.post(
+            f"/v1/findings/{agent_finding_uid(url)}/status",
+            json={"status": "resolved"},
+            headers=auth(triager),
+        )
+        assert r.status_code == 200, r.text
+
+
+def test_the_only_queued_record_refused_on_its_own_is_kept(
+    fresh_database_url: str, sink: Sink
+) -> None:
+    """Nothing else can show whether the record or the sink is at fault: it waits."""
+    url = fresh_database_url
+    enable_export(url)
+    harava_finding(url, Clock(T0))
+    exp = exporter(sink.url)
+    export_round(url, exp)
+    exp2 = exporter(sink.url)  # a fresh exporter: nothing proven yet
+    harava_finding_again(url)
+    assert queued(url) == 1
+    sink.answer = lambda records: (400, b"{}")
+    export_round(url, exp2)
+    assert queued(url) == 1 and exp2.failures == 1 and export_failed(url) == []
+
+
+def test_secrets_never_appear_in_repr() -> None:
+    exp = exporter("https://collector.example/v1/logs", headers={"Authorization": "Bearer s3"})
+    for text in (repr(exp), repr(exp.config), str(exp)):
+        assert KEY not in text and "s3" not in text and "Authorization" not in text
+    assert exp.config.lease_seconds == 2 * exp.config.timeout_seconds + 30
+
+
+def test_an_idle_round_writes_no_lease(fresh_database_url: str, sink: Sink) -> None:
+    url = fresh_database_url
+    enable_export(url)
+    lease = "SELECT xmin::text FROM worker_locks WHERE name = 'export'"
+    before = query(url, lease)
+    export_round(url, exporter(sink.url))
+    assert query(url, lease) == before and not sink.posts
 
 
 def test_a_row_that_cannot_be_encoded_never_blocks_the_rest(
@@ -685,6 +783,11 @@ def test_the_worker_command_builds_its_exporter() -> None:
     assert (on.config.batch_size, on.config.timeout_seconds) == (7, 3)
     assert on.config.pseudonymize_kinds == frozenset({"ip", "k8s-ns"})
     assert on.config.build_revision == "test-revision"
+    assert on.config.statement_timeout_seconds == 10.0
+    slow = worker_run.exporter(
+        make_settings("postgresql://u@h/d", worker_statement_timeout_seconds=42)
+    )
+    assert slow.config.statement_timeout_seconds == 42
 
 
 def test_export_needs_the_pseudonym_key() -> None:
@@ -710,6 +813,7 @@ def test_export_needs_the_pseudonym_key() -> None:
         {"export_otlp_headers_json": '{"X-Key": "secret\\r\\nInjected: 1"}'},
         {"export_pseudonym_key": "secret-too-short"},
         {"export_pseudonym_key": "a" * 64},
+        {"export_pseudonym_key": "éàüöäåøß" * 3},  # 48 bytes, but 24 characters
         {"export_pseudonymize_entity_kinds": "ip;caller"},
         {"export_batch_size": 0},
     ],
@@ -960,17 +1064,26 @@ def test_the_export_task_runs_until_cancelled(fresh_database_url: str, sink: Sin
     url = fresh_database_url
     enable_export(url)
     harava_finding(url, Clock(T0))
-    exp = exporter(sink.url)
+    exp = exporter(sink.url, statement_timeout_seconds=7)
 
     async def scenario() -> None:
         async def connect() -> AsyncConnection[Any]:
             return await AsyncConnection.connect(url, autocommit=True)
 
-        task = asyncio.create_task(exp.run_forever(connect, timedelta(days=1), 0.05))
+        seen: list[Any] = []
+
+        async def connect_and_watch() -> AsyncConnection[Any]:
+            conn = await connect()
+            seen.append(conn)
+            return conn
+
+        task = asyncio.create_task(exp.run_forever(connect_and_watch, timedelta(days=1), 0.05))
         for _ in range(100):
             await asyncio.sleep(0.05)
             if sink.posts:
                 break
+        cur = await seen[0].execute("SHOW statement_timeout")
+        assert await cur.fetchone() == ("7s",)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task

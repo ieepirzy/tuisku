@@ -16,9 +16,12 @@ the delete sends the batch again, and consumers deduplicate on ``record_uid`` (t
 - A 5xx, 429, other 4xx, timeout, connection error or redirect leaves the rows queued and backs
   off: 5 s doubling to 5 minutes, in this process's memory (it restarts from zero with the
   process; the worker role cannot write the queue).
-- A 400 or 413 halves the batch, down to one record. A single record the sink still refuses is
-  replaced by a stub that names it; if the stub is refused too, the row is dropped. Either way
-  ``tuisku.meta.export_failed`` (subject ``refused``) pages.
+- A 400 or 413 halves the batch, down to one record. A record refused on its own is the
+  record's fault only if the sink accepts others (a real batch since the last failure, or the
+  next record sent alone as a probe); then a stub that names it replaces it and
+  ``tuisku.meta.export_failed`` (subject ``refused``) pages. A refused probe or stub means the
+  sink is at fault: every row is kept and delivery backs off. No row is ever dropped because
+  the sink refuses it.
 - A row that cannot be encoded is sent as such a stub (subject ``unencodable``); it never holds
   up the rows behind it.
 - An OTLP partial success (``partialSuccess.rejectedLogRecords``) is not retried, as OTLP
@@ -108,20 +111,26 @@ Post = Callable[[str, bytes, Mapping[str, str], float], Awaitable[tuple[int, byt
 @dataclass(frozen=True, slots=True)
 class ExportConfig:
     url: str | None = None  # None: this worker does not export
-    pseudonym_key: bytes = b""
+    # Secrets: never in repr (logs, tracebacks).
+    pseudonym_key: bytes = field(default=b"", repr=False)
     pseudonymize_kinds: frozenset[str] = DEFAULT_KINDS
-    headers: Mapping[str, str] = field(default_factory=dict)
+    headers: Mapping[str, str] = field(default_factory=dict, repr=False)
     batch_size: int = 100
     timeout_seconds: float = 10.0
     build_revision: str = "unknown"
     backoff_base_seconds: float = 5.0
     backoff_cap_seconds: float = 300.0
     round_budget_seconds: float = 30.0  # a round sends batches for at most this long
+    # The export connection's statement timeout (TUISKU_WORKER_STATEMENT_TIMEOUT_SECONDS) and
+    # lock timeout (as the evaluation connection's).
+    statement_timeout_seconds: float = 10.0
+    lock_timeout_seconds: float = 5.0
 
     @property
     def lease_seconds(self) -> float:
-        """Long enough for one batch's request, renewed after each batch."""
-        return self.timeout_seconds + 30.0
+        """Long enough for two requests (a record refused on its own is followed by a probe or
+        a stub), renewed before each request."""
+        return 2 * self.timeout_seconds + 30.0
 
 
 # --- the record ---------------------------------------------------------------------------------
@@ -420,7 +429,11 @@ class Exporter:
     failures: int = field(default=0, init=False)
     _retry_at: float = field(default=0.0, init=False)
     _batch: int = field(default=0, init=False)
-    _pseudonyms: Pseudonyms | None = field(default=None, init=False)
+    _pseudonyms: Pseudonyms | None = field(default=None, init=False, repr=False)
+    # The sink accepted a real batch since the last failure: only then is a record it refuses
+    # on its own taken to be the record's fault, not the sink's.
+    _proven: bool = field(default=False, init=False)
+    isolated: int = field(default=0, init=False)  # records replaced by stubs, since start
 
     def __post_init__(self) -> None:
         self._batch = self.config.batch_size
@@ -447,8 +460,12 @@ class Exporter:
                 conn = await connect()
                 async with conn:
                     await conn.execute(
-                        "SELECT set_config('lock_timeout', '5s', false), "
-                        "set_config('statement_timeout', '10s', false)"
+                        "SELECT set_config('lock_timeout', %s, false), "
+                        "set_config('statement_timeout', %s, false)",
+                        (
+                            f"{int(self.config.lock_timeout_seconds * 1000)}ms",
+                            f"{int(self.config.statement_timeout_seconds * 1000)}ms",
+                        ),
                     )
                     while True:
                         done = await self.round(conn, backlog_after)
@@ -481,9 +498,10 @@ class Exporter:
             if await self._meta(conn, "not_enqueued", {"export_state": "disabled"}):
                 log.error(
                     "export is configured on the worker but the database does not enqueue "
-                    "events: run tuisku migrate with TUISKU_EXPORT_OTLP_LOGS_URL set (ADR 0012)"
+                    "events: run TUISKU_EXPORT_ENQUEUE=on tuisku migrate (ADR 0012)"
                 )
-        if self.monotonic() >= self._retry_at and await self._lease(conn):
+        due = self.monotonic() >= self._retry_at
+        if due and await self._pending(conn) and await self._lease(conn):
             try:
                 await self._deliver(conn, done)
             finally:
@@ -494,6 +512,14 @@ class Exporter:
                 )
         await self.check_backlog(conn, backlog_after)
         return done
+
+    async def _pending(self, conn: AsyncConnection[Any]) -> bool:
+        """Anything queued? An idle round then writes no lease at all."""
+        row = await db.fetch_one(conn, "SELECT EXISTS (SELECT 1 FROM export_queue) AS any")
+        if row is None or not row["any"]:
+            self.failures, self._retry_at = 0, 0.0  # caught up
+            return False
+        return True
 
     async def _lease(self, conn: AsyncConnection[Any]) -> bool:
         """Take or renew the export lease: one exporter at a time, without a lock held across a
@@ -515,6 +541,7 @@ class Exporter:
             self.config.backoff_base_seconds * 2 ** min(self.failures - 1, 30),
         )
         self._retry_at = self.monotonic() + delay
+        self._proven = False
         log.warning("%s; %d consecutive failures, retrying in %.0fs", why, self.failures, delay)
 
     async def _deliver(self, conn: AsyncConnection[Any], done: Round) -> None:
@@ -586,42 +613,95 @@ class Exporter:
         )
         done.delivered += len(encoded) - rejected
         done.stubs += len(stubs)
+        self._proven = True
+
+    async def _post_one(self, conn: AsyncConnection[Any], one: Encoded) -> int | None:
+        """Send one record on its own, under a renewed lease. None after a failure (backing off)
+        or a lost lease."""
+        if not await self._lease(conn):
+            return None
+        try:
+            status, _ = await self.post(
+                self.config.url or "",
+                envelope([one], self._rev),
+                self.config.headers,
+                self.config.timeout_seconds,
+            )
+        except (TimeoutError, OSError) as exc:
+            self._failed(f"export of one record failed: {type(exc).__name__}")
+            return None
+        return status
 
     async def _isolate(
         self, conn: AsyncConnection[Any], one: Encoded, status: int, done: Round
     ) -> int | None:
-        """The sink refuses this one record: send a stub in its place; if the stub is refused
-        too, drop the row. Either way it pages, and never blocks the rows behind it."""
-        log.error("export sink refused queue row %s (HTTP %d)", one.queue_id, status)
-        stub = one
-        if not one.stub:
-            row = await db.fetch_one(
-                conn, "SELECT id, stream, event FROM export_queue WHERE id = %s", (one.queue_id,)
+        """The sink refuses this one record. That is the record's fault only if the sink accepts
+        others: unless a real batch was accepted since the last failure, the next record is sent
+        on its own as a probe first. Then a stub replaces the record (and pages). A refused
+        probe or stub means the sink is at fault: every row is kept and delivery backs off. A
+        row is never dropped because the sink refuses it."""
+        log.error("export sink refused queue row %s on its own (HTTP %d)", one.queue_id, status)
+        if not self._proven:
+            nxt = await db.fetch_one(
+                conn,
+                "SELECT id, stream, event, state FROM export_queue WHERE id > %s ORDER BY id "
+                "LIMIT 1",
+                (one.queue_id,),
             )
-            stub = to_stub(row or {"id": one.queue_id}, f"refused: HTTP {status}", self._rev)
-            try:
-                status, _ = await self.post(
-                    self.config.url or "",
-                    envelope([stub], self._rev),
-                    self.config.headers,
-                    self.config.timeout_seconds,
+            if nxt is None:
+                self._failed(
+                    "the export sink refuses the only queued record; nothing else can show "
+                    "whether the record or the sink is at fault"
                 )
-            except (TimeoutError, OSError) as exc:
-                self._failed(f"export of a stub failed: {type(exc).__name__}")
                 return None
-            if not (200 <= status < 300 or status in REFUSED):
-                self._failed(f"export of a stub failed: HTTP {status}")
+            assert self._pseudonyms is not None
+            probe = encode(nxt, self._pseudonyms, self._rev)
+            probed = await self._post_one(conn, probe)
+            if probed is None:
                 return None
-        delivered = 200 <= status < 300 and stub is not one
+            if not 200 <= probed < 300:
+                self._failed(f"the export sink refuses records (HTTP {probed})")
+                return None
+            await self._settle(conn, [probe], b"", done)  # proven now
+        if one.stub:
+            # Already the smallest form: a refused stub is the sink's fault.
+            self._failed(f"the export sink refuses a stub (HTTP {status})")
+            return None
+        row = await db.fetch_one(
+            conn, "SELECT id, stream, event FROM export_queue WHERE id = %s", (one.queue_id,)
+        )
+        stub = to_stub(row or {"id": one.queue_id}, f"refused: HTTP {status}", self._rev)
+        sent = await self._post_one(conn, stub)
+        if sent is None:
+            return None
+        if not 200 <= sent < 300:
+            self._failed(f"the export sink refuses a stub (HTTP {sent})")
+            return None
+        self.isolated += 1
+        # One isolation per proof: the next record refused on its own needs the sink to accept
+        # a real record again first, so a sink that takes only stubs cannot turn the queue
+        # into stubs.
+        self._proven = False
+        log.error(
+            "export queue row %s (record %s) was replaced by a stub; %d so far",
+            one.queue_id,
+            one.record_uid,
+            self.isolated,
+        )
         await self._meta(
             conn,
             "refused",
-            {"queue_id": one.queue_id, "record_uid": one.record_uid, "stub_delivered": delivered},
+            {
+                "queue_id": one.queue_id,
+                "record_uid": one.record_uid,
+                "status": status,
+                "isolated_since_start": self.isolated,
+            },
         )
         await conn.execute("DELETE FROM export_queue WHERE id = %s", (one.queue_id,))
-        done.stubs += int(delivered)
+        done.stubs += 1
         self._batch = self.config.batch_size
-        return status
+        return sent
 
     @property
     def _rev(self) -> str:
