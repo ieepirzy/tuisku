@@ -236,7 +236,9 @@ worker's health.
 
   If none of the probes is accepted, if nothing else is queued, or if the stub is refused (a
   stub for an unencodable record included), the sink is at fault: every row is kept and delivery
-  backs off like any other failure. A sink that refuses everything costs at most 8 requests (the
+  backs off like any other failure. Each isolation uses two other records as proofs, so records
+  the sink refuses with nothing acceptable left behind them wait for newer events; the backlog
+  pages meanwhile. A sink that refuses everything costs at most 8 requests (the
   halvings and 4 probes) before the backoff. No row is dropped because the sink refuses it.
 - **OTLP partial success** (`partialSuccess.rejectedLogRecords` in a 2xx answer) is not retried,
   as OTLP requires: the sink refused those records for good, and the response does not say

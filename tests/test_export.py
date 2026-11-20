@@ -688,6 +688,72 @@ def test_a_flaky_sink_does_not_stub_sound_records(fresh_database_url: str, sink:
     assert len({r["record_uid"] for r in delivered}) == n
 
 
+def test_a_record_refused_alone_twice_then_accepted_arrives_whole(
+    fresh_database_url: str, sink: Sink
+) -> None:
+    """A transient refusal: the record is refused in its batch and alone twice, then accepted.
+    It is resent after each proof, so it arrives whole, never as a stub."""
+    url = fresh_database_url
+    enable_export(url)
+    harava_finding(url, Clock(T0))
+    [(flaky,)] = query(url, "SELECT event ->> 'uid' FROM export_queue ORDER BY id LIMIT 1")
+    alone = [0]
+
+    def answer(records: list[dict[str, Any]]) -> tuple[int, bytes]:
+        if not any(r["record_uid"] == flaky for r in records):
+            return 200, b"{}"
+        if len(records) > 1:
+            return 400, b"{}"
+        alone[0] += 1
+        return (400, b"{}") if alone[0] <= 2 else (200, b"{}")
+
+    sink.answer = answer
+    exp = exporter(sink.url, batch_size=8)
+    export_round(url, exp)
+    assert queued(url) == 0 and exp.isolated == 0 and alone[0] == 3
+    [whole] = [
+        r
+        for p in sink.posts
+        if p["_status"] == 200
+        for r in sink.records([p])
+        if r["record_uid"] == flaky
+    ]
+    assert "error" not in whole
+
+
+def test_a_run_of_big_records_at_the_head_is_isolated(fresh_database_url: str, sink: Sink) -> None:
+    """More big records at the head than there are probes (one transaction's events share one
+    big snapshot, and the sink has a size limit): probes go smallest first, so one is accepted
+    and the big ones are isolated one by one."""
+    url = fresh_database_url
+    enable_export(url)
+    harava_finding(url, Clock(T0))
+    with psycopg.connect(url) as conn:  # the five oldest rows' snapshots are big
+        big = {
+            r[0]
+            for r in conn.execute(
+                "UPDATE export_queue SET state = state || jsonb_build_object('padding', "
+                "repeat(md5(id::text), 200)) WHERE id IN (SELECT id FROM export_queue "
+                "ORDER BY id LIMIT 5) RETURNING event ->> 'uid'"
+            ).fetchall()
+        }
+        for _ in range(10):  # small events behind them: each isolation takes two proofs
+            conn.execute(
+                "INSERT INTO finding_events (finding_id, actor, kind, new_value) SELECT id, "
+                "'system', 'status_changed', '{\"status\": \"open\"}' FROM findings LIMIT 1"
+            )
+
+    def answer(records: list[dict[str, Any]]) -> tuple[int, bytes]:  # a body-size limit
+        refused = any(r["record_uid"] in big and "error" not in r for r in records)
+        return (413, b"{}") if refused else (200, b"{}")
+
+    sink.answer = answer
+    ticks = Ticks()
+    exp = exporter(sink.url, ticks, batch_size=8)
+    _rounds(url, exp, ticks)
+    assert queued(url) == 0 and exp.isolated == 5
+
+
 def test_a_refused_stub_of_an_unencodable_record_is_kept(
     fresh_database_url: str, sink: Sink
 ) -> None:
