@@ -603,8 +603,9 @@ def test_a_sink_that_refuses_everything_keeps_the_queue_and_backs_off(
     assert len(sink.posts) - before == tried and queued(url) == n
 
 
+@pytest.mark.parametrize("outage", [False, True])
 def test_a_sink_that_takes_only_stubs_cannot_turn_the_queue_into_stubs(
-    fresh_database_url: str, sink: Sink
+    fresh_database_url: str, sink: Sink, outage: bool
 ) -> None:
     url = fresh_database_url
     enable_export(url)
@@ -620,9 +621,15 @@ def test_a_sink_that_takes_only_stubs_cannot_turn_the_queue_into_stubs(
             )
     n = queued(url)
     assert n == 4
+    if outage:  # a failure since: what the sink accepted before proves nothing now
+        sink.statuses[:] = [503]
+        export_round(url, exp)
+        assert exp.failures == 1 and queued(url) == n
+        ticks.now += 5.0
     sink.answer = lambda records: (200, b"{}") if records[0].get("error") else (400, b"{}")
     export_round(url, exp)
-    assert exp.isolated == 1 and queued(url) == n - 1 and exp.failures == 1
+    isolated = 0 if outage else 1
+    assert exp.isolated == isolated and queued(url) == n - isolated and exp.failures >= 1
 
 
 def harava_finding_again(url: str) -> None:
