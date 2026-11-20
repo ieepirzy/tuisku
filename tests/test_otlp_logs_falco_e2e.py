@@ -73,12 +73,7 @@ def test_falco_events_over_otlp_logs_page_on_critical(fresh_database_url: str) -
             headers=auth(token) | {"Content-Type": "application/json", "Content-Encoding": "gzip"},
         )
     assert response.status_code == 200, response.text
-    assert response.json() == {
-        "results": [
-            {"record": 1, "status": "accepted", "parse": "ok"},
-            {"record": 2, "status": "accepted", "parse": "ok"},
-        ]
-    }
+    assert response.json() == {"tuisku": {"counts": {"accepted": 2}, "parse": {"ok": 2}}}
 
     # L0: each Falco line verbatim, with the shipper's k8s metadata as receipt metadata only.
     raws = query(
@@ -87,9 +82,9 @@ def test_falco_events_over_otlp_logs_page_on_critical(fresh_database_url: str) -
     )
     assert [r[0] for r in raws] == [notice, critical]
     assert {r[1] for r in raws} == {"otlp_logs_json"}
-    assert raws[0][2]["k8s.node.name"] == "node-1"
-    assert raws[0][2]["k8s.pod.name"] == "falco-7xq2p"
-    assert raws[0][2]["log.file.path"] == "/var/run/falco/events.json"
+    assert raws[0][2]["resource"]["k8s.node.name"] == "node-1"
+    assert raws[0][2]["resource"]["k8s.pod.name"] == "falco-7xq2p"
+    assert raws[0][2]["attributes"]["log.file.path"] == "/var/run/falco/events.json"
 
     # L1/L2 come from the Falco event itself, never from the collector metadata: the pod in the
     # entity keys is the workload Falco saw (web-1), not the Falco pod that shipped the line.

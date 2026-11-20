@@ -35,3 +35,14 @@ def test_refill_is_capped_at_the_burst() -> None:
     t.now = 100
     assert limiter.take(1, 3) is None
     assert limiter.take(1, 1) is not None
+
+
+def test_check_refuses_an_empty_bucket_without_taking_anything() -> None:
+    t = FakeTime()
+    limiter = RateLimiter(rate=1, burst=2, monotonic=t)
+    assert limiter.check(1) is None
+    assert limiter.check(1) is None  # took nothing
+    assert limiter.take(1, 3) is None  # into debt: 2 - 3 = -1
+    assert limiter.check(1) == 2
+    t.now = 2
+    assert limiter.check(1) is None

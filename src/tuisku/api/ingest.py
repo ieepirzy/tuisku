@@ -17,6 +17,7 @@ Retry-After, listing the lines it did not process.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import time
@@ -81,6 +82,20 @@ async def flush_refusals(app: Any) -> None:
                 )
         except Exception as exc:
             log.warning("could not flush rate-limit refusals: %s", type(exc).__name__)
+    for (source, kind, limit, details), count in app.state.refused_breaches.drain():
+        try:
+            async with app.state.pool.connection() as conn, conn.transaction():
+                await meta.record_breach(
+                    conn,
+                    source,
+                    kind,
+                    limit,
+                    n=count,
+                    details={"limit": limit, **details},
+                    now=app.state.clock(),
+                )
+        except Exception as exc:
+            log.warning("could not flush refused-request breaches: %s", type(exc).__name__)
 
 
 async def _record_breach(
@@ -107,6 +122,28 @@ async def _record_breach(
             )
     except Exception as exc:  # a failed meta write must not change the ingest answer
         log.warning("could not record meta-detection %s: %s", kind, type(exc).__name__)
+
+
+async def _record_refusal(
+    request: Request,
+    source: Source,
+    kind: str,
+    limit: str,
+    clock: Clock,
+    *,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Count a request refused outright (400, 413) and raise its meta-detection, batched like
+    rate-limit refusals: the first is written at once, later ones at most every flush interval
+    and at shutdown, so a sender that repeats a refused request cannot turn each into a
+    database write."""
+    refused: RefusalCounter = request.app.state.refused_breaches
+    due = refused.add((source.id, kind, limit), (source, kind, limit, details or {}))
+    if due is not None:
+        (first_source, _, _, first_details), count = due
+        await _record_breach(
+            request, first_source, kind, limit, clock, n=count, details=first_details
+        )
 
 
 def _content_encoding(request: Request, expected_type: str) -> str:
@@ -160,7 +197,7 @@ async def _read_body(
     the decompressed bytes are known to exceed ``max_bytes``."""
 
     async def too_large() -> HTTPException:
-        await _record_breach(
+        await _record_refusal(
             request,
             credential.source,
             meta.LIMIT_EXCEEDED,
@@ -195,9 +232,16 @@ async def _read_body(
     return bytes(raw) if inflater is None else inflater.finish()
 
 
-async def _admit(request: Request, credential: SourceCredential, clock: Clock, n: int) -> None:
+async def _admit(
+    request: Request, credential: SourceCredential, clock: Clock, n: int | None
+) -> None:
+    """Take ``n`` records from the source's bucket, or refuse with 429. ``n=None`` only checks
+    that the bucket is not empty, taking nothing: a cheap refusal before costly decoding."""
     limiter: RateLimiter = request.app.state.rate_limiter
-    retry_after = limiter.take(credential.source.id, n)
+    if n is None:
+        retry_after = limiter.check(credential.source.id)
+    else:
+        retry_after = limiter.take(credential.source.id, n)
     if retry_after is not None:
         refusals: RefusalCounter = request.app.state.refusals
         due = refusals.add(credential.source.id, credential.source)
@@ -296,9 +340,10 @@ def _context(request: Request, clock: Clock) -> IngestContext:
     )
 
 
-# What one item of a batch decodes to: (raw bytes, collector, collector dropped), or the reason
-# it is rejected.
-_Decoded = tuple[bytes, dict[str, Any], bool] | str
+# What one item of a batch decodes to: (raw bytes, collector, the (kind, subject) of the breach
+# when the collector was replaced by a marker), or the reason the item is rejected.
+_Decoded = tuple[bytes, dict[str, Any], tuple[str, str] | None] | str
+_COLLECTOR_BYTES = (meta.LIMIT_EXCEEDED, "collector_bytes")
 
 
 @dataclass(slots=True)
@@ -344,9 +389,9 @@ async def _store_batch(
                     _result(number, RecordOutcome(status="rejected", reason=decoded), key)
                 )
                 continue
-            raw, collector, collector_dropped = decoded
-            if collector_dropped:
-                batch.breach(meta.LIMIT_EXCEEDED, "collector_bytes")
+            raw, collector, collector_breach = decoded
+            if collector_breach is not None:
+                batch.breach(*collector_breach)
             if len(raw) > max_line:
                 outcome = await store_truncated(
                     conn,
@@ -386,24 +431,25 @@ def _budget_exceeded(batch: _Batch, key: str, what: str) -> JSONResponse:
     )
 
 
-async def _check_count(
-    request: Request, credential: SourceCredential, clock: Clock, n: int, what: str
-) -> None:
-    settings = _settings(request)
-    if n > settings.ingest_max_lines:
-        await _record_breach(
-            request,
-            credential.source,
-            meta.LIMIT_EXCEEDED,
-            "lines",
-            clock,
-            details={"max": settings.ingest_max_lines},
-        )
-        raise HTTPException(status_code=413, detail=f"more than {settings.ingest_max_lines} {what}")
+async def _too_many(
+    request: Request, credential: SourceCredential, clock: Clock, what: str
+) -> HTTPException:
+    limit = _settings(request).ingest_max_lines
+    await _record_refusal(
+        request, credential.source, meta.LIMIT_EXCEEDED, "lines", clock, details={"max": limit}
+    )
+    return HTTPException(status_code=413, detail=f"more than {limit} {what}")
 
 
 def _ndjson_decoder(line: bytes, settings: Settings) -> Callable[[], _Decoded]:
-    return lambda: parse_envelope(line, settings) or INVALID_ENVELOPE
+    def decode() -> _Decoded:
+        parsed = parse_envelope(line, settings)
+        if parsed is None:
+            return INVALID_ENVELOPE
+        raw, collector, dropped = parsed
+        return raw, collector, _COLLECTOR_BYTES if dropped else None
+
+    return decode
 
 
 @router.post("/v1/sources/{source}/records")
@@ -421,7 +467,8 @@ async def ingest_records(
         for number, line in enumerate(body.split(b"\n"), start=1)
         if line.strip()
     ]
-    await _check_count(request, credential, clock, len(lines), "lines")
+    if len(lines) > settings.ingest_max_lines:
+        raise await _too_many(request, credential, clock, "lines")
     await _admit(request, credential, clock, len(lines))
     batch = await _store_batch(
         request,
@@ -438,17 +485,20 @@ async def ingest_records(
     return JSONResponse(content={"results": batch.results})
 
 
-def _log_record_decoder(
-    pending: otlp_logs.PendingLogRecord, settings: Settings
-) -> Callable[[], _Decoded]:
+def _collector_breach(dropped: str | None) -> tuple[str, str] | None:
+    if dropped is None:
+        return None
+    if dropped == otlp_logs.COLLECTOR_INVALID:
+        return (meta.INVALID_ENVELOPE, "collector")
+    return (meta.LIMIT_EXCEEDED, dropped)
+
+
+def _log_record_decoder(record: otlp_logs.DecodedRecord) -> Callable[[], _Decoded]:
     def decode() -> _Decoded:
-        envelope = pending.decode()
-        if isinstance(envelope, str):
-            return envelope
-        bounded = bound_collector(envelope.collector, settings)
-        if bounded is None:
-            return otlp_logs.INVALID_LOG_RECORD
-        return envelope.raw, *bounded
+        if record.raw is None:
+            return record.reason or otlp_logs.INVALID_LOG_RECORD
+        assert record.collector is not None
+        return record.raw, record.collector, _collector_breach(record.collector_dropped)
 
     return decode
 
@@ -461,36 +511,57 @@ async def ingest_otlp_logs(
     parsed by the source adapter exactly as an NDJSON line would be.
 
     The answer is an ``ExportLogsServiceResponse`` (``partialSuccess`` when records were
-    rejected) plus a ``results`` entry per record, numbered from 1 in request order.
+    rejected) plus a bounded ``tuisku`` summary; records are numbered from 1 in request order.
     """
     settings = _settings(request)
     started = time.monotonic()
     credential = await authenticate_source(request, source)
     encoding = _content_encoding(request, JSON)
+    # Refuse a source whose bucket is already empty before paying for the body and its decode.
+    await _admit(request, credential, clock, None)
     body = await _read_body(request, credential, clock, encoding, settings.ingest_max_body_bytes)
     try:
-        # A 5 MiB body takes tens of milliseconds to decode: keep it off the event loop.
-        pending = await anyio.to_thread.run_sync(otlp_logs.decode_request, body)
+        # Decoding a 5 MiB body takes a fraction of a second: keep it off the event loop. All
+        # per-record collector work happens here too.
+        records = await anyio.to_thread.run_sync(
+            functools.partial(
+                otlp_logs.decode_request,
+                body,
+                max_records=settings.ingest_max_lines,
+                max_collector_bytes=settings.ingest_max_collector_bytes,
+            )
+        )
     except otlp_logs.InvalidRequest as exc:
-        await _record_breach(
+        await _record_refusal(
             request, credential.source, meta.INVALID_ENVELOPE, "otlp_logs_request", clock
         )
         raise HTTPException(status_code=400, detail=str(exc)) from None
-    await _check_count(request, credential, clock, len(pending), "log records")
-    if pending:
-        await _admit(request, credential, clock, len(pending))
+    except otlp_logs.TooManyRecords:
+        raise await _too_many(request, credential, clock, "log records") from None
+    if records:
+        await _admit(request, credential, clock, len(records))
     batch = await _store_batch(
         request,
         credential,
         clock,
-        [(n, _log_record_decoder(p, settings)) for n, p in enumerate(pending, start=1)],
+        [(r.number, _log_record_decoder(r)) for r in records],
         started=started,
         transport=Transport.OTLP_LOGS_JSON,
         key="record",
         reject_subject="log_record",
     )
     if batch.unprocessed:
-        return _budget_exceeded(batch, "record", "log records")
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": str(BUDGET_RETRY_AFTER_SECONDS)},
+            content={
+                "detail": "request time budget exceeded; records from "
+                f"{batch.unprocessed[0]} on were not stored, retry the request (processed "
+                "records are committed and come back as duplicates)",
+                "tuisku": otlp_logs.summary(batch.results)
+                | {"not_processed": len(batch.unprocessed)},
+            },
+        )
     return JSONResponse(content=otlp_logs.export_response(batch.results))
 
 

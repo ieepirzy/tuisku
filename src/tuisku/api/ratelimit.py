@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,8 +34,7 @@ class RateLimiter:
         self._monotonic = monotonic
         self._buckets: dict[int, _Bucket] = {}
 
-    def take(self, key: int, n: int) -> int | None:
-        """Admit ``n`` records for ``key``: None when admitted, else Retry-After seconds."""
+    def _refill(self, key: int) -> _Bucket:
         now = self._monotonic()
         bucket = self._buckets.get(key)
         if bucket is None:
@@ -44,14 +43,30 @@ class RateLimiter:
             elapsed = max(0.0, now - bucket.updated)
             bucket.tokens = min(self.burst, bucket.tokens + elapsed * self.rate)
             bucket.updated = now
+        return bucket
+
+    def _retry_after(self, bucket: _Bucket) -> int | None:
         if bucket.tokens < 1:
             return max(1, math.ceil((1 - bucket.tokens) / self.rate))
-        bucket.tokens -= n
         return None
+
+    def check(self, key: int) -> int | None:
+        """Would a request for ``key`` be admitted now? None if so, else Retry-After seconds.
+        Takes nothing: a cheap refusal before a request's records are counted."""
+        return self._retry_after(self._refill(key))
+
+    def take(self, key: int, n: int) -> int | None:
+        """Admit ``n`` records for ``key``: None when admitted, else Retry-After seconds."""
+        bucket = self._refill(key)
+        retry_after = self._retry_after(bucket)
+        if retry_after is None:
+            bucket.tokens -= n
+        return retry_after
 
 
 class RefusalCounter:
-    """Counts refused (429) requests per source in process and says when to flush them.
+    """Counts refused requests per key (a source, or a source and a breach) in process and
+    says when to flush them.
 
     A source being refused is often a source sending as fast as it can, so writing a counter
     upsert on every refusal would turn the rate limit into a database write amplifier. The first
@@ -62,13 +77,14 @@ class RefusalCounter:
     def __init__(self, interval: float, monotonic: Callable[[], float] = time.monotonic) -> None:
         self.interval = interval
         self._monotonic = monotonic
-        self._pending: dict[int, tuple[Any, int]] = {}
-        self._flushed: dict[int, float] = {}
+        self._pending: dict[Hashable, tuple[Any, int]] = {}
+        self._flushed: dict[Hashable, float] = {}
 
-    def add(self, key: int, source: Any) -> tuple[Any, int] | None:
-        """Count one refusal; return ``(source, count)`` when the batch is due."""
-        _, count = self._pending.get(key, (source, 0))
-        self._pending[key] = (source, count + 1)
+    def add(self, key: Hashable, payload: Any) -> tuple[Any, int] | None:
+        """Count one refusal; return ``(payload, count)`` when the batch is due. The payload
+        kept is the first of the batch."""
+        first, count = self._pending.get(key, (payload, 0))
+        self._pending[key] = (first, count + 1)
         now = self._monotonic()
         last = self._flushed.get(key)
         if last is not None and now - last < self.interval:
