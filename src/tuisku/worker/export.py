@@ -1,43 +1,62 @@
 """Export of finding and incident events to an append-only sink (ADR 0012).
 
-Every ``finding_events`` and ``incident_events`` row is enqueued in ``export_queue`` by an owner
-trigger at the commit of the event's transaction, with a snapshot of the finding or incident as
-that transaction left it. After the notification drain, each worker pass sends at most one
-batch, oldest first, as one OTLP/HTTP JSON ``ExportLogsServiceRequest`` (one log record per
-event), and deletes the batch's queue rows only after a 2xx. Delivery is at least once: a crash
-between the POST and the delete sends the batch again, and consumers deduplicate on
-``record_uid`` (the event's uid). A non-2xx, a timeout or a connection error leaves the rows
-queued and backs off (5 s doubling, capped at 5 minutes, kept in the worker's memory: the
-worker role cannot update the queue). An export row older than the backlog limit raises
-``tuisku.meta.backlog`` with subject ``export``, which pages like the evaluation queue and the
-outbox do.
+When export is on (``export_state.enabled``, set by ``tuisku migrate``), an owner trigger
+enqueues every ``finding_events`` and ``incident_events`` row in ``export_queue`` at the commit
+of the event's transaction, with the event and the finding or incident as that transaction left
+them (times already rendered as UTC text by the database).
+
+The exporter runs as its own asyncio task on its own connection, beside the evaluation loop, so
+a slow sink never delays evaluation or paging. A round takes a short lease on the worker-only
+``worker_locks`` row ``export`` (renewed per batch, never held across a request in a
+transaction), then sends batches, oldest first, as OTLP/HTTP JSON ``ExportLogsServiceRequest``s
+until the queue is empty or the round's time budget is spent, and deletes each batch's rows
+after a 2xx, in a statement of its own. Delivery is at least once: a crash between the POST and
+the delete sends the batch again, and consumers deduplicate on ``record_uid`` (the event's uid).
+
+- A 5xx, 429, other 4xx, timeout, connection error or redirect leaves the rows queued and backs
+  off: 5 s doubling to 5 minutes, in this process's memory (it restarts from zero with the
+  process; the worker role cannot write the queue).
+- A 400 or 413 halves the batch, down to one record. A single record the sink still refuses is
+  replaced by a stub that names it; if the stub is refused too, the row is dropped. Either way
+  ``tuisku.meta.export_failed`` (subject ``refused``) pages.
+- A row that cannot be encoded is sent as such a stub (subject ``unencodable``); it never holds
+  up the rows behind it.
+- An OTLP partial success (``partialSuccess.rejectedLogRecords``) is not retried, as OTLP
+  requires; the rows are deleted and ``export_failed`` (subject ``partial_success``) pages.
+- An export row older than the backlog limit raises ``tuisku.meta.backlog`` (subject
+  ``export``).
 
 The record (``tuisku.export.v1``) carries ids, kinds, statuses, severities, times and entity
-keys. It never carries free text a person typed: an event's reason (a triage reason, or an
-incident event's ``payload.reason``) is exported as its SHA-256 and length only, and any
-payload key not known to hold structured values is exported the same way, so a future
-free-text field cannot leak by accident. Entity keys of the configured kinds become
-``<kind>:sha256:<hex>``. Titles come from rule packs, never from telemetry.
+keys, never free text a person typed. Under the deployment's key (ADR 0008):
 
-With export disabled (no URL), the triggers still enqueue and the worker deletes queued rows
-older than the backlog limit without sending them: the queue stays bounded and nothing pages.
+- entity keys of the pseudonymised kinds (default ``ip``, ``caller``, ``identity``) become
+  ``<kind>:hmac:<HMAC-SHA-256 of the value after the first ':'>``;
+- an event's reason becomes ``reason_hmac`` and ``reason_length``;
+- in payloads and old or new values, any key not known to hold structured values is exported
+  as ``{"hmac", "length"}``, so a future free-text field cannot leak by accident.
+
+Titles come from rule packs, never from telemetry.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
+import os
+import socket
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from psycopg import AsyncConnection, errors
+from psycopg import AsyncConnection
 
 from tuisku import db
 from tuisku.adapters import Severity
@@ -49,7 +68,9 @@ SCHEMA = "tuisku.export.v1"
 SERVICE = "tuisku"
 SCOPE = "tuisku.export"
 MAX_RESPONSE_BYTES = 64 * 1024
-DISCARD_LIMIT = 1000  # queue rows a disabled exporter deletes per pass
+DISCARD_LIMIT = 1000  # leftover rows deleted per round once export is off
+REFUSED = (400, 413)  # the sink refuses this content: halve the batch, then isolate the row
+DEFAULT_KINDS = frozenset({"ip", "caller", "identity"})
 
 # OTLP SeverityNumber for each severity_id (OCSF: 0 Unknown ... 6 Fatal).
 OTLP_SEVERITY: dict[int, int] = {0: 0, 1: 9, 2: 13, 3: 14, 4: 17, 5: 21, 6: 22}
@@ -57,7 +78,7 @@ SEVERITY_TEXT: dict[int, str] = {int(s): s.name.capitalize() for s in Severity}
 
 # Keys of event payloads and old/new values known to hold structured values (ids, enums,
 # numbers, times): exported as they are. Any other key's text or nested value is exported as
-# {"sha256", "length"} (ADR 0012).
+# {"hmac", "length"} (ADR 0012).
 STRUCTURED_KEYS = frozenset(
     {
         "count",
@@ -81,58 +102,68 @@ STRUCTURED_KEYS = frozenset(
     }
 )
 
-Post = Callable[[str, bytes, float], Awaitable[tuple[int, bytes]]]
+Post = Callable[[str, bytes, Mapping[str, str], float], Awaitable[tuple[int, bytes]]]
 
 
 @dataclass(frozen=True, slots=True)
 class ExportConfig:
-    url: str | None = None  # None: export disabled
+    url: str | None = None  # None: this worker does not export
+    pseudonym_key: bytes = b""
+    pseudonymize_kinds: frozenset[str] = DEFAULT_KINDS
+    headers: Mapping[str, str] = field(default_factory=dict)
     batch_size: int = 100
     timeout_seconds: float = 10.0
-    redact_entity_kinds: frozenset[str] = frozenset({"user", "email"})
     build_revision: str = "unknown"
     backoff_base_seconds: float = 5.0
     backoff_cap_seconds: float = 300.0
+    round_budget_seconds: float = 30.0  # a round sends batches for at most this long
+
+    @property
+    def lease_seconds(self) -> float:
+        """Long enough for one batch's request, renewed after each batch."""
+        return self.timeout_seconds + 30.0
 
 
 # --- the record ---------------------------------------------------------------------------------
 
 
-def _digest(text: str) -> dict[str, Any]:
-    return {"sha256": hashlib.sha256(text.encode()).hexdigest(), "length": len(text)}
+class Pseudonyms:
+    """HMAC-SHA-256 under the deployment's key (ADR 0008)."""
+
+    def __init__(self, key: bytes, kinds: frozenset[str]) -> None:
+        if not key:
+            raise ValueError("a pseudonym key is required to export (ADR 0008)")
+        self._key = key
+        self.kinds = kinds
+
+    def mac(self, text: str) -> str:
+        return hmac.new(self._key, text.encode(), hashlib.sha256).hexdigest()
+
+    def digest(self, text: str) -> dict[str, Any]:
+        return {"hmac": self.mac(text), "length": len(text)}
+
+    def entity_key(self, key: str) -> str:
+        kind, sep, value = key.partition(":")
+        if sep and kind in self.kinds:
+            return f"{kind}:hmac:{self.mac(value)}"
+        return key
+
+    def scrub(self, value: Any) -> Any:
+        """Keep structured keys; replace any other key's text or nested value by its digest."""
+        if not isinstance(value, dict):
+            return value
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in STRUCTURED_KEYS or item is None or isinstance(item, bool | int | float):
+                out[key] = item
+            elif isinstance(item, str):
+                out[key] = self.digest(item)
+            else:
+                out[key] = self.digest(json.dumps(item, separators=(",", ":"), sort_keys=True))
+        return out
 
 
-def _scrub(value: Any) -> Any:
-    """Keep structured keys; replace any other key's text or nested value by its digest."""
-    if not isinstance(value, dict):
-        return value
-    out: dict[str, Any] = {}
-    for key, item in value.items():
-        if key in STRUCTURED_KEYS or item is None or isinstance(item, bool | int | float):
-            out[key] = item
-        elif isinstance(item, str):
-            out[key] = _digest(item)
-        else:
-            out[key] = _digest(json.dumps(item, separators=(",", ":"), sort_keys=True))
-    return out
-
-
-def redact_entity_key(key: str, kinds: frozenset[str]) -> str:
-    kind, sep, value = key.partition(":")
-    if sep and kind in kinds:
-        return f"{kind}:sha256:{hashlib.sha256(value.encode()).hexdigest()}"
-    return key
-
-
-def _ts(value: Any) -> str | None:
-    """An RFC 3339 UTC timestamp, whatever the session time zone rendered."""
-    if value is None:
-        return None
-    t = value if isinstance(value, datetime) else datetime.fromisoformat(value)
-    return t.astimezone(UTC).isoformat().replace("+00:00", "Z")
-
-
-def _finding(state: Mapping[str, Any], kinds: frozenset[str]) -> dict[str, Any]:
+def _finding(state: Mapping[str, Any], p: Pseudonyms) -> dict[str, Any]:
     ref = state.get("rule_ref") or {}
     return {
         "uid": state.get("uid"),
@@ -147,16 +178,16 @@ def _finding(state: Mapping[str, Any], kinds: frozenset[str]) -> dict[str, Any]:
         "severity_id": state.get("severity_id"),
         "status": state.get("status"),
         "count": state.get("count"),
-        "entity_keys": [redact_entity_key(k, kinds) for k in state.get("entity_keys") or []],
-        "first_seen_at": _ts(state.get("first_seen")),
-        "last_seen_at": _ts(state.get("last_seen")),
-        "suppressed_until": _ts(state.get("suppressed_until")),
+        "entity_keys": [p.entity_key(k) for k in state.get("entity_keys") or []],
+        "first_seen_at": state.get("first_seen"),
+        "last_seen_at": state.get("last_seen"),
+        "suppressed_until": state.get("suppressed_until"),
         "incident_uid": state.get("incident_uid"),
-        "updated_at": _ts(state.get("updated_at")),
+        "updated_at": state.get("updated_at"),
     }
 
 
-def _incident(state: Mapping[str, Any], kinds: frozenset[str]) -> dict[str, Any]:
+def _incident(state: Mapping[str, Any], p: Pseudonyms) -> dict[str, Any]:
     return {
         "uid": state.get("uid"),
         "title": state.get("title"),
@@ -166,76 +197,141 @@ def _incident(state: Mapping[str, Any], kinds: frozenset[str]) -> dict[str, Any]
         "rule_id": state.get("rule_id"),
         "rule_rev": state.get("rule_rev"),
         "overflow": state.get("overflow"),
-        "entity_keys": [redact_entity_key(k, kinds) for k in state.get("entity_keys") or []],
+        "entity_keys": [p.entity_key(k) for k in state.get("entity_keys") or []],
         "finding_count": state.get("finding_count"),
-        "opened_at": _ts(state.get("opened_at")),
-        "updated_at": _ts(state.get("updated_at")),
+        "opened_at": state.get("opened_at"),
+        "updated_at": state.get("updated_at"),
         "previous_incident_uid": state.get("previous_incident_uid"),
     }
 
 
-def build_record(row: Mapping[str, Any], config: ExportConfig) -> dict[str, Any]:
-    """The ``tuisku.export.v1`` record for one queue row joined with its event."""
-    payload = dict(row["payload"] or {})
-    reason = row["reason"]
+def build_record(
+    stream: str, event: Mapping[str, Any], state: Mapping[str, Any], p: Pseudonyms, revision: str
+) -> dict[str, Any]:
+    """The ``tuisku.export.v1`` record for one queued event and its snapshot."""
+    payload = dict(event.get("payload") or {})
+    reason = event.get("reason")
     if reason is None and isinstance(payload.get("reason"), str):
-        reason = payload.pop("reason")  # an incident event keeps its reason in the payload
+        reason = payload["reason"]  # an incident event keeps its reason in the payload
     payload.pop("reason", None)
-    stream = row["stream"]
-    state = row["state"]
-    kinds = config.redact_entity_kinds
+    if reason is not None and not isinstance(reason, str):
+        reason = json.dumps(reason, sort_keys=True)
+    uid = str(event["uid"])
     return {
         "schema": SCHEMA,
-        "record_uid": str(row["event_uid"]),
+        "record_uid": uid,
         "stream": stream,
         "event": {
-            "uid": str(row["event_uid"]),
-            "at": _ts(row["at"]),
-            "actor": row["actor"],
-            "kind": row["kind"],
-            "old_value": _scrub(row["old_value"]),
-            "new_value": _scrub(row["new_value"]),
-            "payload": _scrub(payload),
-            "reason_sha256": None if reason is None else _digest(reason)["sha256"],
+            "uid": uid,
+            "at": event.get("at"),
+            "actor": event.get("actor"),
+            "kind": event.get("kind"),
+            "old_value": p.scrub(event.get("old_value")),
+            "new_value": p.scrub(event.get("new_value")),
+            "payload": p.scrub(payload),
+            "reason_hmac": None if reason is None else p.mac(reason),
             "reason_length": None if reason is None else len(reason),
         },
-        stream: _finding(state, kinds) if stream == "finding" else _incident(state, kinds),
-        "exporter": {"service": SERVICE, "build_revision": config.build_revision},
+        stream: _finding(state, p) if stream == "finding" else _incident(state, p),
+        "exporter": {"service": SERVICE, "build_revision": revision},
     }
+
+
+def _event_of(row: Mapping[str, Any]) -> dict[str, Any]:
+    event = row.get("event")
+    return event if isinstance(event, dict) else {}
+
+
+def stub_record(row: Mapping[str, Any], error: str, revision: str) -> dict[str, Any]:
+    """What is sent in place of a record that cannot be encoded or that the sink refuses: it
+    names the event, so the gap is visible in the sink too."""
+    event = _event_of(row)
+    uid = str(event.get("uid") or f"export_queue:{row['id']}")
+    return {
+        "schema": SCHEMA,
+        "record_uid": uid,
+        "stream": str(row.get("stream")),
+        "error": error,
+        "event": {"uid": uid, "at": str(event.get("at")), "kind": str(event.get("kind"))},
+        "exporter": {"service": SERVICE, "build_revision": revision},
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class Encoded:
+    queue_id: int
+    record_uid: str
+    stream: str
+    body: str  # the record as compact JSON
+    severity_id: int
+    at_unix_nano: str
+    stub: bool
+
+
+def _dumps(record: Mapping[str, Any]) -> str:
+    return json.dumps(record, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+
+
+def _nano(value: Any) -> str:
+    text = str(value)
+    return text if text.isdigit() else "0"
+
+
+def encode(row: Mapping[str, Any], p: Pseudonyms, revision: str) -> Encoded:
+    """Encode one queue row; never raises for what the row holds (a stub replaces it)."""
+    event = _event_of(row)
+    try:
+        record = build_record(row["stream"], event, row["state"], p, revision)
+        severity = record[row["stream"]].get("severity_id")
+        return Encoded(
+            row["id"],
+            record["record_uid"],
+            row["stream"],
+            _dumps(record),
+            severity if isinstance(severity, int) else 0,
+            _nano(event.get("at_unix_nano")),
+            stub=False,
+        )
+    except Exception as exc:
+        log.error("export queue row %s cannot be encoded: %s", row.get("id"), type(exc).__name__)
+        return to_stub(row, f"unencodable: {type(exc).__name__}", revision)
+
+
+def to_stub(row: Mapping[str, Any], error: str, revision: str) -> Encoded:
+    stub = stub_record(row, error, revision)
+    event = _event_of(row)
+    return Encoded(
+        row["id"],
+        stub["record_uid"],
+        stub["stream"],
+        _dumps(stub),
+        0,
+        _nano(event.get("at_unix_nano")),
+        stub=True,
+    )
 
 
 def _attr(key: str, value: str) -> dict[str, Any]:
     return {"key": key, "value": {"stringValue": value}}
 
 
-def _nanos(t: datetime) -> str:
-    delta = t - datetime(1970, 1, 1, tzinfo=UTC)
-    return str((delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1000)
-
-
-def envelope(records: list[tuple[dict[str, Any], datetime]], build_revision: str) -> bytes:
+def envelope(records: list[Encoded], build_revision: str) -> bytes:
     """One OTLP ``ExportLogsServiceRequest`` (JSON): one resource, one scope, one log record per
     exported record, its body the record as compact JSON."""
-    log_records = []
-    for record, at in records:
-        severity = record[record["stream"]].get("severity_id") or 0
-        log_records.append(
-            {
-                "timeUnixNano": _nanos(at),
-                "severityNumber": OTLP_SEVERITY.get(severity, 0),
-                "severityText": SEVERITY_TEXT.get(severity, "Unknown"),
-                "body": {
-                    "stringValue": json.dumps(
-                        record, separators=(",", ":"), sort_keys=True, ensure_ascii=False
-                    )
-                },
-                "attributes": [
-                    _attr("tuisku.stream", record["stream"]),
-                    _attr("tuisku.record_uid", record["record_uid"]),
-                    _attr("tuisku.schema", SCHEMA),
-                ],
-            }
-        )
+    log_records = [
+        {
+            "timeUnixNano": r.at_unix_nano,
+            "severityNumber": OTLP_SEVERITY.get(r.severity_id, 0),
+            "severityText": SEVERITY_TEXT.get(r.severity_id, "Unknown"),
+            "body": {"stringValue": r.body},
+            "attributes": [
+                _attr("tuisku.stream", r.stream),
+                _attr("tuisku.record_uid", r.record_uid),
+                _attr("tuisku.schema", SCHEMA),
+            ],
+        }
+        for r in records
+    ]
     request = {
         "resourceLogs": [
             {
@@ -252,7 +348,7 @@ def envelope(records: list[tuple[dict[str, Any], datetime]], build_revision: str
     return json.dumps(request, separators=(",", ":"), ensure_ascii=False).encode()
 
 
-# --- delivery -----------------------------------------------------------------------------------
+# --- HTTP ---------------------------------------------------------------------------------------
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -262,12 +358,15 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_OPENER = urllib.request.build_opener(_NoRedirect)
+# No environment proxies: records go straight to the configured sink.
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
 
 
-def _post_blocking(url: str, body: bytes, timeout: float) -> tuple[int, bytes]:
+def _post_blocking(
+    url: str, body: bytes, headers: Mapping[str, str], timeout: float
+) -> tuple[int, bytes]:
     request = urllib.request.Request(
-        url, data=body, method="POST", headers={"Content-Type": "application/json"}
+        url, data=body, method="POST", headers={**headers, "Content-Type": "application/json"}
     )
     try:
         with _OPENER.open(request, timeout=timeout) as response:
@@ -277,10 +376,13 @@ def _post_blocking(url: str, body: bytes, timeout: float) -> tuple[int, bytes]:
             return exc.code, b""
 
 
-async def post_json(url: str, body: bytes, timeout: float) -> tuple[int, bytes]:
+async def post_json(
+    url: str, body: bytes, headers: Mapping[str, str], timeout: float
+) -> tuple[int, bytes]:
     """POST off the event loop, bounded in total by ``timeout`` (a thread cannot be killed: one
     that overruns is abandoned and ends at its socket timeout)."""
-    return await asyncio.wait_for(asyncio.to_thread(_post_blocking, url, body, timeout), timeout)
+    work = asyncio.to_thread(_post_blocking, url, body, headers, timeout)
+    return await asyncio.wait_for(work, timeout)
 
 
 def _rejected(body: bytes) -> int:
@@ -292,16 +394,19 @@ def _rejected(body: bytes) -> int:
         return 0
 
 
-_BATCH_SQL = (
-    "SELECT q.id, q.stream, q.state, "
-    "coalesce(fe.uid, ie.uid) AS event_uid, coalesce(fe.at, ie.at) AS at, "
-    "coalesce(fe.actor, ie.actor) AS actor, coalesce(fe.kind, ie.kind) AS kind, "
-    "fe.old_value, fe.new_value, fe.reason, coalesce(fe.payload, ie.payload) AS payload "
-    "FROM export_queue q "
-    "LEFT JOIN finding_events fe ON fe.id = q.finding_event_id "
-    "LEFT JOIN incident_events ie ON ie.id = q.incident_event_id "
-    "ORDER BY q.id LIMIT %s"
-)
+# --- the exporter -------------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class Round:
+    delivered: int = 0
+    discarded: int = 0
+    stubs: int = 0
+    more: bool = False  # the round's budget ran out with rows left
+
+
+def _holder() -> str:
+    return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"[:200]
 
 
 @dataclass
@@ -309,35 +414,98 @@ class Exporter:
     config: ExportConfig = field(default_factory=ExportConfig)
     post: Post = post_json
     monotonic: Callable[[], float] = time.monotonic
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC)
+    holder: str = field(default_factory=_holder)
     failures: int = field(default=0, init=False)
     _retry_at: float = field(default=0.0, init=False)
+    _batch: int = field(default=0, init=False)
+    _pseudonyms: Pseudonyms | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        self._batch = self.config.batch_size
+        if self.enabled:
+            self._pseudonyms = Pseudonyms(self.config.pseudonym_key, self.config.pseudonymize_kinds)
 
     @property
     def enabled(self) -> bool:
         return self.config.url is not None
 
-    async def run(self, conn: AsyncConnection[Any], backlog_after: timedelta, now: datetime) -> int:
-        """One bounded, isolated export step of a worker pass: deliver (or, disabled, discard)
-        one batch, then check the backlog. Returns how many records were delivered. Lock and
-        statement timeouts propagate (the worker skips the step); any other error is logged
-        and backs off, so export never stops evaluation."""
-        try:
-            if not self.enabled:
-                await self.discard(conn, backlog_after)
-                return 0
-            delivered = await self.deliver(conn)
-        except (errors.LockNotAvailable, errors.QueryCanceled):
-            raise
-        except Exception as exc:
-            self._failed(f"export step failed: {type(exc).__name__}")
-            delivered = 0
-        try:
-            await self.check_backlog(conn, backlog_after, now)
-        except (errors.LockNotAvailable, errors.QueryCanceled):
-            raise
-        except Exception as exc:
-            log.error("export backlog check failed: %s", type(exc).__name__)
-        return delivered
+    # -- the task --------------------------------------------------------------------------
+
+    async def run_forever(
+        self,
+        connect: Callable[[], Awaitable[AsyncConnection[Any]]],
+        backlog_after: timedelta,
+        poll_seconds: float,
+    ) -> None:
+        """The export task: rounds on a connection of its own, until cancelled. An error ends
+        the round, never the task; the next round reconnects after a backoff."""
+        errors_in_a_row = 0
+        while True:
+            try:
+                conn = await connect()
+                async with conn:
+                    await conn.execute(
+                        "SELECT set_config('lock_timeout', '5s', false), "
+                        "set_config('statement_timeout', '10s', false)"
+                    )
+                    while True:
+                        done = await self.round(conn, backlog_after)
+                        errors_in_a_row = 0
+                        if not done.more:
+                            await asyncio.sleep(poll_seconds)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                errors_in_a_row += 1
+                delay = min(60.0, poll_seconds * 2**errors_in_a_row)
+                log.error("export round failed (%s); retrying in %.0fs", type(exc).__name__, delay)
+                await asyncio.sleep(delay)
+
+    async def round(self, conn: AsyncConnection[Any], backlog_after: timedelta) -> Round:
+        """One export round on an autocommit connection: deliver (or, export off, discard),
+        then check the backlog."""
+        done = Round()
+        state = await db.fetch_one(conn, "SELECT enabled FROM export_state")
+        enqueueing = bool(state and state["enabled"])
+        if not self.enabled:
+            if enqueueing:
+                # The database enqueues, but this worker does not export. Another replica may;
+                # if none does, the backlog pages. Never discard what is meant to be exported.
+                await self.check_backlog(conn, backlog_after)
+            else:
+                done.discarded = await self.discard(conn)
+            return done
+        if not enqueueing:
+            if await self._meta(conn, "not_enqueued", {"export_state": "disabled"}):
+                log.error(
+                    "export is configured on the worker but the database does not enqueue "
+                    "events: run tuisku migrate with TUISKU_EXPORT_OTLP_LOGS_URL set (ADR 0012)"
+                )
+        if self.monotonic() >= self._retry_at and await self._lease(conn):
+            try:
+                await self._deliver(conn, done)
+            finally:
+                await conn.execute(
+                    "UPDATE worker_locks SET holder = NULL, lease_until = NULL "
+                    "WHERE name = 'export' AND holder = %s",
+                    (self.holder,),
+                )
+        await self.check_backlog(conn, backlog_after)
+        return done
+
+    async def _lease(self, conn: AsyncConnection[Any]) -> bool:
+        """Take or renew the export lease: one exporter at a time, without a lock held across a
+        request. A holder that dies loses it when it expires."""
+        row = await db.fetch_one(
+            conn,
+            "UPDATE worker_locks SET holder = %s, "
+            "lease_until = now() + make_interval(secs => %s) "
+            "WHERE name = 'export' AND (lease_until IS NULL OR lease_until < now() "
+            "OR holder = %s) RETURNING name",
+            (self.holder, self.config.lease_seconds, self.holder),
+        )
+        return row is not None
 
     def _failed(self, why: str) -> None:
         self.failures += 1
@@ -348,62 +516,137 @@ class Exporter:
         self._retry_at = self.monotonic() + delay
         log.warning("%s; %d consecutive failures, retrying in %.0fs", why, self.failures, delay)
 
-    async def deliver(self, conn: AsyncConnection[Any]) -> int:
-        if self.monotonic() < self._retry_at:
-            return 0  # backing off after a failure
-        assert self.config.url is not None
-        async with conn.transaction():
-            # One exporter at a time, by a row lock on the worker-only worker_locks table (as
-            # the notification drain does, ADR 0011). Held across the POST, so two workers
-            # never send the same batch; a crash still can, and consumers deduplicate.
-            await conn.execute(
-                "INSERT INTO worker_locks (name) VALUES ('export') ON CONFLICT (name) DO NOTHING"
-            )
-            got = await db.fetch_one(
-                conn, "SELECT name FROM worker_locks WHERE name = 'export' FOR UPDATE SKIP LOCKED"
-            )
-            if got is None:
-                return 0
-            rows = await db.fetch_all(conn, _BATCH_SQL, (self.config.batch_size,))
-            if not rows:
-                return 0
-            records = [(build_record(r, self.config), r["at"]) for r in rows]
-            body = envelope(records, self.config.build_revision)
-            try:
-                status, answer = await self.post(self.config.url, body, self.config.timeout_seconds)
-            except (TimeoutError, OSError) as exc:  # never log the URL: it may carry a secret
-                self._failed(f"export of {len(rows)} records failed: {type(exc).__name__}")
-                return 0
-            if not 200 <= status < 300:
-                self._failed(f"export of {len(rows)} records failed: HTTP {status}")
-                return 0
-            rejected = _rejected(answer)
-            if rejected:
-                # OTLP: a partial success must not be retried; the sink refused them for good.
-                log.error("export sink rejected %d of %d records", rejected, len(rows))
-            await conn.execute(
-                "DELETE FROM export_queue WHERE id = ANY(%s)", ([r["id"] for r in rows],)
-            )
-        self.failures, self._retry_at = 0, 0.0
-        return len(rows)
-
-    async def discard(self, conn: AsyncConnection[Any], older_than: timedelta) -> int:
-        """Export disabled: drop queued rows older than ``older_than`` (by the database clock),
-        bounded per pass. Younger rows wait, so a replica with export enabled still gets them."""
-        async with conn.transaction():
+    async def _deliver(self, conn: AsyncConnection[Any], done: Round) -> None:
+        assert self.config.url is not None and self._pseudonyms is not None
+        deadline = self.monotonic() + self.config.round_budget_seconds
+        while True:
+            if self.monotonic() >= deadline:
+                done.more = True
+                return
             rows = await db.fetch_all(
                 conn,
-                "DELETE FROM export_queue WHERE id IN (SELECT id FROM export_queue "
-                "WHERE enqueued_at < now() - %s ORDER BY id LIMIT %s) RETURNING id",
-                (older_than, DISCARD_LIMIT),
+                "SELECT id, stream, event, state FROM export_queue ORDER BY id LIMIT %s",
+                (self._batch,),
             )
+            if not rows:
+                self.failures, self._retry_at = 0, 0.0  # caught up
+                return
+            encoded = [encode(r, self._pseudonyms, self.config.build_revision) for r in rows]
+            status = await self._send(conn, encoded, done)
+            if status is None:
+                return  # failed: backing off
+            if not await self._lease(conn):
+                return  # the lease was lost (expired and taken): leave the rest to its holder
+
+    async def _send(
+        self, conn: AsyncConnection[Any], encoded: list[Encoded], done: Round
+    ) -> int | None:
+        """Send one batch. Returns the status once the batch is settled (sent, or split), None
+        after a failure that backs off."""
+        assert self.config.url is not None
+        try:
+            status, answer = await self.post(
+                self.config.url,
+                envelope(encoded, self.config.build_revision),
+                self.config.headers,
+                self.config.timeout_seconds,
+            )
+        except (TimeoutError, OSError) as exc:  # never log the URL: it may carry a secret
+            self._failed(f"export of {len(encoded)} records failed: {type(exc).__name__}")
+            return None
+        if status in REFUSED and len(encoded) > 1:
+            self._batch = max(1, len(encoded) // 2)
+            log.warning("export sink refused %d records (HTTP %d); halving", len(encoded), status)
+            return status
+        if status in REFUSED:
+            return await self._isolate(conn, encoded[0], status, done)
+        if not 200 <= status < 300:
+            self._failed(f"export of {len(encoded)} records failed: HTTP {status}")
+            return None
+        await self._settle(conn, encoded, answer, done)
+        self._batch = min(self.config.batch_size, self._batch * 2)
+        return status
+
+    async def _settle(
+        self, conn: AsyncConnection[Any], encoded: list[Encoded], answer: bytes, done: Round
+    ) -> None:
+        stubs = [e for e in encoded if e.stub]
+        for e in stubs:
+            await self._meta(
+                conn, "unencodable", {"queue_id": e.queue_id, "record_uid": e.record_uid}
+            )
+        rejected = _rejected(answer)
+        if rejected:
+            # OTLP: a partial success must not be retried; the sink refused them for good.
+            log.error("export sink rejected %d of %d records", rejected, len(encoded))
+            await self._meta(conn, "partial_success", {"rejected": rejected, "sent": len(encoded)})
+        await conn.execute(
+            "DELETE FROM export_queue WHERE id = ANY(%s)", ([e.queue_id for e in encoded],)
+        )
+        done.delivered += len(encoded) - rejected
+        done.stubs += len(stubs)
+
+    async def _isolate(
+        self, conn: AsyncConnection[Any], one: Encoded, status: int, done: Round
+    ) -> int | None:
+        """The sink refuses this one record: send a stub in its place; if the stub is refused
+        too, drop the row. Either way it pages, and never blocks the rows behind it."""
+        log.error("export sink refused queue row %s (HTTP %d)", one.queue_id, status)
+        stub = one
+        if not one.stub:
+            row = await db.fetch_one(
+                conn, "SELECT id, stream, event FROM export_queue WHERE id = %s", (one.queue_id,)
+            )
+            stub = to_stub(row or {"id": one.queue_id}, f"refused: HTTP {status}", self._rev)
+            try:
+                status, _ = await self.post(
+                    self.config.url or "",
+                    envelope([stub], self._rev),
+                    self.config.headers,
+                    self.config.timeout_seconds,
+                )
+            except (TimeoutError, OSError) as exc:
+                self._failed(f"export of a stub failed: {type(exc).__name__}")
+                return None
+            if not (200 <= status < 300 or status in REFUSED):
+                self._failed(f"export of a stub failed: HTTP {status}")
+                return None
+        delivered = 200 <= status < 300 and stub is not one
+        await self._meta(
+            conn,
+            "refused",
+            {"queue_id": one.queue_id, "record_uid": one.record_uid, "stub_delivered": delivered},
+        )
+        await conn.execute("DELETE FROM export_queue WHERE id = %s", (one.queue_id,))
+        done.stubs += int(delivered)
+        self._batch = self.config.batch_size
+        return status
+
+    @property
+    def _rev(self) -> str:
+        return self.config.build_revision
+
+    async def _meta(self, conn: AsyncConnection[Any], subject: str, details: dict) -> bool:
+        """Raise ``tuisku.meta.export_failed``; True when this bucket had none for the subject
+        yet (one per subject and 5-minute bucket, ADR 0005)."""
+        async with conn.transaction():
+            return await meta.record_export_failed(
+                conn, subject=subject, details=details, now=self.clock()
+            )
+
+    async def discard(self, conn: AsyncConnection[Any]) -> int:
+        """Export off: delete rows left from when it was on, bounded per round."""
+        rows = await db.fetch_all(
+            conn,
+            "DELETE FROM export_queue WHERE id IN (SELECT id FROM export_queue ORDER BY id "
+            "LIMIT %s) RETURNING id",
+            (DISCARD_LIMIT,),
+        )
         if rows:
-            log.info("export disabled: discarded %d queued records", len(rows))
+            log.info("export off: discarded %d queued records", len(rows))
         return len(rows)
 
-    async def check_backlog(
-        self, conn: AsyncConnection[Any], limit: timedelta, now: datetime
-    ) -> int:
+    async def check_backlog(self, conn: AsyncConnection[Any], limit: timedelta) -> int:
         """Raise ``tuisku.meta.backlog`` (subject ``export``) when the oldest queued export row
         is older than ``limit`` by the database clock, which set ``enqueued_at``."""
         async with conn.transaction():
@@ -426,6 +669,6 @@ class Exporter:
                     "queued": counted["n"],
                     "limit_seconds": int(limit.total_seconds()),
                 },
-                now=now,
+                now=self.clock(),
             )
         return int(raised)

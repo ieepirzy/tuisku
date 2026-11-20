@@ -37,6 +37,7 @@ INVALID_ENVELOPE = "tuisku.meta.invalid_envelope"
 EVALUATION_FAILED = "tuisku.meta.evaluation_failed"
 NOTIFICATION_UNDELIVERABLE = "tuisku.meta.notification_undeliverable"
 BACKLOG = "tuisku.meta.backlog"
+EXPORT_FAILED = "tuisku.meta.export_failed"
 INGEST_KINDS = frozenset({LIMIT_EXCEEDED, RATE_LIMITED, INVALID_ENVELOPE})
 
 _TITLES = {
@@ -46,6 +47,7 @@ _TITLES = {
     EVALUATION_FAILED: ("A rule failed to evaluate a row", Severity.MEDIUM),
     NOTIFICATION_UNDELIVERABLE: ("A notification keeps failing to deliver", Severity.HIGH),
     BACKLOG: ("Evaluation or notification is falling behind", Severity.HIGH),
+    EXPORT_FAILED: ("Events were not exported as recorded", Severity.HIGH),
 }
 
 
@@ -140,6 +142,27 @@ async def record_backlog(
         details=details,
         now=now,
         rule_name="health",
+    )
+
+
+async def record_export_failed(
+    conn: AsyncConnection[Any], *, subject: str, details: dict[str, Any], now: datetime
+) -> bool:
+    """Export lost or replaced records, or cannot run as configured (ADR 0012). The subject
+    names what: ``partial_success`` (the sink rejected records), ``unencodable`` (a stub was
+    sent instead), ``refused`` (the sink refused a record and its stub; it was dropped) or
+    ``not_enqueued`` (the worker exports but the database does not enqueue). The
+    ``tuisku-meta`` pack pages on it."""
+    return await _record(
+        conn,
+        None,
+        None,
+        EXPORT_FAILED,
+        subject,
+        n=1,
+        details=details,
+        now=now,
+        rule_name="export",
     )
 
 

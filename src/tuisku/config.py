@@ -6,6 +6,7 @@ The database URL is a secret: it is held as ``SecretStr`` so it never appears in
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Self
 from urllib.parse import urlsplit
@@ -18,6 +19,9 @@ _ALLOWED_SCHEMES = frozenset({"postgresql", "postgres"})
 _ROLE_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 # An entity key's kind: the part before its first ':' (ADR 0008).
 _ENTITY_KIND = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+# HTTP header names (RFC 9110 tokens) and values without control characters.
+_HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}")
+_HEADER_VALUE = re.compile(r"[\x20-\x7e]{0,4096}")
 
 
 class ConfigError(RuntimeError):
@@ -111,13 +115,19 @@ class Settings(BaseSettings):
     worker_deadman_url: SecretStr | None = None
 
     # Export of finding and incident events (ADR 0012): OTLP/HTTP JSON logs to this full URL
-    # (e.g. http://collector:4318/v1/logs). Unset: export is disabled and the worker discards
-    # queued events older than worker_backlog_seconds. Held as a secret: a URL may carry one.
+    # (e.g. http://collector:4318/v1/logs). Unset: export is off. `tuisku migrate` also reads
+    # it: the database enqueues events only when the migration run had it set. Held as a
+    # secret; userinfo is refused (send credentials as headers).
     export_otlp_logs_url: SecretStr | None = None
+    # Extra request headers, a JSON object of strings (e.g. an Authorization header). Only
+    # with an https:// URL: a secret is never sent in clear text.
+    export_otlp_headers_json: SecretStr | None = None
+    # HMAC-SHA-256 key for pseudonyms (ADR 0008): required to export; at least 32 characters.
+    export_pseudonym_key: SecretStr | None = None
     export_batch_size: int = Field(default=100, ge=1, le=10_000)
     export_timeout_seconds: float = Field(default=10.0, gt=0, le=300)
-    # Entity keys of these kinds are exported as <kind>:sha256:<hex of the value>.
-    export_redact_entity_kinds: str = "user,email"
+    # Entity keys of these kinds are exported as <kind>:hmac:<hex> (ADR 0008).
+    export_pseudonymize_entity_kinds: str = "ip,caller,identity"
 
     @field_validator("export_otlp_logs_url")
     @classmethod
@@ -125,21 +135,66 @@ class Settings(BaseSettings):
         if value is None or not value.get_secret_value().strip():
             return None
         parts = urlsplit(value.get_secret_value())
+        # Never echo the value.
         if parts.scheme not in ("http", "https") or not parts.hostname:
-            raise ValueError("must be an http:// or https:// URL")  # never echo the value
+            raise ValueError("must be an http:// or https:// URL")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("must not carry credentials; use TUISKU_EXPORT_OTLP_HEADERS_JSON")
         return value
 
-    @field_validator("export_redact_entity_kinds")
+    @field_validator("export_otlp_headers_json")
     @classmethod
-    def _check_redact_kinds(cls, value: str) -> str:
+    def _check_export_headers(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None or not value.get_secret_value().strip():
+            return None
+        try:
+            headers = json.loads(value.get_secret_value())
+        except ValueError:
+            raise ValueError("must be a JSON object of strings") from None
+        if not isinstance(headers, dict) or not all(
+            isinstance(k, str)
+            and _HEADER_NAME.fullmatch(k)
+            and isinstance(v, str)
+            and _HEADER_VALUE.fullmatch(v)
+            for k, v in headers.items()
+        ):
+            raise ValueError("must be a JSON object of header names to printable strings")
+        return value
+
+    @field_validator("export_pseudonym_key")
+    @classmethod
+    def _check_pseudonym_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None or not value.get_secret_value():
+            return None
+        key = value.get_secret_value()
+        if len(key.encode()) < 32 or len(set(key)) < 8:
+            raise ValueError("must be at least 32 characters of random data")
+        return value
+
+    @field_validator("export_pseudonymize_entity_kinds")
+    @classmethod
+    def _check_pseudonymize_kinds(cls, value: str) -> str:
         kinds = [k.strip() for k in value.split(",") if k.strip()]
         if not all(_ENTITY_KIND.fullmatch(k) for k in kinds):
             raise ValueError("must be comma-separated entity key kinds ([a-z0-9-]+)")
         return ",".join(kinds)
 
+    @model_validator(mode="after")
+    def _check_export_headers_need_https(self) -> Self:
+        if self.export_otlp_headers_json is not None and self.export_otlp_logs_url is not None:
+            if urlsplit(self.export_otlp_logs_url.get_secret_value()).scheme != "https":
+                raise ValueError("TUISKU_EXPORT_OTLP_HEADERS_JSON needs an https:// export URL")
+        return self
+
     @property
-    def export_redacted_kinds(self) -> frozenset[str]:
-        return frozenset(k for k in self.export_redact_entity_kinds.split(",") if k)
+    def export_pseudonymized_kinds(self) -> frozenset[str]:
+        return frozenset(k for k in self.export_pseudonymize_entity_kinds.split(",") if k)
+
+    @property
+    def export_headers(self) -> dict[str, str]:
+        if self.export_otlp_headers_json is None:
+            return {}
+        return json.loads(self.export_otlp_headers_json.get_secret_value())
 
     @field_validator("database_url")
     @classmethod
