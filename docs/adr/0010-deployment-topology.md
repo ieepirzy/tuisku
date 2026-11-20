@@ -34,7 +34,8 @@ Also:
 
 - **Sensors → shipper → Tuisku.** The shipper is Vector or an equivalent. It tails sensor output
   files or container logs, ships raw lines as NDJSON envelopes with acknowledgements, and keeps
-  a disk buffer ([0005](0005-source-adapters-and-ingestion.md)). Each sensor deployment is one
+  a disk buffer ([0005](0005-source-adapters-and-ingestion.md)). An OpenTelemetry Collector
+  (`filelog` receiver) can ship the same raw lines as OTLP/HTTP JSON logs instead. Each sensor deployment is one
   Tuisku source with its own token.
 - **OTLP metrics → collector → Tuisku.** Sources that emit OTLP, Harava first, reach Tuisku
   through an OpenTelemetry Collector pipeline that fans out to Tuisku's OTLP endpoint (JSON),

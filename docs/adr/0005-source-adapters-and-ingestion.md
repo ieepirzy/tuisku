@@ -1,6 +1,7 @@
 # 0005. Source adapter contract and ingestion path
 
-Status: Accepted (2026-11-01)
+Status: Accepted (2026-11-01). Amended 2026-11-13: OTLP/HTTP JSON logs transport and
+`tuisku source ensure`.
 
 ## Context
 
@@ -32,6 +33,40 @@ sensor sees.
   in front (with the `otlphttp` exporter set to JSON) provides retries and queueing. Protobuf
   encoding is a follow-up. Only cumulative-temporality sums are interpreted; other metric types
   are kept as generic observations.
+- **OTLP logs** (amended 2026-11-13) post to `POST /v1/sources/{source}/otlp/v1/logs` using
+  OTLP/HTTP JSON encoding, so the OpenTelemetry Collector (`filelog` receiver, `otlphttp`
+  exporter with `encoding: json`) can ship any sensor's lines with its own checkpointing,
+  queueing and retries. Unlike metrics, each `logRecord` is **one L0 record, handled exactly as
+  one NDJSON envelope**:
+  - `raw` is the record's `body.stringValue`, byte for byte, stored with transport
+    `otlp_logs_json`, and the source's adapter parses it as it would the same NDJSON line.
+  - A body of any other `AnyValue` kind is **refused** (`rejected`, `body_not_string`), not
+    re-serialized: a collector that parsed the line has already replaced what the sensor wrote,
+    and parsing belongs to the adapter.
+  - `collector` keeps the resource attributes and the record's attributes apart
+    (`{"resource": {...}, "attributes": {...}}`), keyed by their OpenTelemetry names, plus the
+    record's observed and event timestamps. Record attributes can be derived from log content,
+    so they must not be able to pose as the resource that names the shipper's node or pod. It is
+    the same untrusted receipt metadata as an envelope's `collector`, under the same cap. No
+    adapter reads `collector`; the asset in an event comes from the event itself.
+  - Metadata never costs evidence: malformed attributes, or attributes over the nesting or key
+    limits, replace the record's `collector` with a `tuisku_collector_dropped` marker and raise
+    a meta-detection (`invalid_envelope` with subject `collector`, or `source_limit_exceeded`
+    with `collector_depth` or `collector_keys`), and the record is stored and parsed. An NDJSON
+    envelope with such a `collector` is rejected instead: there the envelope and the line are
+    one JSON value, while an OTLP resource is shared by many records and its attributes are
+    added by the shipper's own processors.
+  - The per-request limits apply per record (the line limit counts log records). A body that
+    is not an OTLP/JSON logs request gets 400 and an `invalid_envelope` meta-detection.
+  - **Bounded cost.** The request is decoded once, off the event loop. A resource's
+    attributes are converted and sized once however many records share it, and a record's
+    collector is sized as the resource's size plus its own. Decoding stops at the first record
+    over the line limit, and a source whose rate bucket is empty is refused before its body is
+    decoded.
+  - The answer is an OTLP `ExportLogsServiceResponse`: `partialSuccess.rejectedLogRecords`
+    counts the rejected records. An extra `tuisku` field gives counts and at most 100 rejected
+    record numbers, never one entry per record, because OTLP exporters read at most 64 KiB of
+    the answer and count an undecodable one as a failed export.
 - Tuisku answers **2xx only after the transaction commits**. Each record runs inside its own
   `SAVEPOINT`, so a database error on one record cannot abort the batch. The response gives one
   result per line:
@@ -77,7 +112,10 @@ sensor sees.
   key on `(source_id, kind, subject, bucket)` with `ON CONFLICT DO NOTHING` enforces this, so it
   also holds across API replicas, and one failing rule cannot hide another. Repeats are counted
   in a mutable working table, `meta_counters`, never by updating the detection. Rules can select
-  meta-detections by kind.
+  meta-detections by kind. Breaches that refuse a whole request (429, a 413 for body size or
+  line count, a 400 for a body that is not OTLP/JSON logs) are counted in process and written
+  at once for the first, then at most once per flush interval and at shutdown, so a sender that
+  repeats a refused request cannot make each one a database write.
 
 ### Sources, tokens and roles
 
@@ -88,6 +126,13 @@ sensor sees.
     scanners catch leaks.
   - Only the SHA-256 is stored.
   - A token is shown once, when it is created.
+- **Declarative registration** (amended 2026-11-13). `tuisku source ensure` creates a source if
+  it is absent and registers a token that the deployment generated and holds in an environment
+  variable (format checked, never printed), if its SHA-256 is not registered yet. It never
+  changes an existing source or token: different adapter or options, a disabled source, and a
+  revoked, expired or foreign token are errors. A deployment can therefore keep source tokens
+  in its own secret store and run the command as a Job on every deploy, with the same database
+  rights as `tuisku source add`.
 - **Token lifecycle**
   - Each token has an optional expiry.
   - A source can hold several active tokens at once, so a token can be rotated without a gap

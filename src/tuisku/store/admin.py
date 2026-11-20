@@ -6,6 +6,7 @@ compared byte by byte in Python. Expiry and revocation are checked against the d
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -101,6 +102,97 @@ async def add_source_token(
     )
     assert row is not None
     return IssuedToken(uid=row["uid"], token=token)
+
+
+class EnsureConflict(Exception):
+    """``ensure_source`` found state it must not change. The message never contains a token."""
+
+
+@dataclass(frozen=True, slots=True)
+class EnsureResult:
+    source_created: bool
+    token_uid: UUID  # the token's uid, whether registered now or before
+    token_registered: bool
+
+
+def _canonical(value: Any) -> str:
+    # JSON equality, not Python's: true and 1, or 1 and 1.0, are different options.
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+async def ensure_source(
+    conn: AsyncConnection[Any],
+    name: str,
+    adapter: str,
+    options: Mapping[str, Any],
+    token: str,
+    *,
+    label: str | None = None,
+) -> EnsureResult:
+    """Make sure source ``name`` exists with exactly this adapter and options and that
+    ``token`` is one of its live tokens. Idempotent, and safe to run concurrently.
+
+    Creates the source if absent and registers the token (its SHA-256 only) if absent. Never
+    changes an existing source or token: a different adapter or options, a disabled source, or
+    a token that is revoked, expired or registered to another source raise
+    :class:`EnsureConflict`.
+    """
+    if not is_source_token(token):
+        raise ValueError("not a tsk_src_ token")
+    created = await db.fetch_one(
+        conn,
+        "INSERT INTO sources (name, adapter, adapter_options) VALUES (%s, %s, %s) "
+        "ON CONFLICT (name) DO NOTHING RETURNING id",
+        (name, adapter, Jsonb(dict(options))),
+    )
+    source = await db.fetch_one(
+        conn,
+        "SELECT id, adapter, adapter_options, disabled_at FROM sources WHERE name = %s",
+        (name,),
+    )
+    assert source is not None
+    if source["adapter"] != adapter:
+        raise EnsureConflict(
+            f"source {name!r} exists with adapter {source['adapter']!r}, not {adapter!r}; "
+            "it was not changed"
+        )
+    stored, wanted = dict(source["adapter_options"]), dict(options)
+    differ = sorted(
+        k
+        for k in stored.keys() | wanted.keys()
+        if k not in stored or k not in wanted or _canonical(stored[k]) != _canonical(wanted[k])
+    )
+    if differ:
+        raise EnsureConflict(
+            f"source {name!r} exists with different adapter options (keys: {', '.join(differ)}); "
+            "it was not changed"
+        )
+    if source["disabled_at"] is not None:
+        raise EnsureConflict(f"source {name!r} is disabled; its tokens do not authenticate")
+    digest = token_sha256(token)
+    inserted = await db.fetch_one(
+        conn,
+        "INSERT INTO source_tokens (source_id, token_sha256, label) VALUES (%s, %s, %s) "
+        "ON CONFLICT (token_sha256) DO NOTHING RETURNING uid",
+        (source["id"], digest, label),
+    )
+    if inserted is not None:
+        return EnsureResult(created is not None, inserted["uid"], token_registered=True)
+    existing = await db.fetch_one(
+        conn,
+        "SELECT uid, source_id, revoked_at IS NOT NULL AS revoked, "
+        "expires_at IS NOT NULL AND expires_at <= now() AS expired "
+        "FROM source_tokens WHERE token_sha256 = %s",
+        (digest,),
+    )
+    assert existing is not None
+    if existing["source_id"] != source["id"]:
+        raise EnsureConflict(f"the token is registered to another source, not {name!r}")
+    if existing["revoked"]:
+        raise EnsureConflict(f"the token {existing['uid']} was revoked; issue a new one")
+    if existing["expired"]:
+        raise EnsureConflict(f"the token {existing['uid']} has expired; issue a new one")
+    return EnsureResult(created is not None, existing["uid"], token_registered=False)
 
 
 async def list_source_tokens(conn: AsyncConnection[Any], source_name: str) -> list[dict[str, Any]]:

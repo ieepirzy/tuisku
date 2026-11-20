@@ -49,6 +49,8 @@ def create_app(settings: Settings | None = None, *, clock: Clock | None = None) 
         settings.ingest_rate_per_second, settings.ingest_rate_burst
     )
     app.state.refusals = RefusalCounter(settings.ingest_rate_breach_flush_seconds)
+    # Requests refused outright (400, 413): their meta-detections are batched the same way.
+    app.state.refused_breaches = RefusalCounter(settings.ingest_rate_breach_flush_seconds)
     # Bounded worker threads for adapters, so parsing never blocks the event loop.
     app.state.parse_limiter = anyio.CapacityLimiter(settings.ingest_parse_threads)
     app.include_router(ingest.router)
