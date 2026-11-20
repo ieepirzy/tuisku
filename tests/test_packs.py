@@ -24,10 +24,12 @@ from tests.worker_support import (
     fired,
     ingest,
     otlp_sum,
+    run_async,
     run_worker,
 )
 from tuisku.store.ingest import Transport
 from tuisku.worker import notify
+from tuisku.worker.export import ExportConfig, Exporter
 from tuisku.worker.notify import Backoff
 
 
@@ -85,6 +87,9 @@ def test_pack_fixture(
     rules = builtin_rules(params_file)
     records = [_record(r) for r in case["records"]]
     source = case["source"]
+    rejected = case.get("export_rejects")
+    if rejected is not None:  # export is on: the events are queued
+        query(fresh_database_url, "UPDATE export_state SET enabled = true RETURNING enabled")
     outcomes = ingest(
         fresh_database_url, "fixture", source["adapter"], records, source.get("options")
     )
@@ -109,6 +114,20 @@ def test_pack_fixture(
         notifier, backoff = Refusing(), Backoff(base_seconds=0, cap_seconds=0)
         for _ in range(notify.ALERT_AFTER_FAILURES + 2):
             run_worker(fresh_database_url, rules, clock, notifier, notify_backoff=backoff)
+    elif rejected is not None:
+        run_worker(fresh_database_url, rules, clock, **extra)
+        answer = json.dumps({"partialSuccess": {"rejectedLogRecords": rejected}}).encode()
+
+        async def sink(*args: Any) -> tuple[int, bytes]:
+            return 200, answer
+
+        exporter = Exporter(
+            ExportConfig(url="http://sink.invalid/v1/logs", pseudonym_key=b"k" * 16 + b"x" * 16),
+            post=sink,
+            clock=clock,
+        )
+        run_async(fresh_database_url, lambda conn: exporter.round(conn, timedelta(days=1)))
+        run_worker(fresh_database_url, rules, clock, **extra)
     elif failing is None:
         run_worker(fresh_database_url, rules, clock, **extra)
     else:

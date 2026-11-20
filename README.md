@@ -175,6 +175,42 @@ can only be lowered, `TUISKU_WORKER_EXPORT_INTERVAL_SECONDS` (60) and
 `TUISKU_WORKER_ALLOWED_LATENESS_SECONDS` (86400). A queued row or undelivered notification older
 than `TUISKU_WORKER_BACKLOG_SECONDS` (300) raises a `tuisku.meta.backlog` that pages at once.
 
+## Export to an append-only sink
+
+`tuisku worker` can export every finding and incident event (ADR 0012) at least once to an
+append-only store, over OTLP/HTTP JSON logs, typically through an OpenTelemetry Collector:
+
+- `TUISKU_EXPORT_ENQUEUE` (`unchanged`), for `tuisku migrate`: `on` makes the database enqueue
+  every event for export, `off` stops it, and `unchanged` leaves it as it is, so a migrate run
+  without the setting never turns export off. Export is off until a run with `on`.
+- `TUISKU_EXPORT_OTLP_LOGS_URL`, for `tuisku worker`: the full URL, e.g.
+  `http://collector:4318/v1/logs`, without credentials. Unset, the worker does not export.
+- `TUISKU_EXPORT_PSEUDONYM_KEY`: required with the URL; the HMAC-SHA-256 key for pseudonyms
+  (ADR 0008), generated randomly (e.g. `openssl rand -hex 32`). At least 32 characters, 8 of
+  them distinct, which guards against placeholders, not weak keys. Keep it away from the sink.
+- `TUISKU_EXPORT_PSEUDONYMIZE_ENTITY_KINDS` (`ip,caller,identity`): entity keys of these kinds
+  are exported as `<kind>:hmac:<hex>`. Add `host`, `k8s` and the like if the estate's names
+  identify people.
+- `TUISKU_EXPORT_OTLP_HEADERS_JSON`: optional extra request headers, a JSON object of strings
+  (e.g. `{"Authorization": "Bearer ..."}`), held as a secret; only with an `https://` URL.
+- `TUISKU_EXPORT_BATCH_SIZE` (100): records per request.
+- `TUISKU_EXPORT_TIMEOUT_SECONDS` (10): the bound on one request.
+
+Each event is one log record (`service.name=tuisku`, `service.version` the build revision,
+attributes `tuisku.stream` and `tuisku.record_uid`) whose body is a compact JSON
+`tuisku.export.v1` record: the event and the finding or incident as the event's transaction
+committed it. A triage reason or any other typed text is exported only as an HMAC and a length.
+The exporter runs beside evaluation on its own connection. A non-2xx or a timeout leaves the
+events queued and retries with backoff (5 s doubling to 5 minutes, per process); a 400 or 413
+halves the batch, and a record the sink refuses twice on its own, each time right after it
+accepted another record, is replaced by a stub; a sink that refuses everything keeps the queue
+and backs off. An event still queued after
+`TUISKU_WORKER_BACKLOG_SECONDS` raises a `tuisku.meta.backlog` (subject `export`). Records the
+sink refuses for good, and a worker that exports while the database does not enqueue, raise a
+`tuisku.meta.export_failed`; both page. Consumers deduplicate on `record_uid`. Before rolling
+back to an image without export, run `TUISKU_EXPORT_ENQUEUE=off tuisku migrate` (ADR 0012,
+"Rollback").
+
 ## Database roles
 
 Evidence tables are append-only (ADR 0004). Run `tuisku migrate` as the owning role, the API as
@@ -210,7 +246,10 @@ API's own counters, and `INSERT (observation_id, detection_id, enqueued_at)` on 
 only observations and detections inserted in the same transaction), plus `USAGE` on
 sequences. A trigger sets each raw record's `source_name` from `sources`, whatever the writer
 supplied. Only the worker role claims, updates or deletes queue rows, or touches
-`evaluation_dead_letter`. No `tuisku_*` database function is executable by PUBLIC. Only the
+`evaluation_dead_letter`. The export queue (`export_queue`, ADR 0012) is filled only by an owner
+trigger (`SECURITY DEFINER`) at the commit of each finding or incident event, while the
+owner-only `export_state` flag is on; the worker role has `SELECT` and `DELETE` on the queue and
+`SELECT` on the flag, and the API role has no privilege on either. No `tuisku_*` database function is executable by PUBLIC. Only the
 read-only helpers `tuisku_is_worker()`, `tuisku_xmin_is_current()` and
 `tuisku_current_bucket()` are granted to the runtime roles. Every trigger function refuses to
 run on any table but its own, and PUBLIC has no `TEMP` on the database, so no role can attach

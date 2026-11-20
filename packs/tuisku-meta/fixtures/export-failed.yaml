@@ -1,0 +1,18 @@
+# `export_rejects` turns export on, runs the worker, then one export round against a sink that
+# answers with an OTLP partial success rejecting that many records, then the worker again.
+rule: tuisku-meta.export_failed
+cases:
+  - name: records the sink rejects for good raise a meta-detection that pages
+    source: {adapter: harava}
+    export_rejects: 1
+    records:
+      - at: "2026-11-01T09:14:04Z"
+        raw: "2026-11-01 09:14:03,512 WARNING harava.api outbound data refused: caller=agents urls=1 findings=email/query/percent"
+    fires: [harava.agent_outbound_refused, tuisku-meta.export_failed]
+  - name: records the sink accepts raise nothing
+    source: {adapter: harava}
+    export_rejects: 0
+    records:
+      - at: "2026-11-01T09:14:04Z"
+        raw: "2026-11-01 09:14:03,512 WARNING harava.api outbound data refused: caller=agents urls=1 findings=email/query/percent"
+    fires: [harava.agent_outbound_refused]

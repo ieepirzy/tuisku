@@ -11,10 +11,11 @@ from pathlib import Path
 from psycopg import AsyncConnection
 
 from tuisku.adapters import builtin as _builtin_adapters  # noqa: F401  (registers adapters)
-from tuisku.config import Settings
+from tuisku.config import ConfigError, Settings
 from tuisku.rules.packs import RuleSet, load_rule_set
 from tuisku.worker import health
 from tuisku.worker.engine import Worker, WorkerConfig
+from tuisku.worker.export import ExportConfig, Exporter
 
 log = logging.getLogger(__name__)
 MAX_BACKOFF_SECONDS = 60.0
@@ -48,6 +49,29 @@ def worker_config(settings: Settings) -> WorkerConfig:
     )
 
 
+def exporter(settings: Settings) -> Exporter:
+    """The event exporter (ADR 0012). Always present: with export off it removes what was
+    queued while it was on, and with export on it needs the pseudonym key (ADR 0008)."""
+    url = settings.export_otlp_logs_url
+    key = settings.export_pseudonym_key
+    if url is not None and key is None:
+        raise ConfigError(
+            "TUISKU_EXPORT_PSEUDONYM_KEY is required with TUISKU_EXPORT_OTLP_LOGS_URL (ADR 0008)"
+        )
+    return Exporter(
+        ExportConfig(
+            url=url.get_secret_value() if url is not None else None,
+            pseudonym_key=key.get_secret_value().encode() if key is not None else b"",
+            pseudonymize_kinds=settings.export_pseudonymized_kinds,
+            headers=settings.export_headers,
+            batch_size=settings.export_batch_size,
+            timeout_seconds=settings.export_timeout_seconds,
+            build_revision=settings.build_revision,
+            statement_timeout_seconds=settings.worker_statement_timeout_seconds,
+        )
+    )
+
+
 def _system_clock() -> datetime:
     return datetime.now(UTC)
 
@@ -64,7 +88,16 @@ def run_worker(settings: Settings, *, once: bool = False, check_only: bool = Fal
         )
     if check_only:
         return 0
+    exp = exporter(settings)
     worker = Worker(rule_set=rule_set, clock=_system_clock, config=worker_config(settings))
+    if not exp.enabled:
+        log.info("event export off (TUISKU_EXPORT_OTLP_LOGS_URL unset)")
+    backlog_after = timedelta(seconds=settings.worker_backlog_seconds)
+
+    async def connect() -> AsyncConnection:
+        return await AsyncConnection.connect(
+            settings.require_database_url(), autocommit=True, connect_timeout=5
+        )
 
     async def main() -> None:
         server = None
@@ -75,9 +108,22 @@ def run_worker(settings: Settings, *, once: bool = False, check_only: bool = Fal
                 settings.worker_health_host,
                 settings.worker_health_port,
             )
+        # The exporter runs beside evaluation, on its own connection, so a slow sink never
+        # delays evaluation or paging (ADR 0012).
+        export_task = None
+        if not once:
+            export_task = asyncio.create_task(
+                exp.run_forever(connect, backlog_after, settings.worker_poll_seconds)
+            )
         try:
             await loop()
+            if once:
+                conn = await connect()
+                async with conn:
+                    await exp.round(conn, backlog_after)
         finally:
+            if export_task is not None:
+                export_task.cancel()
             if server is not None:
                 server.close()
 
