@@ -12,9 +12,12 @@ L0 provenance exact.
 The CHECK is widened, never narrowed: every value the previous release writes is still valid,
 so the previous image runs unchanged on this schema. Tyyni's allowlist still reads a dropped
 and re-added constraint as ``contract``, so this revision is declared ``expand_only = False``
-and a rollback across it escalates to a person. The new constraint is added ``NOT VALID`` and
-then validated, so the table is locked exclusively only for the catalogue change and the scan
-runs under a lock that lets ingest continue.
+and a rollback across it escalates to a person. Alembic runs the revision in one transaction
+(``transaction_per_migration``), so the ``ACCESS EXCLUSIVE`` lock taken by the ``DROP`` is held
+until the new constraint has been checked against every existing row: ingest waits for that
+scan of ``raw_records``. Tuisku has no deployment with a large ``raw_records`` yet, so the
+constraint is simply re-added (splitting ``NOT VALID`` and ``VALIDATE`` across transactions
+would shorten the lock, at the cost of a second revision).
 """
 
 from collections.abc import Sequence
@@ -36,9 +39,8 @@ def upgrade() -> None:
     op.execute("ALTER TABLE raw_records DROP CONSTRAINT raw_records_transport_check")
     op.execute(
         "ALTER TABLE raw_records ADD CONSTRAINT raw_records_transport_check "
-        "CHECK (transport IN ('ndjson', 'otlp_json', 'otlp_logs_json')) NOT VALID"
+        "CHECK (transport IN ('ndjson', 'otlp_json', 'otlp_logs_json'))"
     )
-    op.execute("ALTER TABLE raw_records VALIDATE CONSTRAINT raw_records_transport_check")
 
 
 def downgrade() -> None:
