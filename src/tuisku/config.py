@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Self
+from typing import Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -115,14 +115,17 @@ class Settings(BaseSettings):
     worker_deadman_url: SecretStr | None = None
 
     # Export of finding and incident events (ADR 0012): OTLP/HTTP JSON logs to this full URL
-    # (e.g. http://collector:4318/v1/logs). Unset: export is off. `tuisku migrate` also reads
-    # it: the database enqueues events only when the migration run had it set. Held as a
+    # (e.g. http://collector:4318/v1/logs). Unset: this worker does not export. Held as a
     # secret; userinfo is refused (send credentials as headers).
     export_otlp_logs_url: SecretStr | None = None
+    # What `tuisku migrate` does with the database's enqueue flag (ADR 0012): turn it on, turn it
+    # off, or leave it as it is (the default, so a missing setting never turns export off).
+    export_enqueue: Literal["on", "off", "unchanged"] = "unchanged"
     # Extra request headers, a JSON object of strings (e.g. an Authorization header). Only
     # with an https:// URL: a secret is never sent in clear text.
     export_otlp_headers_json: SecretStr | None = None
-    # HMAC-SHA-256 key for pseudonyms (ADR 0008): required to export; at least 32 characters.
+    # HMAC-SHA-256 key for pseudonyms (ADR 0008): required to export. At least 32 characters,
+    # 8 of them distinct: a guard against a placeholder or a typo, not a strength check.
     export_pseudonym_key: SecretStr | None = None
     export_batch_size: int = Field(default=100, ge=1, le=10_000)
     export_timeout_seconds: float = Field(default=10.0, gt=0, le=300)
@@ -167,8 +170,8 @@ class Settings(BaseSettings):
         if value is None or not value.get_secret_value():
             return None
         key = value.get_secret_value()
-        if len(key.encode()) < 32 or len(set(key)) < 8:
-            raise ValueError("must be at least 32 characters of random data")
+        if len(key) < 32 or len(set(key)) < 8:
+            raise ValueError("must be at least 32 characters, at least 8 of them distinct")
         return value
 
     @field_validator("export_pseudonymize_entity_kinds")

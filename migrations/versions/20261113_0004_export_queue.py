@@ -20,8 +20,8 @@ make a record unencodable. The trigger only reads and inserts; it never raises o
 so export can never block evaluation or triage.
 
 Enqueueing is gated by ``export_state.enabled``, which only the owner writes: ``tuisku migrate``
-sets it from whether an export URL is configured (ADR 0012). Disabled, the default, the trigger
-writes nothing.
+sets it when asked (``TUISKU_EXPORT_ENQUEUE=on|off``) and otherwise leaves it (ADR 0012). Off,
+the default, the trigger writes nothing.
 
 The queue is a working table, not evidence: the evidence stays in the event tables. The worker
 role gets ``SELECT`` and ``DELETE`` on it and ``SELECT`` on ``export_state``; exporters take
@@ -213,6 +213,8 @@ BEGIN
         RAISE EXCEPTION '% used out of place (ADR 0011)', TG_NAME
             USING ERRCODE = 'insufficient_privilege';
     END IF;
+    -- isfinite() is redundant with the bounds ('-infinity' fails > now(), 'infinity' fails
+    -- tuisku_apply_triage's 30-day bound); it is kept so this check alone refuses both.
     IF NEW.suppressed_until IS NOT NULL
        AND NOT (isfinite(NEW.suppressed_until) AND NEW.suppressed_until > now()) THEN
         RAISE EXCEPTION 'suppression expiry must be in the future and within 30 days of when '

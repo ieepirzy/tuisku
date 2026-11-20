@@ -90,9 +90,9 @@ def migration_lock(conn: Connection, settings: Settings) -> Iterator[None]:
 
 
 def set_export_state(conn: Connection, *, enabled: bool) -> None:
-    """Whether the database enqueues finding and incident events for export (ADR 0012): on
-    when this migration run has an export URL configured. Only the owner writes it, on every
-    run, so it follows the deployment's configuration. Skipped before the export revision."""
+    """Whether the database enqueues finding and incident events for export (ADR 0012). Only
+    the owner writes it, and only when the run asks (TUISKU_EXPORT_ENQUEUE=on|off): a run
+    without the setting leaves it as it is. Skipped before the export revision."""
     exists = conn.execute(text("SELECT to_regclass('public.export_state') IS NOT NULL")).scalar()
     if not exists:
         return
@@ -127,7 +127,8 @@ def run_migrations(settings: Settings, revision: str = "head") -> None:
                 "idle_in_transaction_seconds": settings.app_role_idle_in_transaction_seconds,
             }
             command.upgrade(cfg, revision)
-            set_export_state(conn, enabled=settings.export_otlp_logs_url is not None)
+            if settings.export_enqueue != "unchanged":
+                set_export_state(conn, enabled=settings.export_enqueue == "on")
             conn.commit()
     finally:
         engine.dispose()
