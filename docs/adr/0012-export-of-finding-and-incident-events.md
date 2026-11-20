@@ -222,14 +222,22 @@ worker's health.
   queue is empty. Persistent failure pages through the backlog check.
 - **A 400 or 413** means the sink refuses the content, so resending it unchanged cannot help:
   the batch is halved, down to one record. A record refused on its own is the record's fault
-  only if the sink still accepts others: a real batch accepted since the last failure, or else
-  the next record, sent alone as a probe. Then a stub that names the record replaces it,
-  `tuisku.meta.export_failed` (subject `refused`, with a running count) pages, every isolated
-  record is logged at error level, and the rows behind it go on. One isolation needs one proof:
-  a sink that accepts stubs but no real records cannot turn the queue into stubs. A refused
-  probe or stub, or a refused record with nothing else queued, means the sink is at fault: every
-  row is kept and delivery backs off like any other failure. No row is dropped because the sink
-  refuses it.
+  only if the sink accepts others, shown right then:
+  - up to 4 other queued records are sent alone as probes, smallest first, and the first one
+    accepted is delivered. Smallest first because a body-size limit (413) refuses big records,
+    and the events of one transaction are adjacent in the queue and share one big snapshot, so
+    the next records by id are often refused for the same reason;
+  - the record is then resent alone. Accepted, it is delivered (the sink was flaky: one replica
+    of a fleet answering 400 must not turn sound records into stubs). Refused again, the proof
+    and the resend are repeated once;
+  - refused twice, each time right after the sink accepted another record, it is replaced by a
+    stub that names it. `tuisku.meta.export_failed` (subject `refused`, with a running count)
+    pages, every isolated record is logged at error level, and the rows behind it go on.
+
+  If none of the probes is accepted, if nothing else is queued, or if the stub is refused (a
+  stub for an unencodable record included), the sink is at fault: every row is kept and delivery
+  backs off like any other failure. A sink that refuses everything costs at most 8 requests (the
+  halvings and 4 probes) before the backoff. No row is dropped because the sink refuses it.
 - **OTLP partial success** (`partialSuccess.rejectedLogRecords` in a 2xx answer) is not retried,
   as OTLP requires: the sink refused those records for good, and the response does not say
   which. The batch's rows are deleted, and `tuisku.meta.export_failed` (subject
@@ -247,8 +255,8 @@ worker's health.
 
 So the guarantee is at least once for every event the database enqueued, **except** records
 that the sink itself refuses for good: those of a partial success (deleted, since the response
-does not say which), and a record the sink refuses on its own while accepting others (replaced by
-a stub that names it). Those are lost to the sink, never silently: each loss pages, and the
+does not say which), and a record the sink refuses twice on its own while accepting others
+(replaced by a stub that names it). Those are lost to the sink, never silently: each loss pages, and the
 events stay in the database. A sink that refuses everything loses nothing; the queue waits and
 the backlog pages.
 
@@ -286,8 +294,8 @@ discards or exports them.
   pseudonymised under its own key.
 - With export on, each event write costs one queue insert at commit; with it off, nothing. The
   queue is a working table that the worker empties.
-- Records arrive at least once and roughly in commit order, not in event order: consumers
-  deduplicate on `record_uid` and order by `event.at`.
+- Records arrive at least once and roughly in commit order, not in event order (a probe is
+  delivered out of turn): consumers deduplicate on `record_uid` and order by `event.at`.
 - The sink's own durability (retention lock, replication) is the deployment's to configure;
   Tuisku's guarantee ends at the 2xx.
 - Turning export on takes two settings in two places: `TUISKU_EXPORT_ENQUEUE=on` for

@@ -202,8 +202,9 @@ attributes `tuisku.stream` and `tuisku.record_uid`) whose body is a compact JSON
 committed it. A triage reason or any other typed text is exported only as an HMAC and a length.
 The exporter runs beside evaluation on its own connection. A non-2xx or a timeout leaves the
 events queued and retries with backoff (5 s doubling to 5 minutes, per process); a 400 or 413
-halves the batch, and a record the sink refuses on its own while it accepts others is replaced
-by a stub; a sink that refuses everything keeps the queue and backs off. An event still queued after
+halves the batch, and a record the sink refuses twice on its own, each time right after it
+accepted another record, is replaced by a stub; a sink that refuses everything keeps the queue
+and backs off. An event still queued after
 `TUISKU_WORKER_BACKLOG_SECONDS` raises a `tuisku.meta.backlog` (subject `export`). Records the
 sink refuses for good, and a worker that exports while the database does not enqueue, raise a
 `tuisku.meta.export_failed`; both page. Consumers deduplicate on `record_uid`. Before rolling
