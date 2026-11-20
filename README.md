@@ -114,9 +114,9 @@ each delivery or notifier failure appends to the append-only `notification_deliv
 one failing notification never blocks the others and none can be deleted unnoticed. A failed
 delivery is retried after an exponential backoff from its last failure (5 s doubling, capped
 at 5 minutes) and never dropped; after 10 failures a `tuisku.meta.notification_undeliverable`
-meta-detection pages through `tuisku-meta` (route it to another channel). The only
-notifier today writes one JSON line per notification to the `tuisku.notify` logger; routing
-them to people is a deployment decision. A rule that fails 5 times on a row is dead-lettered and
+meta-detection pages through `tuisku-meta` (route it to another channel). Every notification
+is written as one JSON line to the `tuisku.notify` logger; which receivers page whom is a
+deployment decision. A rule that fails 5 times on a row is dead-lettered and
 pages (`evaluation_dead_lettered`), and `tuisku-meta` turns the resulting
 `tuisku.meta.evaluation_failed` meta-detections into a finding that pages on every occurrence.
 
@@ -135,6 +135,46 @@ Worker settings: `TUISKU_WORKER_BATCH_SIZE`, `TUISKU_WORKER_LEASE_SECONDS` (120)
 can only be lowered, `TUISKU_WORKER_EXPORT_INTERVAL_SECONDS` (60) and
 `TUISKU_WORKER_ALLOWED_LATENESS_SECONDS` (86400). A queued row or undelivered notification older
 than `TUISKU_WORKER_BACKLOG_SECONDS` (300) raises a `tuisku.meta.backlog` that pages at once.
+
+### Notifications to Alertmanager
+
+Set `TUISKU_NOTIFY_ALERTMANAGER_URL` to an Alertmanager base URL (`http://alertmanager:9093`)
+and the worker also POSTs each notification, as one alert per request, to
+`<url>/api/v2/alerts`, still logging it. Credentials in the URL (`https://user:password@...`,
+sent as basic auth) are accepted only with https. The URL must be printable ASCII; it is a
+secret and is never logged. Environment proxies (`HTTP_PROXY` and the like) are not used.
+Unset (the default), only the log is written.
+
+- **Labels:** `alertname="TuiskuNotification"`, `source="tuisku"`, `tuisku_kind` (e.g.
+  `finding_opened`, `incident_escalated`, `tuisku_backlog`), `severity`, `notification_uid`,
+  `meta` (`"true"` for pages about Tuisku itself), plus the static labels in
+  `TUISKU_NOTIFY_ALERTMANAGER_LABELS_JSON` (a JSON object of strings, e.g.
+  `{"team":"security"}`; checked at startup: names may not start with `__`, values may not be
+  blank, and it cannot override these labels).
+- **`severity`** is the OCSF `severity_id` caption, lowercased: 0 `unknown`, 1 `informational`,
+  2 `low`, 3 `medium`, 4 `high`, 5 `critical`, 6 `fatal`, 99 `other`.
+- **Annotations:** `summary` is the rule or meta-detection title; `description` lists ids only
+  (`kind`, `notification_uid`, `severity_id`, `finding_uid`, `incident_uid`, `detection_uid`,
+  `rule`, ...), with no links. `startsAt` is when the notification was created; `endsAt` and
+  `generatorURL` are not sent, so Alertmanager resolves the alert after its `resolve_timeout`.
+- **No entity keys or telemetry values** are sent, because the receiver may be an outside
+  service. `TUISKU_NOTIFY_ALERTMANAGER_INCLUDE_ENTITIES=true` adds them as an `entity_keys`
+  annotation (never as labels): a JSON array of at most 32 keys, each cut to 256 characters
+  with control characters removed. The keys come from telemetry, so receiver templates must
+  treat them as untrusted text (escape them; never render them as links or markup).
+- **Delivery:** a 2xx is delivered; anything else, or a timeout
+  (`TUISKU_NOTIFY_ALERTMANAGER_TIMEOUT_SECONDS`, default 5, the total for one request), is a
+  failed delivery with the usual backoff and `notification_undeliverable` page. Redirects are
+  not followed. Only 400 and 422 refuse a single alert. A timeout, a connection error, a 3xx,
+  401, 403, 404, 405, 408, 413, 429 or a 5xx means Alertmanager is down for every alert: the
+  pass stops there and the other due notifications wait for the next pass, so an outage costs
+  one timeout per pass. A drain also starts no new delivery once
+  `TUISKU_NOTIFY_DRAIN_BUDGET_SECONDS` (default 10) are spent. The drain holds up evaluation
+  while it runs, so these bound that delay to about the budget plus one timeout. The call
+  runs off the event loop. If Alertmanager is the only route
+  for pages, the `notification_undeliverable` page goes the same way: watch the worker's health
+  listener or dead-man's switch from outside, since both report unhealthy once undelivered
+  notifications pass `TUISKU_WORKER_BACKLOG_SECONDS`.
 
 ## Database roles
 
