@@ -1,6 +1,6 @@
 # 0012. Export of finding and incident events to an append-only sink
 
-Status: Accepted (2026-11-13)
+Status: Accepted (2026-11-13; revised 2026-11-20 after review)
 
 ## Context
 
@@ -12,8 +12,12 @@ and what operators did about it. Deployments that keep an audit trail want a cop
 event in a store Tuisku cannot change or delete afterwards, such as object storage with a
 retention lock, written through a log pipeline they already run.
 
-That destination may have to hold no personal data at all. Finding and incident events carry
-some: entity keys such as user names, and free text an operator typed (a triage reason).
+Such a store is immutable, so whatever personal data reaches it stays for its whole retention.
+Finding and incident events carry some: entity keys built from telemetry (IP addresses, caller
+and identity names) and free text an operator typed (a triage reason).
+[0008](0008-identifiers-and-interchange.md) already decides how exports treat that: "IP,
+identity and caller entity keys are pseudonymised by default", as HMAC-SHA-256 under a
+deployment-held key with the type prefix kept (`ip:hmac:…`).
 
 The usual transport for such a pipeline is OpenTelemetry: an OpenTelemetry Collector with an
 OTLP/HTTP logs receiver, processors, and an exporter to the store.
@@ -22,12 +26,33 @@ OTLP/HTTP logs receiver, processors, and an exporter to the store.
 
 ### What is exported
 
-Every row of `finding_events` and `incident_events` committed after revision 0004, once each
-and at least once, as one OTLP log record over OTLP/HTTP JSON to
-`TUISKU_EXPORT_OTLP_LOGS_URL` (a full URL, such as `http://collector:4318/v1/logs`). Events
-committed before the migration are not backfilled: a backfill is a data migration, and with
-export disabled by default it would only be discarded. A deployment that needs them reads them
-from the database.
+While export is on, every row of `finding_events` and `incident_events` is exported at least
+once, as one OTLP log record over OTLP/HTTP JSON to `TUISKU_EXPORT_OTLP_LOGS_URL` (a full URL,
+such as `http://collector:4318/v1/logs`). Events committed while export is off, or before
+revision 0004, are not exported: a backfill is a data migration, and a deployment that needs
+older events reads them from the database.
+
+### On and off: a flag the owner sets
+
+Whether events are enqueued is decided in the database, by the one-row table `export_state`,
+which only the owner writes. `tuisku migrate` sets it on every run: on when its environment has
+`TUISKU_EXPORT_OTLP_LOGS_URL`, off otherwise. Off is the default, and then the trigger writes
+nothing, so a deployment without export pays no queue writes and no vacuum churn.
+
+The flag lives in the database, not in the worker's settings, because only the database can
+make the decision in the same transaction as the event, and the worker role should not hold a
+grant to change it. The two can disagree, and both directions are caught:
+
+- **The worker exports, the database does not enqueue** (migrate ran without the URL): the
+  worker raises `tuisku.meta.export_failed` (subject `not_enqueued`), which pages, and logs the
+  remedy.
+- **The database enqueues, a worker does not export** (no URL on that replica, or a rollback):
+  that worker leaves the queue alone, because another replica may be exporting, and once a row is
+  older than `TUISKU_WORKER_BACKLOG_SECONDS` the backlog check pages (`tuisku.meta.backlog`,
+  subject `export`). It never discards what is meant to be exported.
+
+With export off in both places, a worker deletes rows left from when it was on (at most 1000 per
+round) and nothing pages.
 
 ### A queue filled by trigger, not an id cursor
 
@@ -44,30 +69,35 @@ it stays until it has been acknowledged; the order in which transactions commit 
 matter (`tests/test_export.py` commits a lower id late and checks it is still sent).
 
 The trigger is a deferred constraint trigger (`DEFERRABLE INITIALLY DEFERRED`), so it runs at
-commit. Each queue row holds a snapshot (`state`) of the finding or incident as the event's
-transaction committed it. Tuisku often writes the event just before the update it records, so
-an immediate trigger would snapshot the state before the change. A transaction that writes
-several events for the same finding gives each of them the same, final snapshot. A session may
-`SET CONSTRAINTS ... IMMEDIATE`; that only moves the snapshot earlier, the event is still
-enqueued. The snapshot also makes a resend byte-for-byte the same record.
+commit. Each queue row holds the event (`event`) and a snapshot (`state`) of the finding or
+incident as the event's transaction committed them. Tuisku often writes the event just before
+the update it records, so an immediate trigger would snapshot the state before the change. A
+transaction that writes several events for the same finding gives each of them the same, final
+snapshot. A session may `SET CONSTRAINTS ... IMMEDIATE`; that only moves the snapshot earlier,
+the event is still enqueued. The snapshot also makes a resend byte-for-byte the same record.
 
-The trigger only reads and inserts, and falls back to an empty snapshot rather than raising, so
-export can never block evaluation or triage.
+The database renders every time in the snapshot as RFC 3339 UTC text
+(`tuisku_export_time()`), whatever the session's `TimeZone`; a value outside what RFC 3339 or
+Python can hold (`-infinity`, a BC date) is carried as text (`-infinity`, `... BC`). The
+exporter never parses a time, so no stored value can make a record unencodable. The trigger only
+reads and inserts, and falls back to an empty snapshot rather than raising, so export can never
+block evaluation or triage.
 
 ### Roles
 
 The queue is a working table, not evidence: the evidence stays in the event tables, which are
 append-only. Within the role model of [0011](0011-separate-worker-database-role.md):
 
-- The API role gets nothing on the queue: no `SELECT`, `INSERT`, `DELETE` or lock. Its triage
-  events are enqueued by the owner trigger.
-- The worker role gets `SELECT` and `DELETE` on the queue and nothing else: no `INSERT`,
-  `UPDATE`, `TRUNCATE` or sequence. Delivery backoff therefore lives in the worker's memory.
-  Exporters serialize on a row of the existing worker-only `worker_locks` table (`export`), as
-  the notification drain does.
-- The trigger function `tuisku_enqueue_export()` is owned by the migrating role, refuses to
-  run on any table but `finding_events` and `incident_events`, and PUBLIC has no `EXECUTE` on
-  it.
+- The API role gets nothing on the queue or on `export_state`: no `SELECT`, `INSERT`, `DELETE`
+  or lock. Its triage events are enqueued by the owner trigger.
+- The worker role gets `SELECT` and `DELETE` on the queue and `SELECT` on `export_state`, and
+  nothing else: no `INSERT`, `UPDATE`, `TRUNCATE` or sequence. Delivery backoff therefore lives
+  in the worker's memory. Exporters take turns through a lease on the existing worker-only
+  `worker_locks` row `export` (two new nullable columns, `holder` and `lease_until`; the row is
+  seeded by the migration), which the worker could already update.
+- The functions `tuisku_enqueue_export()`, `tuisku_export_time()` and
+  `tuisku_check_triage_expiry()` are owned by the migrating role; PUBLIC and the runtime roles
+  have no `EXECUTE` on them. The two trigger functions refuse to run on any table but their own.
 
 A compromised worker can delete queue rows unsent. It can already forge rule output (0011);
 the events themselves stay in the database, and the sink's consumers can compare the event
@@ -81,10 +111,11 @@ The OTLP log record's `body.stringValue` is one compact JSON object (keys sorted
 {"schema": "tuisku.export.v1", "record_uid": "<event uid>", "stream": "finding",
  "event": {"uid": "...", "at": "2026-11-01T09:30:00.123456Z", "actor": "rule:<id>@<rev>",
            "kind": "opened", "old_value": null, "new_value": {"status": "open", "severity_id": 4},
-           "payload": {"detection_uid": "..."}, "reason_sha256": null, "reason_length": null},
+           "payload": {"detection_uid": "..."}, "reason_hmac": null, "reason_length": null},
  "finding": {"uid": "...", "rule_id": "...", "rule_rev": 1, "rule_name": "...", "pack_id": "...",
              "pack_version": "...", "pack_sha256": "...", "overflow": false, "title": "...",
-             "severity_id": 4, "status": "open", "count": 1, "entity_keys": ["..."],
+             "severity_id": 4, "status": "open", "count": 1,
+             "entity_keys": ["caller:hmac:<hex>", "host:node-a"],
              "first_seen_at": "...", "last_seen_at": "...", "suppressed_until": null,
              "incident_uid": "...", "updated_at": "..."},
  "exporter": {"service": "tuisku", "build_revision": "<TUISKU_BUILD_REVISION>"}}
@@ -95,25 +126,47 @@ An incident event has `"stream": "incident"` and an `incident` object instead: `
 `finding_count`, `opened_at`, `updated_at`, `previous_incident_uid`. Incident events have no
 old or new values (`null`). `record_uid` is the event's uid: consumers deduplicate on it.
 
-**No personal data by construction:**
+A row that still cannot be encoded, or that the sink refuses on its own, is sent as a **stub**
+in its place: `schema`, `record_uid`, `stream`, `error` (`unencodable: <type>` or
+`refused: HTTP <status>`), `event` (`uid`, `at`, `kind`) and `exporter`. The gap is then visible
+in the sink as well as paged.
 
+### Personal data: pseudonymised, not removed
+
+Export needs `TUISKU_EXPORT_PSEUDONYM_KEY`, a secret of at least 32 characters (and at least 8
+distinct ones) that the deployment holds; the worker refuses to start with an export URL and no
+key. Under that key, as ADR 0008 decides:
+
+- **Entity keys** whose kind (the part before the first `:`) is in
+  `TUISKU_EXPORT_PSEUDONYMIZE_ENTITY_KINDS` (default `ip,caller,identity`) become
+  `<kind>:hmac:<hex HMAC-SHA-256 of the value after the first ':'>`. Without the key, an address
+  cannot be recovered by enumerating the IPv4 space, as an unsalted SHA-256 could be. With it,
+  the same value gives the same pseudonym, so correlation inside the estate still works.
+- **Kinds left raw by default:**
+  - `host`, `k8s`, `k8s-ns` and `image` name the estate's own machines, workloads and images,
+    which an audit trail needs readable to be useful;
+  - `process` (`<host>/<pid>/<start>`) names nothing beyond its host;
+  - `domain`, `sha256` and the like are indicators, not people.
+
+  A deployment whose naming carries people (a pod or host per user, for example) adds those
+  kinds to the setting.
 - **Free text a person typed is never exported raw.** An event's reason (the `reason` column of
-  a finding event, `payload.reason` of an incident event) becomes `reason_sha256` (hex SHA-256 of
-  its UTF-8) and `reason_length` (in characters). In payloads and old or new values, only keys
-  known to hold structured values (ids, enums, numbers, times; the list is `STRUCTURED_KEYS` in
+  a finding event, `payload.reason` of an incident event) becomes `reason_hmac` (the same HMAC)
+  and `reason_length` (in characters). In payloads and old or new values, only keys known to
+  hold structured values (ids, enums, numbers, times; the list is `STRUCTURED_KEYS` in
   `tuisku.worker.export`) pass as they are. Any other key's text or nested value becomes
-  `{"sha256": ..., "length": ...}`, so a field added later (an operator note, L4 text) cannot
+  `{"hmac": ..., "length": ...}`, so a field added later (an operator note, L4 text) cannot
   leak until it is reviewed and listed.
-- **Entity keys** are telemetry-derived. Keys whose kind (the part before the first `:`) is in
-  `TUISKU_EXPORT_REDACT_ENTITY_KINDS` (default `user,email`) become
-  `<kind>:sha256:<hex of the value>`. This is pseudonymization, not anonymization: an unsalted
-  hash of a guessable value can be reversed by guessing. A deployment whose store must hold no
-  identifiers at all lists more kinds (`ip`, `host`, `caller`, ...).
 - **Titles** come from rule packs (the rule's title, or `Overflow: <title>`), never from
   telemetry: rules have no templating (0006).
 - Left out entirely: `group_values` and `explanation` (telemetry-derived values), a finding's
-  `suppression_reason` (typed text; its event carries the digest), L0 bodies and any
-  observation or detection content.
+  `suppression_reason` (typed text; its event carries the HMAC), L0 bodies and any observation
+  or detection content.
+
+So the sink holds pseudonymous personal data, not none: whoever holds the key can test a guess
+(is this pseudonym `ip:192.0.2.1`?), and the kinds left raw are only as impersonal as the
+estate's naming. The key must be kept apart from the sink, and rotating it breaks correlation
+across the rotation.
 
 ### The OTLP envelope
 
@@ -121,7 +174,7 @@ One `ExportLogsServiceRequest` per batch: one `resourceLogs` whose resource attr
 `service.name = tuisku` and `service.version = <build revision>`, one `scopeLogs` (scope
 `tuisku.export`), and one `logRecord` per event:
 
-- `timeUnixNano`: the event's `at`;
+- `timeUnixNano`: the event's `at` (computed by the database; `0` if out of range);
 - `severityNumber` and `severityText`, from the finding's or incident's `severity_id`:
 
   | severity_id | severityText | severityNumber |
@@ -140,46 +193,82 @@ One `ExportLogsServiceRequest` per batch: one `resourceLogs` whose resource attr
 
 ### Delivery
 
-The export runs in the worker loop as one step after the notification drain:
+The exporter is an asyncio task of `tuisku worker` with a database connection of its own, beside
+the evaluation loop, so a slow sink never delays evaluation, the notification drain or the
+worker's health.
 
-- **Bounded:** at most one batch (`TUISKU_EXPORT_BATCH_SIZE`, 100) per pass, one POST, bounded in
-  total by `TUISKU_EXPORT_TIMEOUT_SECONDS` (10). The POST runs in a thread, off the event loop;
-  a thread that overruns is abandoned and ends at its socket timeout.
-- **Isolated:** any error in the step is logged and backs off; it never stops evaluation or the
-  drain. Lock and statement timeouts skip the step like any other (0011).
-- **At least once:** rows are deleted only after a 2xx, in the transaction that read them. A
-  non-2xx, a timeout, a connection error or a redirect leaves them queued, and the next try waits
-  5 s, doubling to at most 5 minutes. A crash between the POST and the delete sends the batch
-  again; the records are identical.
-- An OTLP partial success (`partialSuccess.rejectedLogRecords` in a 2xx answer) is not retried,
-  as OTLP requires: the sink refused those records for good. It is logged as an error.
+- **Rounds and the lease:** a round takes the `export` lease (`timeout + 30 s`, renewed after
+  every batch, released at the end), then sends batches of `TUISKU_EXPORT_BATCH_SIZE` (100)
+  until the queue is empty or 30 s have passed, and starts the next round at once while rows
+  remain. Each request is bounded by `TUISKU_EXPORT_TIMEOUT_SECONDS` (10) and runs in a thread,
+  off the event loop. No transaction is open during a request: the batch is read, posted, and
+  then deleted in a statement of its own. A holder that dies loses the lease when it expires.
+- **At least once:** rows are deleted only after a 2xx. A crash between the POST and the delete,
+  or a lease that expires mid-request, sends the batch again; the records are identical.
+- **Failures:** a 5xx, 429, 401, 403, 404 or other non-2xx, a timeout, a connection error or a
+  redirect leaves the rows queued. The next try waits 5 s, doubling to at most 5 minutes. The
+  backoff is in the process's memory: it starts from zero after a restart, and resets once the
+  queue is empty. Persistent failure pages through the backlog check.
+- **A 400 or 413** means the sink refuses the content, so resending it cannot help: the batch is
+  halved, down to one record. A record still refused on its own is replaced by a stub; if the
+  stub is refused too, the row is dropped. Either way `tuisku.meta.export_failed` (subject
+  `refused`) pages, and the rows behind it go on.
+- **OTLP partial success** (`partialSuccess.rejectedLogRecords` in a 2xx answer) is not retried,
+  as OTLP requires: the sink refused those records for good, and the response does not say
+  which. The batch's rows are deleted, and `tuisku.meta.export_failed` (subject
+  `partial_success`, with the count) pages.
 - **Backlog:** an export row older than `TUISKU_WORKER_BACKLOG_SECONDS` (by the database clock,
   which set `enqueued_at`) raises the existing `tuisku.meta.backlog` meta-detection with subject
   `export`. It pages at once through the owner trigger `tuisku_page_backlog`, and the
-  `tuisku-meta` backlog rule groups it by subject, as for the evaluation queue and the outbox.
-  The database's allowlists need no change: they restrict the API role's meta kinds, and
-  `backlog` is the worker's.
+  `tuisku-meta` backlog rule groups it by subject.
+- **`tuisku.meta.export_failed`** is a worker meta kind like `backlog`: one per subject and
+  5-minute bucket, written by the worker. Its details carry the first occurrence in the bucket
+  (the count, the queue id), and later ones in the same bucket are only logged. The
+  `tuisku-meta` pack's `export_failed` rule pages on every one. The database's meta allowlists
+  need no change: they restrict the API role's own ingest kinds, and the worker may write any
+  `tuisku.meta.*` kind.
 
-### Export disabled
+So the guarantee is at least once for every event the database enqueued, **except** records
+that the sink itself refuses for good (a partial success, or a record and its stub both
+refused). Those are lost to the sink, never silently: each loss pages, and the events stay in
+the database.
 
-`TUISKU_EXPORT_OTLP_LOGS_URL` unset (the default) disables export. The triggers still enqueue,
-because the database cannot know the worker's settings without a grant the worker should not
-have. The worker discards queued rows older than `TUISKU_WORKER_BACKLOG_SECONDS`, at most 1000
-per pass, and never runs the export backlog check. So the queue holds at most a few minutes of
-events, and nothing pages. Rows younger than that are left alone, so during a rollout a replica
-with export enabled still sends them. Every worker replica must have the same export settings:
-a disabled replica discards what an enabled one could not send within the backlog limit.
+### Transport
+
+- The URL must not carry credentials (urllib cannot use them, and they would reach name
+  resolution): a sink that needs one gets it as a header from
+  `TUISKU_EXPORT_OTLP_HEADERS_JSON` (a JSON object of strings, held as a secret). Headers are
+  refused with an `http://` URL, so a secret never travels in clear text; an in-cluster sink
+  reached over plain HTTP relies on network policy instead.
+- Environment proxies (`HTTP_PROXY` and the like) are ignored: records go straight to the sink.
+- Redirects are failures, so records never go anywhere but the configured URL.
+
+### Triage cannot store a suppression that never ends
+
+Review found that triage checked only the upper bound of a suppression's expiry, so the API
+role, with an operator secret it had seen, could suppress until `-infinity`. Revision 0004 adds a
+`BEFORE INSERT` check on `triage_requests` (`tuisku_check_triage_expiry()`): the expiry must be
+a finite time after the database's `now()`. `tuisku_apply_triage` from revision 0002 is left as
+it is, with every check it has; the API already checks the same bounds with its own clock.
+
+### Rollback
+
+Revision 0004 is not expand-only by the convention, so an automatic rollback across it is refused
+and a person decides. An image from before export does not drain the queue and does not know to
+page about it. Before rolling back to such an image with export on, turn export off: run
+`tuisku migrate` from the current image without `TUISKU_EXPORT_OTLP_LOGS_URL`, which clears the
+flag, so the triggers stop writing. Rows already queued then wait, bounded, until a newer worker
+discards or exports them.
 
 ## Consequences
 
 - A deployment gets a copy of every finding and incident event outside Tuisku's database,
-  through a pipeline it already operates, with no personal data unless it chooses to keep some
-  entity kinds.
-- Each event write costs one queue insert at commit. The queue is a working table that the
-  worker empties.
+  through a pipeline it already operates, with IPs, callers, identities and typed text
+  pseudonymised under its own key.
+- With export on, each event write costs one queue insert at commit; with it off, nothing. The
+  queue is a working table that the worker empties.
 - Records arrive at least once and roughly in commit order, not in event order: consumers
   deduplicate on `record_uid` and order by `event.at`.
 - The sink's own durability (retention lock, replication) is the deployment's to configure;
   Tuisku's guarantee ends at the 2xx.
-- Revision 0004 adds a trigger function, triggers on existing tables and grants, so it is not
-  expand-only by the migration-safety convention, although an older image runs unchanged on it.
+- `tuisku migrate` needs the export URL in its environment whenever the worker has it.

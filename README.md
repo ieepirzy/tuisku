@@ -171,22 +171,31 @@ than `TUISKU_WORKER_BACKLOG_SECONDS` (300) raises a `tuisku.meta.backlog` that p
 `tuisku worker` can export every finding and incident event (ADR 0012) at least once to an
 append-only store, over OTLP/HTTP JSON logs, typically through an OpenTelemetry Collector:
 
-- `TUISKU_EXPORT_OTLP_LOGS_URL`: the full URL, e.g. `http://collector:4318/v1/logs`. Unset (the
-  default), export is disabled: the worker discards queued events older than
-  `TUISKU_WORKER_BACKLOG_SECONDS` and nothing pages. Give every worker replica the same setting.
-- `TUISKU_EXPORT_BATCH_SIZE` (100): records per POST; one POST per worker pass.
-- `TUISKU_EXPORT_TIMEOUT_SECONDS` (10): the bound on one POST.
-- `TUISKU_EXPORT_REDACT_ENTITY_KINDS` (`user,email`): entity keys of these kinds are exported as
-  `<kind>:sha256:<hex of the value>`.
+- `TUISKU_EXPORT_OTLP_LOGS_URL`: the full URL, e.g. `http://collector:4318/v1/logs`, without
+  credentials. Give it to `tuisku migrate` too: the migration run turns enqueueing on in the
+  database when it has the URL and off when it does not. Unset everywhere (the default), export
+  is off and costs nothing.
+- `TUISKU_EXPORT_PSEUDONYM_KEY`: required with the URL. A secret of at least 32 random
+  characters; the HMAC-SHA-256 key for pseudonyms (ADR 0008). Keep it away from the sink.
+- `TUISKU_EXPORT_PSEUDONYMIZE_ENTITY_KINDS` (`ip,caller,identity`): entity keys of these kinds
+  are exported as `<kind>:hmac:<hex>`. Add `host`, `k8s` and the like if the estate's names
+  identify people.
+- `TUISKU_EXPORT_OTLP_HEADERS_JSON`: optional extra request headers, a JSON object of strings
+  (e.g. `{"Authorization": "Bearer ..."}`), held as a secret; only with an `https://` URL.
+- `TUISKU_EXPORT_BATCH_SIZE` (100): records per request.
+- `TUISKU_EXPORT_TIMEOUT_SECONDS` (10): the bound on one request.
 
 Each event is one log record (`service.name=tuisku`, `service.version` the build revision,
 attributes `tuisku.stream` and `tuisku.record_uid`) whose body is a compact JSON
 `tuisku.export.v1` record: the event and the finding or incident as the event's transaction
-committed it. Free text a person typed, such as a triage reason, is exported only as its
-SHA-256 and length. A non-2xx or a timeout leaves the events queued and retries with backoff (5 s
-doubling to 5 minutes); an event still queued after `TUISKU_WORKER_BACKLOG_SECONDS` raises a
-`tuisku.meta.backlog` (subject `export`) that pages. Consumers deduplicate on `record_uid`.
-Events committed before the export migration are not exported.
+committed it. A triage reason or any other typed text is exported only as an HMAC and a length.
+The exporter runs beside evaluation on its own connection. A non-2xx or a timeout leaves the
+events queued and retries with backoff (5 s doubling to 5 minutes, per process); a 400 or 413
+halves the batch and isolates a record the sink refuses. An event still queued after
+`TUISKU_WORKER_BACKLOG_SECONDS` raises a `tuisku.meta.backlog` (subject `export`). Records the
+sink refuses for good, and a worker that exports while the database does not enqueue, raise a
+`tuisku.meta.export_failed`; both page. Consumers deduplicate on `record_uid`. Before rolling
+back to an image without export, run `tuisku migrate` without the URL (ADR 0012, "Rollback").
 
 ## Database roles
 
@@ -224,8 +233,9 @@ only observations and detections inserted in the same transaction), plus `USAGE`
 sequences. A trigger sets each raw record's `source_name` from `sources`, whatever the writer
 supplied. Only the worker role claims, updates or deletes queue rows, or touches
 `evaluation_dead_letter`. The export queue (`export_queue`, ADR 0012) is filled only by an owner
-trigger (`SECURITY DEFINER`) at the commit of each finding or incident event; the worker role
-has `SELECT` and `DELETE` on it and nothing else, and the API role has no privilege on it. No `tuisku_*` database function is executable by PUBLIC. Only the
+trigger (`SECURITY DEFINER`) at the commit of each finding or incident event, while the
+owner-only `export_state` flag is on; the worker role has `SELECT` and `DELETE` on the queue and
+`SELECT` on the flag, and the API role has no privilege on either. No `tuisku_*` database function is executable by PUBLIC. Only the
 read-only helpers `tuisku_is_worker()`, `tuisku_xmin_is_current()` and
 `tuisku_current_bucket()` are granted to the runtime roles. Every trigger function refuses to
 run on any table but its own, and PUBLIC has no `TEMP` on the database, so no role can attach
