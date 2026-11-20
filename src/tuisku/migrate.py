@@ -89,6 +89,24 @@ def migration_lock(conn: Connection, settings: Settings) -> Iterator[None]:
         log.info("released migration lock")
 
 
+def set_export_state(conn: Connection, *, enabled: bool) -> None:
+    """Whether the database enqueues finding and incident events for export (ADR 0012): on
+    when this migration run has an export URL configured. Only the owner writes it, on every
+    run, so it follows the deployment's configuration. Skipped before the export revision."""
+    exists = conn.execute(text("SELECT to_regclass('public.export_state') IS NOT NULL")).scalar()
+    if not exists:
+        return
+    changed = conn.execute(
+        text(
+            "UPDATE export_state SET enabled = :on, changed_at = now() "
+            "WHERE enabled IS DISTINCT FROM :on"
+        ),
+        {"on": enabled},
+    ).rowcount
+    if changed:
+        log.info("export enqueueing %s", "enabled" if enabled else "disabled")
+
+
 def run_migrations(settings: Settings, revision: str = "head") -> None:
     """Upgrade the database to `revision`, serialised across processes by an advisory lock."""
     url = to_sqlalchemy_url(settings.require_database_url())
@@ -109,6 +127,7 @@ def run_migrations(settings: Settings, revision: str = "head") -> None:
                 "idle_in_transaction_seconds": settings.app_role_idle_in_transaction_seconds,
             }
             command.upgrade(cfg, revision)
+            set_export_state(conn, enabled=settings.export_otlp_logs_url is not None)
             conn.commit()
     finally:
         engine.dispose()

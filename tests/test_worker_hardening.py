@@ -324,6 +324,9 @@ def test_triage_input_validation(fresh_database_url: str) -> None:
 
 
 def test_thresholds_crossed_while_suppressed_page_when_it_lifts(fresh_database_url: str) -> None:
+    # The database refuses a suppression that ends in its past (revision 0004), so the
+    # suppression is anchored at the real time, not the fixed T.
+    T = datetime.now(UTC).replace(microsecond=0)  # noqa: N806
     url = fresh_database_url
     clock = Clock(T)
     uid = _one_finding(url, clock)
@@ -444,6 +447,9 @@ def test_only_new_rows_are_enqueued() -> None:
 
 
 def test_late_row_attaches_without_expiring_or_unsuppressing(fresh_database_url: str) -> None:
+    # The database refuses a suppression that ends in its past (revision 0004), so the
+    # suppression is anchored at the real time, not the fixed T.
+    T = datetime.now(UTC).replace(microsecond=0)  # noqa: N806
     url = fresh_database_url
     clock = Clock(T)
     uid = _one_finding(url, clock)  # agents, first_seen 10:00, window 1h

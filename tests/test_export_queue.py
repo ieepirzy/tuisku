@@ -29,6 +29,9 @@ def _refused(url: str, statement: str) -> Exception:
         "INSERT INTO export_queue (stream, finding_event_id, state) VALUES ('finding', 1, '{}')",
         "LOCK TABLE export_queue IN ACCESS SHARE MODE",
         "SELECT public.tuisku_enqueue_export()",
+        "SELECT public.tuisku_export_time(now())",
+        "SELECT * FROM export_state",
+        "UPDATE export_state SET enabled = false",
     ],
 )
 def test_the_api_role_cannot_touch_the_export_queue(app_db: AppDatabase, statement: str) -> None:
@@ -44,6 +47,9 @@ def test_the_api_role_cannot_touch_the_export_queue(app_db: AppDatabase, stateme
         "INSERT INTO export_queue (stream, finding_event_id, state) VALUES ('finding', 1, '{}')",
         "SELECT * FROM export_queue FOR UPDATE",
         "SELECT public.tuisku_enqueue_export()",
+        "SELECT public.tuisku_export_time(now())",
+        "UPDATE export_state SET enabled = true",
+        "INSERT INTO export_state (singleton) VALUES (true)",
     ],
 )
 def test_the_worker_role_only_reads_and_deletes_the_queue(
@@ -53,15 +59,25 @@ def test_the_worker_role_only_reads_and_deletes_the_queue(
     assert isinstance(exc, errors.InsufficientPrivilege), exc
 
 
-def test_the_enqueue_trigger_refuses_to_run_on_any_other_table(app_db: AppDatabase) -> None:
+@pytest.mark.parametrize(
+    ("function", "event"),
+    [("tuisku_enqueue_export", "AFTER INSERT"), ("tuisku_check_triage_expiry", "BEFORE INSERT")],
+)
+def test_the_new_trigger_functions_refuse_to_run_on_any_other_table(
+    app_db: AppDatabase, function: str, event: str
+) -> None:
     with psycopg.connect(app_db.owner_url) as conn:
-        conn.execute("CREATE TEMP TABLE elsewhere (id bigint, finding_id bigint)")
+        conn.execute("UPDATE export_state SET enabled = true")  # rolled back below
         conn.execute(
-            "CREATE TRIGGER t AFTER INSERT ON elsewhere FOR EACH ROW "
-            "EXECUTE FUNCTION public.tuisku_enqueue_export()"
+            "CREATE TEMP TABLE elsewhere (id bigint, finding_id bigint, suppressed_until "
+            "timestamptz)"
+        )
+        conn.execute(  # type: ignore[arg-type]
+            f"CREATE TRIGGER t {event} ON elsewhere FOR EACH ROW "
+            f"EXECUTE FUNCTION public.{function}()"
         )
         with pytest.raises(errors.InsufficientPrivilege, match="used out of place"):
-            conn.execute("INSERT INTO elsewhere VALUES (1, 1)")
+            conn.execute("INSERT INTO elsewhere VALUES (1, 1, '-infinity')")
         conn.rollback()
 
 
@@ -77,12 +93,26 @@ def test_the_queue_grants_are_exactly_select_and_delete_for_the_worker(
     assert sorted(grants) == sorted(
         [(app_db.worker_role, "SELECT"), (app_db.worker_role, "DELETE")]
     )
-    [(definer, public_exec)] = query(
+    state_grants = query(
         app_db.owner_url,
-        "SELECT prosecdef, has_function_privilege('public', oid, 'EXECUTE') FROM pg_proc "
-        "WHERE proname = 'tuisku_enqueue_export'",
+        "SELECT grantee, privilege_type FROM information_schema.role_table_grants "
+        "WHERE table_name = 'export_state' AND grantee IN (%s, %s, 'PUBLIC')",
+        (app_db.app_role, app_db.worker_role),
     )
-    assert definer and not public_exec
+    assert state_grants == [(app_db.worker_role, "SELECT")]
+    functions = query(
+        app_db.owner_url,
+        "SELECT proname, prosecdef, has_function_privilege('public', oid, 'EXECUTE'), "
+        "has_function_privilege(%s, oid, 'EXECUTE'), has_function_privilege(%s, oid, 'EXECUTE') "
+        "FROM pg_proc WHERE proname IN ('tuisku_enqueue_export', 'tuisku_export_time', "
+        "'tuisku_check_triage_expiry') ORDER BY proname",
+        (app_db.app_role, app_db.worker_role),
+    )
+    assert functions == [
+        ("tuisku_check_triage_expiry", False, False, False, False),
+        ("tuisku_enqueue_export", True, False, False, False),
+        ("tuisku_export_time", False, False, False, False),
+    ]
 
 
 # --- the migration ------------------------------------------------------------------------------
@@ -108,6 +138,11 @@ def test_revision_0004_installs_deferred_triggers_and_downgrades_cleanly(
     run_migrations(settings, "0003")
     assert query(url, "SELECT to_regclass('export_queue') IS NULL") == [(True,)]
     run_migrations(settings)
+    assert query(
+        url,
+        "SELECT enabled FROM export_state UNION ALL SELECT count(*) > 0 FROM worker_locks "
+        "WHERE name = 'export' AND holder IS NULL",
+    ) == [(False,), (True,)]
     triggers = query(
         url,
         "SELECT tgrelid::regclass::text, tgdeferrable, tginitdeferred, tgconstraint <> 0 "
@@ -123,8 +158,12 @@ def test_revision_0004_installs_deferred_triggers_and_downgrades_cleanly(
     command.downgrade(cfg, "0003")
     assert query(
         url,
-        "SELECT to_regclass('export_queue') IS NULL, "
-        "NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'tuisku_enqueue_export')",
-    ) == [(True, True)]
+        "SELECT to_regclass('export_queue') IS NULL, to_regclass('export_state') IS NULL, "
+        "NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname LIKE 'tuisku\\_%%export%%' "
+        "OR proname = 'tuisku_check_triage_expiry'), "
+        "NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'worker_locks' "
+        "AND column_name IN ('holder', 'lease_until')), "
+        "NOT EXISTS (SELECT 1 FROM worker_locks WHERE name = 'export')",
+    ) == [(True, True, True, True, True)]
     run_migrations(settings)  # and up again
     assert query(url, "SELECT version_num FROM alembic_version") == [("0004",)]

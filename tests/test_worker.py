@@ -472,6 +472,9 @@ def test_expiry_and_lifetime_open_new_findings(fresh_database_url: str) -> None:
 
 
 def test_suppressed_finding_collects_evidence_silently(fresh_database_url: str) -> None:
+    # The database refuses a suppression that ends in its past (revision 0004), so the
+    # suppression is anchored at the real time, not the fixed T.
+    T = datetime.now(UTC).replace(microsecond=0)  # noqa: N806
     url = fresh_database_url
     clock = Clock(T)
     ingest(url, "h", "harava", lines((T, "agents")))
