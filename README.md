@@ -180,12 +180,14 @@ than `TUISKU_WORKER_BACKLOG_SECONDS` (300) raises a `tuisku.meta.backlog` that p
 `tuisku worker` can export every finding and incident event (ADR 0012) at least once to an
 append-only store, over OTLP/HTTP JSON logs, typically through an OpenTelemetry Collector:
 
-- `TUISKU_EXPORT_OTLP_LOGS_URL`: the full URL, e.g. `http://collector:4318/v1/logs`, without
-  credentials. Give it to `tuisku migrate` too: the migration run turns enqueueing on in the
-  database when it has the URL and off when it does not. Unset everywhere (the default), export
-  is off and costs nothing.
-- `TUISKU_EXPORT_PSEUDONYM_KEY`: required with the URL. A secret of at least 32 random
-  characters; the HMAC-SHA-256 key for pseudonyms (ADR 0008). Keep it away from the sink.
+- `TUISKU_EXPORT_ENQUEUE` (`unchanged`), for `tuisku migrate`: `on` makes the database enqueue
+  every event for export, `off` stops it, and `unchanged` leaves it as it is, so a migrate run
+  without the setting never turns export off. Export is off until a run with `on`.
+- `TUISKU_EXPORT_OTLP_LOGS_URL`, for `tuisku worker`: the full URL, e.g.
+  `http://collector:4318/v1/logs`, without credentials. Unset, the worker does not export.
+- `TUISKU_EXPORT_PSEUDONYM_KEY`: required with the URL; the HMAC-SHA-256 key for pseudonyms
+  (ADR 0008), generated randomly (e.g. `openssl rand -hex 32`). At least 32 characters, 8 of
+  them distinct, which guards against placeholders, not weak keys. Keep it away from the sink.
 - `TUISKU_EXPORT_PSEUDONYMIZE_ENTITY_KINDS` (`ip,caller,identity`): entity keys of these kinds
   are exported as `<kind>:hmac:<hex>`. Add `host`, `k8s` and the like if the estate's names
   identify people.
@@ -200,11 +202,13 @@ attributes `tuisku.stream` and `tuisku.record_uid`) whose body is a compact JSON
 committed it. A triage reason or any other typed text is exported only as an HMAC and a length.
 The exporter runs beside evaluation on its own connection. A non-2xx or a timeout leaves the
 events queued and retries with backoff (5 s doubling to 5 minutes, per process); a 400 or 413
-halves the batch and isolates a record the sink refuses. An event still queued after
+halves the batch, and a record the sink refuses on its own while it accepts others is replaced
+by a stub; a sink that refuses everything keeps the queue and backs off. An event still queued after
 `TUISKU_WORKER_BACKLOG_SECONDS` raises a `tuisku.meta.backlog` (subject `export`). Records the
 sink refuses for good, and a worker that exports while the database does not enqueue, raise a
 `tuisku.meta.export_failed`; both page. Consumers deduplicate on `record_uid`. Before rolling
-back to an image without export, run `tuisku migrate` without the URL (ADR 0012, "Rollback").
+back to an image without export, run `TUISKU_EXPORT_ENQUEUE=off tuisku migrate` (ADR 0012,
+"Rollback").
 
 ## Database roles
 

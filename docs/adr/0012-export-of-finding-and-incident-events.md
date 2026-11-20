@@ -35,15 +35,24 @@ older events reads them from the database.
 ### On and off: a flag the owner sets
 
 Whether events are enqueued is decided in the database, by the one-row table `export_state`,
-which only the owner writes. `tuisku migrate` sets it on every run: on when its environment has
-`TUISKU_EXPORT_OTLP_LOGS_URL`, off otherwise. Off is the default, and then the trigger writes
-nothing, so a deployment without export pays no queue writes and no vacuum churn.
+which only the owner writes. `tuisku migrate` changes it only when asked:
+`TUISKU_EXPORT_ENQUEUE=on` turns it on, `off` turns it off, and `unchanged` (the default) leaves
+it as it is. A missing setting therefore never turns export off, which would leave a gap in the
+sink until someone noticed, and the migrate job never needs the export URL or any other export
+secret. Off is the initial state, and then the trigger writes nothing, so a deployment without
+export pays no queue writes and no vacuum churn.
+
+A tri-state setting on `tuisku migrate`, rather than a separate `tuisku export enable|disable`
+command, because the flag is owner-only and the migrate job is the one place a deployment
+already runs as the owner: a deployment states its intent once, in the migrate job's
+environment, and every run applies it.
 
 The flag lives in the database, not in the worker's settings, because only the database can
 make the decision in the same transaction as the event, and the worker role should not hold a
 grant to change it. The two can disagree, and both directions are caught:
 
-- **The worker exports, the database does not enqueue** (migrate ran without the URL): the
+- **The worker exports, the database does not enqueue** (export was never turned on, or was
+  turned off): the
   worker raises `tuisku.meta.export_failed` (subject `not_enqueued`), which pages, and logs the
   remedy.
 - **The database enqueues, a worker does not export** (no URL on that replica, or a rollback):
@@ -133,9 +142,10 @@ in the sink as well as paged.
 
 ### Personal data: pseudonymised, not removed
 
-Export needs `TUISKU_EXPORT_PSEUDONYM_KEY`, a secret of at least 32 characters (and at least 8
-distinct ones) that the deployment holds; the worker refuses to start with an export URL and no
-key. Under that key, as ADR 0008 decides:
+Export needs `TUISKU_EXPORT_PSEUDONYM_KEY`, a secret that the deployment holds; the worker
+refuses to start with an export URL and no key. It must be at least 32 characters, at least 8 of
+them distinct: a guard against a placeholder or a truncated value, not a measure of strength.
+Generate it randomly (e.g. `openssl rand -hex 32`). Under that key, as ADR 0008 decides:
 
 - **Entity keys** whose kind (the part before the first `:`) is in
   `TUISKU_EXPORT_PSEUDONYMIZE_ENTITY_KINDS` (default `ip,caller,identity`) become
@@ -197,8 +207,9 @@ The exporter is an asyncio task of `tuisku worker` with a database connection of
 the evaluation loop, so a slow sink never delays evaluation, the notification drain or the
 worker's health.
 
-- **Rounds and the lease:** a round takes the `export` lease (`timeout + 30 s`, renewed after
-  every batch, released at the end), then sends batches of `TUISKU_EXPORT_BATCH_SIZE` (100)
+- **Rounds and the lease:** a round with anything queued takes the `export` lease
+  (`2 × timeout + 30 s`, renewed before every request, released at the end; an idle round writes
+  nothing), then sends batches of `TUISKU_EXPORT_BATCH_SIZE` (100)
   until the queue is empty or 30 s have passed, and starts the next round at once while rows
   remain. Each request is bounded by `TUISKU_EXPORT_TIMEOUT_SECONDS` (10) and runs in a thread,
   off the event loop. No transaction is open during a request: the batch is read, posted, and
@@ -209,10 +220,16 @@ worker's health.
   redirect leaves the rows queued. The next try waits 5 s, doubling to at most 5 minutes. The
   backoff is in the process's memory: it starts from zero after a restart, and resets once the
   queue is empty. Persistent failure pages through the backlog check.
-- **A 400 or 413** means the sink refuses the content, so resending it cannot help: the batch is
-  halved, down to one record. A record still refused on its own is replaced by a stub; if the
-  stub is refused too, the row is dropped. Either way `tuisku.meta.export_failed` (subject
-  `refused`) pages, and the rows behind it go on.
+- **A 400 or 413** means the sink refuses the content, so resending it unchanged cannot help:
+  the batch is halved, down to one record. A record refused on its own is the record's fault
+  only if the sink still accepts others: a real batch accepted since the last failure, or else
+  the next record, sent alone as a probe. Then a stub that names the record replaces it,
+  `tuisku.meta.export_failed` (subject `refused`, with a running count) pages, every isolated
+  record is logged at error level, and the rows behind it go on. One isolation needs one proof:
+  a sink that accepts stubs but no real records cannot turn the queue into stubs. A refused
+  probe or stub, or a refused record with nothing else queued, means the sink is at fault: every
+  row is kept and delivery backs off like any other failure. No row is dropped because the sink
+  refuses it.
 - **OTLP partial success** (`partialSuccess.rejectedLogRecords` in a 2xx answer) is not retried,
   as OTLP requires: the sink refused those records for good, and the response does not say
   which. The batch's rows are deleted, and `tuisku.meta.export_failed` (subject
@@ -229,9 +246,11 @@ worker's health.
   `tuisku.meta.*` kind.
 
 So the guarantee is at least once for every event the database enqueued, **except** records
-that the sink itself refuses for good (a partial success, or a record and its stub both
-refused). Those are lost to the sink, never silently: each loss pages, and the events stay in
-the database.
+that the sink itself refuses for good: those of a partial success (deleted, since the response
+does not say which), and a record the sink refuses on its own while accepting others (replaced by
+a stub that names it). Those are lost to the sink, never silently: each loss pages, and the
+events stay in the database. A sink that refuses everything loses nothing; the queue waits and
+the backlog pages.
 
 ### Transport
 
@@ -256,8 +275,8 @@ it is, with every check it has; the API already checks the same bounds with its 
 Revision 0004 is not expand-only by the convention, so an automatic rollback across it is refused
 and a person decides. An image from before export does not drain the queue and does not know to
 page about it. Before rolling back to such an image with export on, turn export off: run
-`tuisku migrate` from the current image without `TUISKU_EXPORT_OTLP_LOGS_URL`, which clears the
-flag, so the triggers stop writing. Rows already queued then wait, bounded, until a newer worker
+`TUISKU_EXPORT_ENQUEUE=off tuisku migrate` from the current image, which clears the flag, so the
+triggers stop writing. Rows already queued then wait, bounded, until a newer worker
 discards or exports them.
 
 ## Consequences
@@ -271,4 +290,6 @@ discards or exports them.
   deduplicate on `record_uid` and order by `event.at`.
 - The sink's own durability (retention lock, replication) is the deployment's to configure;
   Tuisku's guarantee ends at the 2xx.
-- `tuisku migrate` needs the export URL in its environment whenever the worker has it.
+- Turning export on takes two settings in two places: `TUISKU_EXPORT_ENQUEUE=on` for
+  `tuisku migrate`, and the URL and key for the worker. A mismatch pages (`not_enqueued`, or the
+  backlog).
