@@ -626,12 +626,26 @@ def test_out_of_range_times_and_odd_time_zones_still_encode(
     [record] = sink.records(sink.posts[before:])
     assert record["finding"]["suppressed_until"] == "-infinity"
     assert record["event"]["new_value"] == {"suppressed_until": "-infinity"}
-    assert record["event"]["at"].endswith("Z") and record["finding"]["last_seen_at"].endswith("Z")
-    assert query(
+    [(at, last_seen)] = query(
         url,
-        "SELECT tuisku_export_time('infinity'), tuisku_export_time('0044-03-15 12:00Z BC'), "
-        "tuisku_export_time('2026-11-01 12:00+05:45')",
-    ) == [("infinity", "0044-03-15T12:00:00.000000Z BC", "2026-11-01T06:15:00.000000Z")]
+        "SELECT e.at, f.last_seen FROM finding_events e JOIN findings f ON f.id = e.finding_id "
+        "WHERE e.uid = %s",
+        (record["record_uid"],),
+    )
+    # Written in a session on +05:45, rendered in UTC.
+    assert record["event"]["at"] == at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    assert record["finding"]["last_seen_at"] == last_seen.astimezone(UTC).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    with psycopg.connect(url) as conn:
+        conn.execute("SET TIME ZONE 'Asia/Kathmandu'")
+        rendered = conn.execute(
+            "SELECT tuisku_export_time('infinity'), tuisku_export_time('0044-03-15 12:00Z BC'), "
+            "tuisku_export_time('2026-11-01 12:00+05:45')"
+        ).fetchall()
+    assert rendered == [
+        ("infinity", "0044-03-15T12:00:00.000000Z BC", "2026-11-01T06:15:00.000000Z")
+    ]
 
 
 def test_a_bad_request_never_retries_the_same_batch_forever(

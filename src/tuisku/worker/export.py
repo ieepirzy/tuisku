@@ -358,8 +358,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-# No environment proxies: records go straight to the configured sink.
-_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+def _opener() -> urllib.request.OpenerDirector:
+    # No environment proxies: records go straight to the configured sink.
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
 
 
 def _post_blocking(
@@ -369,7 +370,7 @@ def _post_blocking(
         url, data=body, method="POST", headers={**headers, "Content-Type": "application/json"}
     )
     try:
-        with _OPENER.open(request, timeout=timeout) as response:
+        with _opener().open(request, timeout=timeout) as response:
             return response.status, response.read(MAX_RESPONSE_BYTES)
     except urllib.error.HTTPError as exc:
         with exc:
