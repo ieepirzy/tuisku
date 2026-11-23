@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -17,6 +17,12 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 _ALLOWED_SCHEMES = frozenset({"postgresql", "postgres"})
 # A plain, unquoted Postgres role name: it is interpolated into GRANT statements.
 _ROLE_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+# An entity key's kind: the part before its first ':' (ADR 0008).
+_ENTITY_KIND = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+# HTTP header names (RFC 9110 tokens) and values without control characters.
+_HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}")
+_HEADER_VALUE = re.compile(r"[\x20-\x7e]{0,4096}")
+
 # Prometheus/Alertmanager label names.
 _LABEL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 # Labels the Alertmanager notifier sets on every alert (tuisku.worker.alertmanager). Static
@@ -137,6 +143,91 @@ class Settings(BaseSettings):
     worker_health_host: str = "0.0.0.0"
     # Optional dead-man's-switch URL, fetched after each healthy pass. May carry a secret.
     worker_deadman_url: SecretStr | None = None
+
+    # Export of finding and incident events (ADR 0012): OTLP/HTTP JSON logs to this full URL
+    # (e.g. http://collector:4318/v1/logs). Unset: this worker does not export. Held as a
+    # secret; userinfo is refused (send credentials as headers).
+    export_otlp_logs_url: SecretStr | None = None
+    # What `tuisku migrate` does with the database's enqueue flag (ADR 0012): turn it on, turn it
+    # off, or leave it as it is (the default, so a missing setting never turns export off).
+    export_enqueue: Literal["on", "off", "unchanged"] = "unchanged"
+    # Extra request headers, a JSON object of strings (e.g. an Authorization header). Only
+    # with an https:// URL: a secret is never sent in clear text.
+    export_otlp_headers_json: SecretStr | None = None
+    # HMAC-SHA-256 key for pseudonyms (ADR 0008): required to export. At least 32 characters,
+    # 8 of them distinct: a guard against a placeholder or a typo, not a strength check.
+    export_pseudonym_key: SecretStr | None = None
+    export_batch_size: int = Field(default=100, ge=1, le=10_000)
+    export_timeout_seconds: float = Field(default=10.0, gt=0, le=300)
+    # Entity keys of these kinds are exported as <kind>:hmac:<hex> (ADR 0008).
+    export_pseudonymize_entity_kinds: str = "ip,caller,identity"
+
+    @field_validator("export_otlp_logs_url")
+    @classmethod
+    def _check_export_url(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None or not value.get_secret_value().strip():
+            return None
+        parts = urlsplit(value.get_secret_value())
+        # Never echo the value.
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError("must be an http:// or https:// URL")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("must not carry credentials; use TUISKU_EXPORT_OTLP_HEADERS_JSON")
+        return value
+
+    @field_validator("export_otlp_headers_json")
+    @classmethod
+    def _check_export_headers(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None or not value.get_secret_value().strip():
+            return None
+        try:
+            headers = json.loads(value.get_secret_value())
+        except ValueError:
+            raise ValueError("must be a JSON object of strings") from None
+        if not isinstance(headers, dict) or not all(
+            isinstance(k, str)
+            and _HEADER_NAME.fullmatch(k)
+            and isinstance(v, str)
+            and _HEADER_VALUE.fullmatch(v)
+            for k, v in headers.items()
+        ):
+            raise ValueError("must be a JSON object of header names to printable strings")
+        return value
+
+    @field_validator("export_pseudonym_key")
+    @classmethod
+    def _check_pseudonym_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None or not value.get_secret_value():
+            return None
+        key = value.get_secret_value()
+        if len(key) < 32 or len(set(key)) < 8:
+            raise ValueError("must be at least 32 characters, at least 8 of them distinct")
+        return value
+
+    @field_validator("export_pseudonymize_entity_kinds")
+    @classmethod
+    def _check_pseudonymize_kinds(cls, value: str) -> str:
+        kinds = [k.strip() for k in value.split(",") if k.strip()]
+        if not all(_ENTITY_KIND.fullmatch(k) for k in kinds):
+            raise ValueError("must be comma-separated entity key kinds ([a-z0-9-]+)")
+        return ",".join(kinds)
+
+    @model_validator(mode="after")
+    def _check_export_headers_need_https(self) -> Self:
+        if self.export_otlp_headers_json is not None and self.export_otlp_logs_url is not None:
+            if urlsplit(self.export_otlp_logs_url.get_secret_value()).scheme != "https":
+                raise ValueError("TUISKU_EXPORT_OTLP_HEADERS_JSON needs an https:// export URL")
+        return self
+
+    @property
+    def export_pseudonymized_kinds(self) -> frozenset[str]:
+        return frozenset(k for k in self.export_pseudonymize_entity_kinds.split(",") if k)
+
+    @property
+    def export_headers(self) -> dict[str, str]:
+        if self.export_otlp_headers_json is None:
+            return {}
+        return json.loads(self.export_otlp_headers_json.get_secret_value())
 
     # Notifications (ADR 0007 "Notifications"). The structured log is always written. With an
     # Alertmanager base URL (http or https, may carry user:password), the worker also POSTs each

@@ -1,0 +1,19 @@
+id: 622c3ba9-a11e-41f8-b9ff-896a2bfad9f2
+rev: 1
+name: tuisku-meta.export_failed
+title: Events were not exported as recorded
+description: >-
+  Selects tuisku.meta.export_failed meta-detections: the export sink rejected records (an OTLP
+  partial success), a record could not be encoded and a stub was sent instead, the sink refused
+  a record and its stub so it was dropped, or the worker exports while the database does not
+  enqueue (ADR 0012). Grouped by what went wrong; pages on every occurrence.
+severity: high
+select:
+  layer: detection
+  kind: tuisku.meta.export_failed
+finding:
+  group_by: [attributes.subject]
+  window: 6h
+  max_lifetime: 7d
+  notify: each
+incident: none

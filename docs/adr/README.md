@@ -17,6 +17,7 @@ change one only with new evidence, by writing a new ADR that names the one it re
 | [0009](0009-agent-runtime-and-authority.md) | Agent runtime interface and response authority | Accepted (design; not built yet) |
 | [0010](0010-deployment-topology.md) | Deployment topology for the first target | Accepted |
 | [0011](0011-separate-worker-database-role.md) | Separate worker database role (amends 0004 §3) | Accepted |
+| [0012](0012-export-of-finding-and-incident-events.md) | Export of finding and incident events to an append-only sink | Accepted |
 
 Status words: *Accepted* (in force), *Superseded by NNNN*, *Proposed* (not in force).
 
