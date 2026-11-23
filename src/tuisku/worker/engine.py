@@ -78,6 +78,8 @@ class WorkerConfig:
     max_window_rows: int = 50_000
     retry_backoff: timedelta = timedelta(seconds=30)
     notify_backoff: notify.Backoff = field(default_factory=notify.Backoff)
+    # A drain stops once this is spent; the rest stay due for the next pass.
+    notify_drain_budget: timedelta = timedelta(seconds=notify.DRAIN_BUDGET_SECONDS)
     # Health: queued rows or undelivered notifications older than this raise tuisku.meta.backlog.
     backlog_after: timedelta = timedelta(minutes=5)
 
@@ -404,7 +406,13 @@ class Worker:
             await self._process(conn, queue_row, stats)
         stats.delivered = await self._step(
             "drain",
-            notify.drain(conn, self.notifier, self.clock(), backoff=self.config.notify_backoff),
+            notify.drain(
+                conn,
+                self.notifier,
+                self.clock(),
+                backoff=self.config.notify_backoff,
+                budget_seconds=self.config.notify_drain_budget.total_seconds(),
+            ),
             0,
         )
         backlog = self.config.backlog_after.total_seconds()
