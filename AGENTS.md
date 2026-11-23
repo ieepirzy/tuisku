@@ -33,7 +33,12 @@
   hostnames, IP ranges, network topology or rules tuned to a specific deployment
   or estate; those live in the deploying organisation's own infrastructure
   repository. Never commit secrets, credentials, or real telemetry or logs that
-  could contain personal data; test fixtures are synthetic.
+  could contain personal data; test fixtures are synthetic. The deploying
+  organisation's internal service, product and project names (and its
+  hostnames) never appear in code, comments, fixtures, docs or commit messages:
+  name the role instead ("the egress gateway", "the artifact store").
+  `tests/test_no_internal_names.py` fails on known names; it stores only
+  SHA-256 digests of them, so the list itself discloses nothing in clear text.
 - **Tests must be able to fail.** A new test is checked by breaking the code it
   covers and watching it go red before restoring it.
 - **Architecture decisions** are recorded in `docs/adr/`. Read the relevant ADRs
