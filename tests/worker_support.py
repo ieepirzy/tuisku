@@ -134,7 +134,7 @@ def otlp_sum(
     attrs = [{"key": k, "value": {"stringValue": v}} for k, v in (labels or {}).items()]
     res = [
         {"key": k, "value": {"stringValue": v}}
-        for k, v in (resource or {"service.name": "harava"}).items()
+        for k, v in (resource or {"service.name": "egress-guard"}).items()
     ]
     point: dict[str, Any] = {"attributes": attrs, "timeUnixNano": _nanos(time), "asInt": str(value)}
     if start is not None:
@@ -145,7 +145,7 @@ def otlp_sum(
                 "resource": {"attributes": res},
                 "scopeMetrics": [
                     {
-                        "scope": {"name": "harava"},
+                        "scope": {"name": "egress-guard"},
                         "metrics": [
                             {
                                 "name": metric,

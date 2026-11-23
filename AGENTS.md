@@ -17,9 +17,10 @@
   no autogenerate, no `target_metadata`.
 - **Migrations** are hand-written Alembic revisions using `op.execute()` with raw
   SQL. Every revision declares exactly one module-level `expand_only = True` or
-  `expand_only = False` (the Tyyni migration-safety convention; the template
-  starts at `False`). Set `True` only when the revision only adds tables,
-  nullable or defaulted columns, or plain indexes. Never edit a merged revision.
+  `expand_only = False` (the expand/contract migration-safety convention: an
+  `expand_only` declaration; the template starts at `False`). Set `True` only
+  when the revision only adds tables, nullable or defaulted columns, or plain
+  indexes. Never edit a merged revision.
 - **Never migrate on boot.** The API does not run migrations; `tuisku migrate`
   runs as a separate job, under a Postgres advisory lock.
 - **Epistemic separation.** Keep four kinds of knowledge apart, in storage and in

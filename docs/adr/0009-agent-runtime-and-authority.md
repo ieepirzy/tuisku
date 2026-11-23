@@ -2,6 +2,8 @@
 
 Status: Accepted as design (2026-11-01). Not built in the first milestone.
 
+Edited 2026-11-23: internal service names replaced with their roles.
+
 ## Context
 
 Issue #1 sets these requirements for agents:
@@ -189,7 +191,7 @@ login or rate limits for their products, including agents built on the Claude Ag
   result schema.
 - The tier bounds what an injected instruction can achieve. At most, it produces a wrong
   hypothesis or a proposal that a human must approve. Nothing the agent writes executes.
-- Harava's content-signal verdicts, and similar injection detectors, can be applied to evidence
+- An egress gateway's content-signal verdicts, and similar injection detectors, can be applied to evidence
   text before it is shown. Their results are ordinary L1/L2 rows from their own adapters. They
   appear as evidence like anything else and are not special-cased.
 

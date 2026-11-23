@@ -2,11 +2,13 @@
 
 Status: Accepted (2026-11-01)
 
+Edited 2026-11-23: internal service names replaced with their roles.
+
 ## Context
 
 Tuisku needs deterministic logic of its own on top of sensor verdicts. Examples:
 
-- page on a single Harava refusal from an agent caller
+- page on a single egress gateway refusal from an agent caller
 - count refusals per caller per hour
 - notice a rise in `likely` content signals
 - later, correlate across sensors
@@ -30,11 +32,11 @@ code.
 
 ```yaml
 # pack.yaml
-pack: harava                 # pack id
+pack: egress-guard           # pack id
 version: 1.0.0
 authorship: tuisku           # tuisku | community | local  (ADR 0002)
 license: MIT                 # the pack's licence; a rule may declare its own, which wins
-description: Agent-safety signals from Harava.
+description: Agent-safety signals from an egress gateway.
 params:                      # defaults; a deployment overrides them
   restricted_callers: [agents]
 ```
@@ -43,13 +45,13 @@ params:                      # defaults; a deployment overrides them
 # rules/agent-outbound-refused.yaml
 id: 6c1f0f8e-…               # stable UUID; never reused
 rev: 1                       # bump on any semantic change
-name: harava.agent_outbound_refused
+name: egress-guard.agent_outbound_refused
 title: Agent caller had outbound data refused
 severity: high               # informational | low | medium | high | critical
 attack: [T1567]              # ATT&CK technique ids, verbatim, optional
 select:                      # which rows feed the rule
   layer: observation         # observation | detection
-  kind: harava.refusal       # the fact; the sensor's verdict is a separate detection row
+  kind: egress-guard.refusal # the fact; the sensor's verdict is a separate detection row
   where:                     # all predicates must hold
     - {field: attributes.type, op: eq, value: outbound}
     - {field: attributes.caller, op: in, value: {param: restricted_callers}}
@@ -128,7 +130,7 @@ Tuisku loads packs from the built-in `packs/` directory **and** from the directo
 mounts its private packs and params from its own configuration repository.
 
 The public repository ships only generic packs whose defaults come from the upstream product's
-own defaults. For example, Harava's default restricted caller is `agents`, so the pack defaults
+own defaults. For example, the egress gateway's default restricted caller is `agents`, so the pack defaults
 to it.
 
 Every loaded pack and params file is recorded with its SHA-256, so a finding names exactly which

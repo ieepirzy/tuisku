@@ -1,0 +1,22 @@
+pack: egress-guard
+version: 2.0.0
+authorship: tuisku
+license: MIT
+description: >-
+  Agent-safety signals from an egress gateway (an agent egress safety proxy: an HTTP gateway that
+  agents call to fetch URLs, and that refuses unsafe outbound requests and destinations), read by
+  the egress-guard adapter. Defaults are neutral; a deployment sets its own callers, thresholds
+  and its gateway's metric names in TUISKU_RULE_PARAMS_FILE, under the pack id egress-guard.
+params:
+  # The gateway's restricted (agent) callers.
+  restricted_callers: [agents]
+  # The gateway's counter names. They must match the adapter's metric_prefix option:
+  # <metric_prefix>.destination.refused and <metric_prefix>.content.signals.
+  destination_refused_metric: egress_guard.destination.refused
+  content_signals_metric: egress_guard.content.signals
+  # Destination refusals outside admission, per stage, per hour. Generic starting points.
+  destination_trend_threshold: 10
+  # Rise in `likely` content signals: the last hour against the mean of the previous hours.
+  likely_baseline_windows: 24
+  likely_baseline_factor: 3
+  likely_baseline_floor: 5

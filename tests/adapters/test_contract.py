@@ -178,7 +178,7 @@ class TestEntities:
         h = "A" * 64
         assert sha256_key("sha256:" + h) == "sha256:" + "a" * 64
         assert sha256_key("abc") is None
-        assert caller_key("harava", "agents") == "caller:harava/agents"
+        assert caller_key("egress-guard", "agents") == "caller:egress-guard/agents"
         assert caller_key("har/ava", "agents") is None
 
     def test_unique(self) -> None:
@@ -327,8 +327,8 @@ class TestHostileEntities:
         assert k8s_pod_key("default", "web-1" + bad) is None
         assert k8s_pod_key("default" + bad, "web-1") is None
         assert image_key("ghcr.io/org/app" + bad) is None
-        assert caller_key("harava" + bad, "agents") is None
-        assert caller_key("harava", "agents" + bad) is None
+        assert caller_key("egress-guard" + bad, "agents") is None
+        assert caller_key("egress-guard", "agents" + bad) is None
         assert process_key("node-1" + bad, 1, T0) is None
 
     def test_ip_scope_and_mapped(self) -> None:

@@ -34,7 +34,7 @@ from tuisku.worker import notify, run
 from tuisku.worker.engine import Stats, Worker, WorkerConfig
 
 T = datetime(2026, 11, 1, 10, 0, tzinfo=UTC)
-TREND = "harava.destination_refused_trend"
+TREND = "egress-guard.destination_refused_trend"
 
 
 # --- 1. windows are read narrowly and never truncated ---------------------------------------------
@@ -42,7 +42,7 @@ TREND = "harava.destination_refused_trend"
 
 def _other_metric(at: datetime, value: int) -> tuple[datetime, bytes, Transport]:
     body = otlp_sum(
-        "harava.outbound.refused",
+        "egress_guard.outbound.refused",
         value,
         time=at,
         start=T - timedelta(seconds=30),
@@ -55,11 +55,13 @@ def test_other_series_cannot_crowd_a_window_out(fresh_database_url: str) -> None
     url = fresh_database_url
     start = T - timedelta(seconds=30)
     # Many samples of another metric, all in the same hour, older than the trend samples.
-    ingest(url, "h", "harava", [_other_metric(T + timedelta(seconds=i), i) for i in range(20)])
+    ingest(
+        url, "h", "egress-guard", [_other_metric(T + timedelta(seconds=i), i) for i in range(20)]
+    )
     ingest(
         url,
         "h",
-        "harava",
+        "egress-guard",
         [
             _metric(T + timedelta(minutes=10), 4, start=start, stage="hop"),
             _metric(T + timedelta(minutes=20), 12, start=start, stage="hop"),
@@ -76,7 +78,7 @@ def test_a_window_over_the_cap_fails_instead_of_truncating(fresh_database_url: s
     ingest(
         url,
         "h",
-        "harava",
+        "egress-guard",
         [
             _metric(T + timedelta(minutes=i), 3 * (i + 1), start=start, stage="hop")
             for i in range(5)
@@ -93,12 +95,12 @@ def test_a_window_over_the_cap_fails_instead_of_truncating(fresh_database_url: s
 
 def test_dead_letter_pages_and_the_meta_rule_fires(fresh_database_url: str) -> None:
     url = fresh_database_url
-    ingest(url, "h", "harava", lines((T, "agents")))
+    ingest(url, "h", "egress-guard", lines((T, "agents")))
     clock = Clock(T)
     notifier = RecordingNotifier()
 
     def explode(rule: Rule, env: Any) -> None:
-        if rule.name == "harava.agent_outbound_refused":
+        if rule.name == "egress-guard.agent_outbound_refused":
             raise RuntimeError("boom")
 
     for _ in range(6):
@@ -107,7 +109,7 @@ def test_dead_letter_pages_and_the_meta_rule_fires(fresh_database_url: str) -> N
     kinds = notifier.kinds()
     assert kinds.count("evaluation_dead_lettered") == 1
     dead = next(n for n in notifier.sent if n["kind"] == "evaluation_dead_lettered")
-    assert dead["rule_name"] == "harava.agent_outbound_refused" and dead["attempts"] == 5
+    assert dead["rule_name"] == "egress-guard.agent_outbound_refused" and dead["attempts"] == 5
     assert fired(url) == ["tuisku-meta.evaluation_failed"]
     assert "finding_opened" in kinds  # the meta rule's finding (notify: each)
 
@@ -121,16 +123,16 @@ def test_late_row_does_not_refire_over_an_older_firing(
     url = fresh_database_url
     rules = load_rule_set([write_pack(tmp_path, [_count_rule(R1, gte=2, timespan="10m")])])
     clock = Clock(T + timedelta(minutes=2))
-    ingest(url, "h", "harava", lines((T, "x"), (T + timedelta(minutes=1), "x")))
+    ingest(url, "h", "egress-guard", lines((T, "x"), (T + timedelta(minutes=1), "x")))
     run_worker(url, rules, clock)  # firing A at 10:01
     later = T + timedelta(minutes=55)
-    ingest(url, "h", "harava", lines((later, "x"), (later + timedelta(minutes=1), "x")))
+    ingest(url, "h", "egress-guard", lines((later, "x"), (later + timedelta(minutes=1), "x")))
     clock.now = later + timedelta(minutes=2)
     run_worker(url, rules, clock)  # firing B at 10:56, the newest by id
     assert fired(url) == ["testpack.burst"] * 2
     # A row stamped 10:05 arrives: its window holds three rows, but A (10:01) overlaps it and
     # A's finding is still attachable, so it links instead of firing a third time.
-    ingest(url, "h", "harava", lines((T + timedelta(minutes=5), "x")))
+    ingest(url, "h", "egress-guard", lines((T + timedelta(minutes=5), "x")))
     clock.advance(minutes=1)
     stats = run_worker(url, rules, clock)
     assert fired(url) == ["testpack.burst"] * 2
@@ -149,7 +151,7 @@ class FlakyNotifier(RecordingNotifier):
 
 def test_one_bad_notification_does_not_block_the_rest(fresh_database_url: str) -> None:
     url = fresh_database_url
-    ingest(url, "h", "harava", lines((T, "agents"), (T + timedelta(minutes=1), "agents")))
+    ingest(url, "h", "egress-guard", lines((T, "agents"), (T + timedelta(minutes=1), "agents")))
     notifier = FlakyNotifier()
     run_worker(url, builtin_rules(), Clock(T + timedelta(minutes=5)), notifier)
     assert notifier.kinds() == ["finding_opened", "finding_occurrence"]
@@ -160,7 +162,7 @@ def test_one_bad_notification_does_not_block_the_rest(fresh_database_url: str) -
 
 def test_undeliverable_notification_alerts_and_keeps_retrying(fresh_database_url: str) -> None:
     url = fresh_database_url
-    ingest(url, "h", "harava", lines((T, "agents")))
+    ingest(url, "h", "egress-guard", lines((T, "agents")))
     notifier = FlakyNotifier()  # incident_opened never delivers
     backoff = notify.Backoff(base_seconds=0, cap_seconds=0)
     clock = Clock(T + timedelta(minutes=5))
@@ -178,7 +180,7 @@ def test_undeliverable_notification_alerts_and_keeps_retrying(fresh_database_url
 
 def test_failed_delivery_waits_for_its_backoff(fresh_database_url: str) -> None:
     url = fresh_database_url
-    ingest(url, "h", "harava", lines((T, "agents")))
+    ingest(url, "h", "egress-guard", lines((T, "agents")))
     notifier = FlakyNotifier()
     backoff = notify.Backoff(base_seconds=3600, cap_seconds=3600)
     clock = Clock(T + timedelta(minutes=5))
@@ -196,7 +198,10 @@ def test_short_outage_on_a_busy_queue_loses_nothing(fresh_database_url: str) -> 
     url = fresh_database_url
     callers = [f"svc-{i}" for i in range(30)]
     ingest(
-        url, "h", "harava", lines(*[(T + timedelta(seconds=i), c) for i, c in enumerate(callers)])
+        url,
+        "h",
+        "egress-guard",
+        lines(*[(T + timedelta(seconds=i), c) for i, c in enumerate(callers)]),
     )
     down_until = time.monotonic() + 1.5
 
@@ -266,7 +271,7 @@ def test_worker_loop_survives_a_failing_pass(
 
 
 def _one_finding(url: str, clock: Clock) -> str:
-    ingest(url, "h", "harava", lines((clock.now, "agents")))
+    ingest(url, "h", "egress-guard", lines((clock.now, "agents")))
     run_worker(url, builtin_rules(), clock)
     [(uid,)] = query(url, "SELECT uid::text FROM findings")
     return uid
@@ -343,7 +348,10 @@ def test_thresholds_crossed_while_suppressed_page_when_it_lifts(fresh_database_u
         )
     notifier = RecordingNotifier()
     ingest(
-        url, "h", "harava", lines(*[(T + timedelta(minutes=1 + i), "agents") for i in range(10)])
+        url,
+        "h",
+        "egress-guard",
+        lines(*[(T + timedelta(minutes=1 + i), "agents") for i in range(10)]),
     )
     clock.advance(minutes=15)
     run_worker(url, builtin_rules(), clock, notifier)
@@ -384,12 +392,12 @@ def test_api_retries_a_deadlock(fresh_database_url: str, monkeypatch: pytest.Mon
 
 def test_overflow_notification_carries_the_group_hash(fresh_database_url: str) -> None:
     url = fresh_database_url
-    ingest(url, "h", "harava", lines((T, "svc-a"), (T + timedelta(minutes=1), "svc-secret")))
+    ingest(url, "h", "egress-guard", lines((T, "svc-a"), (T + timedelta(minutes=1), "svc-secret")))
     notifier = RecordingNotifier()
     run_worker(url, builtin_rules(), Clock(T + timedelta(minutes=5)), notifier, max_open_findings=1)
     [overflow] = [n for n in notifier.sent if n["kind"] == "finding_overflow_group"]
     assert len(overflow["group_key"]) == 64 and "group_values" not in overflow
-    assert overflow["entity_keys"] == ["caller:harava/svc-secret"]
+    assert overflow["entity_keys"] == ["caller:egress-guard/svc-secret"]
 
 
 # --- 8. a forged firing key is refused ------------------------------------------------------------
@@ -469,7 +477,7 @@ def test_late_row_attaches_without_expiring_or_unsuppressing(fresh_database_url:
     ingest(
         url,
         "h",
-        "harava",
+        "egress-guard",
         [(T + timedelta(minutes=5), lines((late, "agents"))[0][1], Transport.NDJSON)],
     )
     clock.advance(minutes=6)
@@ -498,11 +506,11 @@ def test_value_count_ignores_missing_values(fresh_database_url: str, tmp_path: P
     }
     doc["finding"]["group_by"] = []
     rules = load_rule_set([write_pack(tmp_path, [doc])])
-    # One plain caller, one Harava did not name plainly (no caller attribute): one value.
-    ingest(url, "h", "harava", lines((T, "x"), (T + timedelta(minutes=1), "two words")))
+    # One plain caller, one the gateway did not name plainly (no caller attribute): one value.
+    ingest(url, "h", "egress-guard", lines((T, "x"), (T + timedelta(minutes=1), "two words")))
     run_worker(url, rules, Clock(T + timedelta(minutes=5)))
     assert fired(url) == []
-    ingest(url, "h", "harava", lines((T + timedelta(minutes=2), "y")))
+    ingest(url, "h", "egress-guard", lines((T + timedelta(minutes=2), "y")))
     run_worker(url, rules, Clock(T + timedelta(minutes=6)))
     assert fired(url) == ["testpack.burst"]
 
@@ -511,7 +519,7 @@ def test_delivery_backoff_never_waits_longer_than_the_cap(fresh_database_url: st
     import time
 
     url = fresh_database_url
-    ingest(url, "h", "harava", lines((T, "svc")))  # one finding_opened notification
+    ingest(url, "h", "egress-guard", lines((T, "svc")))  # one finding_opened notification
 
     class Down(RecordingNotifier):
         def deliver(self, notification: dict[str, Any]) -> None:
@@ -534,17 +542,17 @@ def test_delivery_backoff_never_waits_longer_than_the_cap(fresh_database_url: st
 
 def test_a_superseded_row_pages_and_raises_a_meta_detection(fresh_database_url: str) -> None:
     url = fresh_database_url
-    ingest(url, "h", "harava", lines((T, "agents")))
+    ingest(url, "h", "egress-guard", lines((T, "agents")))
     # Only the owner (or a reprocessing run, which does not exist yet) can supersede a record.
     with psycopg.connect(url) as conn:
         conn.execute(
             "INSERT INTO parse_attempts (raw_record_id, adapter, adapter_version, status, "
-            "created_at) SELECT id, 'harava', '9.9.9', 'ok', now() FROM raw_records"
+            "created_at) SELECT id, 'egress-guard', '9.9.9', 'ok', now() FROM raw_records"
         )
     notifier = RecordingNotifier()
     stats = run_worker(url, builtin_rules(), Clock(T + timedelta(minutes=5)), notifier)
     assert stats.superseded >= 1
-    assert "harava.agent_outbound_refused" in fired(url)  # evaluated anyway: it paged
+    assert "egress-guard.agent_outbound_refused" in fired(url)  # evaluated anyway: it paged
     assert "finding_opened" in notifier.kinds()
     metas = query(
         url,
@@ -564,7 +572,7 @@ def test_rules_match_the_source_name_a_record_arrived_with(
     doc = rule_doc("named", R1)
     doc["select"]["where"].append({"field": "source", "op": "eq", "value": "edge-a"})
     rules = load_rule_set([write_pack(tmp_path, [doc])])
-    ingest(url, "edge-a", "harava", lines((T, "x")))
+    ingest(url, "edge-a", "egress-guard", lines((T, "x")))
     with psycopg.connect(url) as conn:  # renamed out of band before the worker ran
         conn.execute("UPDATE sources SET name = 'edge-b' WHERE name = 'edge-a'")
     run_worker(url, rules, Clock(T + timedelta(minutes=5)))
@@ -576,7 +584,7 @@ def test_rules_match_the_source_name_a_record_arrived_with(
 
 def test_an_old_queue_raises_a_backlog_that_pages_by_itself(fresh_database_url: str) -> None:
     url = fresh_database_url
-    ingest(url, "h", "harava", lines((T, "svc")))
+    ingest(url, "h", "egress-guard", lines((T, "svc")))
     notifier = RecordingNotifier()
     worker = Worker(
         rule_set=builtin_rules(),
@@ -596,7 +604,7 @@ def test_an_old_queue_raises_a_backlog_that_pages_by_itself(fresh_database_url: 
 
 def test_a_fresh_queue_raises_no_backlog(fresh_database_url: str) -> None:
     url = fresh_database_url
-    ingest(url, "h", "harava", lines((T, "svc")))
+    ingest(url, "h", "egress-guard", lines((T, "svc")))
     worker = Worker(
         rule_set=builtin_rules(),
         clock=Clock(T + timedelta(minutes=4)),
@@ -608,7 +616,7 @@ def test_a_fresh_queue_raises_no_backlog(fresh_database_url: str) -> None:
 
 def test_undelivered_notifications_raise_a_backlog(fresh_database_url: str) -> None:
     url = fresh_database_url
-    ingest(url, "h", "harava", lines((T, "svc")))
+    ingest(url, "h", "egress-guard", lines((T, "svc")))
     run_worker(url, builtin_rules(), Clock(T + timedelta(minutes=1)), FlakyNotifier())
     with psycopg.connect(url) as conn:  # an outbox row left undelivered for an hour
         conn.execute(
@@ -687,7 +695,7 @@ def test_a_step_stuck_on_a_lock_is_skipped_and_the_pass_goes_on(fresh_database_u
     """The backlog check's counter row is held elsewhere: that step times out and is skipped,
     while claiming, evaluating and the drain carry on."""
     url = fresh_database_url
-    ingest(url, "h", "harava", lines((T, "agents")))
+    ingest(url, "h", "egress-guard", lines((T, "agents")))
     hold = psycopg.connect(url)
     try:
         # The backlog's meta-detection slot for this bucket, taken by an open transaction.

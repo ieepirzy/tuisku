@@ -1,0 +1,44 @@
+# Cumulative counters as OTLP/JSON exports through the real egress-guard adapter. `start` is the
+# counter's start_time; the source's first receipt is the first record's `at`.
+rule: egress-guard.destination_refused_trend
+cases:
+  - name: hop refusals add up past the threshold within an hour
+    source: {adapter: egress-guard}
+    records:
+      - at: "2026-11-01T10:00:05Z"
+        otlp_sum: {metric: egress_guard.destination.refused, labels: {class: tunnel, stage: hop}, start: "2026-11-01T09:59:30Z", time: "2026-11-01T10:00:00Z", value: 4}
+      - at: "2026-11-01T10:30:05Z"
+        otlp_sum: {metric: egress_guard.destination.refused, labels: {class: tunnel, stage: hop}, start: "2026-11-01T09:59:30Z", time: "2026-11-01T10:30:00Z", value: 12}
+    fires: [egress-guard.destination_refused_trend]
+  - name: admission refusals are logged lines, not this trend
+    source: {adapter: egress-guard}
+    records:
+      - at: "2026-11-01T10:00:05Z"
+        otlp_sum: {metric: egress_guard.destination.refused, labels: {class: tunnel, stage: admission}, start: "2026-11-01T09:59:30Z", time: "2026-11-01T10:00:00Z", value: 40}
+    fires: []
+  - name: connecting to a long-running process is a baseline, not a spike
+    source: {adapter: egress-guard}
+    records:
+      - at: "2026-11-01T10:00:05Z"
+        otlp_sum: {metric: egress_guard.destination.refused, labels: {class: tunnel, stage: hop}, start: "2026-10-01T00:00:00Z", time: "2026-11-01T10:00:00Z", value: 900}
+      - at: "2026-11-01T10:30:05Z"
+        otlp_sum: {metric: egress_guard.destination.refused, labels: {class: tunnel, stage: hop}, start: "2026-10-01T00:00:00Z", time: "2026-11-01T10:30:00Z", value: 903}
+    fires: []
+  - name: a deployment's own counter name, set in the adapter options and the pack params
+    params: {destination_refused_metric: acme.gateway.destination.refused}
+    source: {adapter: egress-guard, options: {metric_prefix: acme.gateway}}
+    records:
+      - at: "2026-11-01T10:00:05Z"
+        otlp_sum: {metric: acme.gateway.destination.refused, labels: {class: tunnel, stage: hop}, start: "2026-11-01T09:59:30Z", time: "2026-11-01T10:00:00Z", value: 4}
+      - at: "2026-11-01T10:30:05Z"
+        otlp_sum: {metric: acme.gateway.destination.refused, labels: {class: tunnel, stage: hop}, start: "2026-11-01T09:59:30Z", time: "2026-11-01T10:30:00Z", value: 12}
+    fires: [egress-guard.destination_refused_trend]
+  - name: the default counter name is not counted once a deployment names its own
+    params: {destination_refused_metric: acme.gateway.destination.refused}
+    source: {adapter: egress-guard, options: {metric_prefix: acme.gateway}}
+    records:
+      - at: "2026-11-01T10:00:05Z"
+        otlp_sum: {metric: egress_guard.destination.refused, labels: {class: tunnel, stage: hop}, start: "2026-11-01T09:59:30Z", time: "2026-11-01T10:00:00Z", value: 4}
+      - at: "2026-11-01T10:30:05Z"
+        otlp_sum: {metric: egress_guard.destination.refused, labels: {class: tunnel, stage: hop}, start: "2026-11-01T09:59:30Z", time: "2026-11-01T10:30:00Z", value: 12}
+    fires: []

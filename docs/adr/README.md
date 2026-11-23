@@ -13,7 +13,7 @@ change one only with new evidence, by writing a new ADR that names the one it re
 | [0005](0005-source-adapters-and-ingestion.md) | Source adapter contract and ingestion path | Accepted |
 | [0006](0006-detection-rules-and-correlation.md) | Deterministic rules, correlation and rule packs | Accepted |
 | [0007](0007-findings-and-incidents.md) | Findings, incidents and their lifecycle | Accepted |
-| [0008](0008-identifiers-and-interchange.md) | Identifiers, vocabularies, and interchange with Loimi and Apogee | Accepted |
+| [0008](0008-identifiers-and-interchange.md) | Identifiers, vocabularies, and interchange with an artifact store and a red-team service | Accepted |
 | [0009](0009-agent-runtime-and-authority.md) | Agent runtime interface and response authority | Accepted (design; not built yet) |
 | [0010](0010-deployment-topology.md) | Deployment topology for the first target | Accepted |
 | [0011](0011-separate-worker-database-role.md) | Separate worker database role (amends 0004 §3) | Accepted |
@@ -22,8 +22,8 @@ change one only with new evidence, by writing a new ADR that names the one it re
 Status words: *Accepted* (in force), *Superseded by NNNN*, *Proposed* (not in force).
 
 The research these ADRs rest on (OCSF, STIX 2.1, Sigma correlations, sensor output formats,
-Community ID, collector transports, and the neighbouring Loimi, Apogee and Harava services) is
-summarised in the ADRs that use it, with links to primary sources.
+Community ID, collector transports, and the neighbouring artifact store, red-team service and
+egress gateway) is summarised in the ADRs that use it, with links to primary sources.
 
 ## Decided later, on purpose
 

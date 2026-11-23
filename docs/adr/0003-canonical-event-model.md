@@ -2,6 +2,8 @@
 
 Status: Accepted (2026-11-01)
 
+Edited 2026-11-23: internal service names replaced with their roles.
+
 ## Context
 
 Adapters need one target shape. Options considered:
@@ -29,7 +31,7 @@ Adapters need one target shape. Options considered:
    ([0008](0008-identifiers-and-interchange.md)), and `community_id` where a flow is involved.
 3. **`kind`** is a short, stable Tuisku name for what the row is (`network.flow`, `dns.answer`,
    `http.request`, `tls.handshake`, `file.transfer`, `process.exec`, `metric.sample`,
-   `harava.outbound_refused`, …). Rules match on `kind` and attributes; `ocsf_class_uid` is
+   `egress-guard.outbound_refused`, …). Rules match on `kind` and attributes; `ocsf_class_uid` is
    stored alongside for export.
 4. **Nothing is dropped silently.** Source fields with no OCSF home go to `unmapped`, exactly as
    received. The full original is always in L0.
