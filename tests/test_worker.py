@@ -31,13 +31,13 @@ from tuisku.worker.engine import Worker, WorkerConfig, _window_rows
 from tuisku.worker.metrics import compute_deltas
 
 T = datetime(2026, 11, 1, 10, 0, tzinfo=UTC)
-SERVICE_RULE = "harava.service_caller_outbound_refused"
+SERVICE_RULE = "egress-guard.service_caller_outbound_refused"
 
 
 def outbound(at: datetime, caller: str) -> str:
     stamp = at.strftime("%Y-%m-%d %H:%M:%S,000")
     return (
-        f"{stamp} WARNING harava.api outbound data refused: caller={caller} "
+        f"{stamp} WARNING egress_guard.api outbound data refused: caller={caller} "
         "urls=1 findings=email/query/plain"
     )
 
@@ -71,7 +71,7 @@ def rule_doc(name: str, rid: str, **extra: Any) -> dict[str, Any]:
         "severity": "medium",
         "select": {
             "layer": "observation",
-            "kind": "harava.refusal",
+            "kind": "egress-guard.refusal",
             "where": [{"field": "attributes.type", "op": "eq", "value": "outbound"}],
         },
         "finding": {"group_by": ["attributes.caller"], "window": "1h", "max_lifetime": "24h"},
@@ -91,12 +91,12 @@ def test_reevaluating_a_row_never_writes_a_second_detection_or_page(
     fresh_database_url: str,
 ) -> None:
     url = fresh_database_url
-    ingest(url, "h", "harava", lines((T, "agents"), (T + timedelta(minutes=1), "agents")))
+    ingest(url, "h", "egress-guard", lines((T, "agents"), (T + timedelta(minutes=1), "agents")))
     clock = Clock(T + timedelta(minutes=5))
     notifier = RecordingNotifier()
     run_worker(url, builtin_rules(), clock, notifier)
     before = (fired(url), list(notifier.kinds()))
-    assert before[0].count("harava.agent_outbound_refused") == 2
+    assert before[0].count("egress-guard.agent_outbound_refused") == 2
     # A second run finds nothing to do.
     assert run_worker(url, builtin_rules(), clock, notifier).claimed == 0
     # Re-enqueue every observation, as if a lease had expired after a worker committed.
@@ -106,7 +106,9 @@ def test_reevaluating_a_row_never_writes_a_second_detection_or_page(
     assert stats.claimed > 0 and stats.fired == 0
     assert (fired(url), notifier.kinds()) == before
     [(count,)] = query(
-        url, "SELECT count FROM findings WHERE rule_ref->>'name' = 'harava.agent_outbound_refused'"
+        url,
+        "SELECT count FROM findings "
+        "WHERE rule_ref->>'name' = 'egress-guard.agent_outbound_refused'",
     )
     assert count == 2
 
@@ -117,7 +119,7 @@ def test_firing_key_alone_prevents_duplicates(
     """Even when the pre-check is skipped (two workers racing), the unique firing key rolls the
     second evaluation back and nothing is paged twice."""
     url = fresh_database_url
-    ingest(url, "h", "harava", lines((T, "agents")))
+    ingest(url, "h", "egress-guard", lines((T, "agents")))
     clock = Clock(T + timedelta(minutes=5))
     notifier = RecordingNotifier()
     run_worker(url, builtin_rules(), clock, notifier)
@@ -130,13 +132,13 @@ def test_firing_key_alone_prevents_duplicates(
         conn.execute("INSERT INTO evaluation_queue (observation_id) SELECT id FROM observations")
     stats = run_worker(url, builtin_rules(), clock, notifier)
     assert stats.failed_pairs == 0
-    assert fired(url) == ["harava.agent_outbound_refused"]
+    assert fired(url) == ["egress-guard.agent_outbound_refused"]
     assert notifier.kinds() == ["finding_opened", "incident_opened"]
 
 
 def test_expired_lease_is_claimed_again(fresh_database_url: str) -> None:
     url = fresh_database_url
-    ingest(url, "h", "harava", lines((T, "agents")))
+    ingest(url, "h", "egress-guard", lines((T, "agents")))
     clock = Clock(T)
     worker = Worker(
         rule_set=builtin_rules(), clock=clock, notifier=RecordingNotifier(), config=QUIET_BACKLOG
@@ -147,7 +149,7 @@ def test_expired_lease_is_claimed_again(fresh_database_url: str) -> None:
     clock.advance(seconds=121)
     stats = run_worker(url, builtin_rules(), clock)
     # The two claimed rows, plus the rule's own detection, which is enqueued in turn.
-    assert stats.claimed == 3 and fired(url) == ["harava.agent_outbound_refused"]
+    assert stats.claimed == 3 and fired(url) == ["egress-guard.agent_outbound_refused"]
     assert query(url, "SELECT count(*) FROM evaluation_queue")[0][0] == 0
 
 
@@ -164,7 +166,7 @@ def test_failing_rule_is_dead_lettered_without_hurting_other_rules(
         if rule.id == R2:
             raise RuntimeError("boom")
 
-    ingest(url, "h", "harava", lines((T, "agents")))
+    ingest(url, "h", "egress-guard", lines((T, "agents")))
     clock = Clock(T)
     for attempt in range(1, 6):
         worker = Worker(
@@ -199,7 +201,7 @@ def test_deadlocks_are_retried_without_counting(fresh_database_url: str) -> None
         if calls["n"] <= 2:
             raise errors.DeadlockDetected("simulated")
 
-    ingest(url, "h", "harava", lines((T, "agents")))
+    ingest(url, "h", "egress-guard", lines((T, "agents")))
     worker = Worker(
         rule_set=builtin_rules(),
         clock=Clock(T),
@@ -209,7 +211,7 @@ def test_deadlocks_are_retried_without_counting(fresh_database_url: str) -> None
     )
     stats = run_async(url, worker.run_until_idle)
     assert stats.failed_pairs == 0 and calls["n"] == 3
-    assert fired(url) == ["harava.agent_outbound_refused"]
+    assert fired(url) == ["egress-guard.agent_outbound_refused"]
 
 
 def test_lock_conflicts_are_uncounted_until_the_cap(fresh_database_url: str) -> None:
@@ -218,7 +220,7 @@ def test_lock_conflicts_are_uncounted_until_the_cap(fresh_database_url: str) -> 
     def always(rule: Rule, env: Any) -> None:
         raise errors.LockNotAvailable("simulated")
 
-    ingest(url, "h", "harava", lines((T, "agents")))
+    ingest(url, "h", "egress-guard", lines((T, "agents")))
     clock = Clock(T)
     worker = Worker(
         rule_set=builtin_rules(),
@@ -239,7 +241,7 @@ def test_lock_conflicts_are_uncounted_until_the_cap(fresh_database_url: str) -> 
 
 def test_lease_expiries_never_burn_attempts(fresh_database_url: str) -> None:
     url = fresh_database_url
-    ingest(url, "h", "harava", lines((T, "agents")))
+    ingest(url, "h", "egress-guard", lines((T, "agents")))
     clock = Clock(T)
     worker = Worker(
         rule_set=builtin_rules(), clock=clock, notifier=RecordingNotifier(), config=QUIET_BACKLOG
@@ -248,7 +250,7 @@ def test_lease_expiries_never_burn_attempts(fresh_database_url: str) -> None:
         assert len(run_async(url, worker.claim)) == 2
         clock.advance(seconds=121)
     stats = run_worker(url, builtin_rules(), clock)
-    assert stats.dead_lettered == 0 and fired(url) == ["harava.agent_outbound_refused"]
+    assert stats.dead_lettered == 0 and fired(url) == ["egress-guard.agent_outbound_refused"]
     assert query(url, "SELECT count(*) FROM evaluation_dead_letter_rules")[0][0] == 0
 
 
@@ -259,7 +261,10 @@ def test_overflow_finding_at_the_open_findings_cap(fresh_database_url: str) -> N
     url = fresh_database_url
     callers = ["svc-a", "svc-b", "svc-c", "svc-d"]
     ingest(
-        url, "h", "harava", lines(*[(T + timedelta(minutes=i), c) for i, c in enumerate(callers)])
+        url,
+        "h",
+        "egress-guard",
+        lines(*[(T + timedelta(minutes=i), c) for i, c in enumerate(callers)]),
     )
     clock = Clock(T + timedelta(minutes=10))
     notifier = RecordingNotifier()
@@ -290,7 +295,7 @@ def test_overflow_finding_at_the_open_findings_cap(fresh_database_url: str) -> N
     # Detection kept working: every refusal fired.
     assert fired(url).count(SERVICE_RULE) == 4
     # A repeat from a folded group attaches but is not a new group: no page.
-    ingest(url, "h", "harava", lines((T + timedelta(minutes=11), "svc-c")))
+    ingest(url, "h", "egress-guard", lines((T + timedelta(minutes=11), "svc-c")))
     clock.advance(minutes=5)
     notifier.sent.clear()
     run_worker(url, builtin_rules(), clock, notifier, max_open_findings=2)
@@ -313,7 +318,7 @@ def test_overflow_finding_at_the_open_findings_cap(fresh_database_url: str) -> N
         assert r.status_code == 409
         r = c.post(f"/v1/findings/{uid}/status", json={"status": "resolved"}, headers=auth(triager))
         assert r.status_code == 200
-    ingest(url, "h", "harava", lines((T + timedelta(minutes=16), "svc-e")))
+    ingest(url, "h", "egress-guard", lines((T + timedelta(minutes=16), "svc-e")))
     clock.advance(minutes=5)
     notifier.sent.clear()
     run_worker(url, builtin_rules(), clock, notifier, max_open_findings=2)
@@ -329,11 +334,11 @@ def test_overflow_incident_at_the_live_incident_cap(
 ) -> None:
     url = fresh_database_url
     params = tmp_path / "params.yaml"
-    params.write_text(json.dumps({"harava": {"restricted_callers": ["a1", "a2", "a3"]}}))
+    params.write_text(json.dumps({"egress-guard": {"restricted_callers": ["a1", "a2", "a3"]}}))
     ingest(
         url,
         "h",
-        "harava",
+        "egress-guard",
         lines((T, "a1"), (T + timedelta(minutes=1), "a2"), (T + timedelta(minutes=2), "a3")),
     )
     run_worker(url, builtin_rules(params), Clock(T + timedelta(minutes=5)), max_live_incidents=1)
@@ -364,11 +369,11 @@ def test_late_row_is_checked_against_every_window_containing_it(
     url = fresh_database_url
     rules = load_rule_set([write_pack(tmp_path, [_count_rule(R1)])])
     clock = Clock(T + timedelta(minutes=9))
-    ingest(url, "h", "harava", lines((T, "x"), (T + timedelta(minutes=8), "x")))
+    ingest(url, "h", "egress-guard", lines((T, "x"), (T + timedelta(minutes=8), "x")))
     run_worker(url, rules, clock)
     assert fired(url) == []  # two in ten minutes
     # A row stamped 10:05 arrives after 10:08 was evaluated: the window ending 10:08 now holds 3.
-    ingest(url, "h", "harava", lines((T + timedelta(minutes=5), "x")))
+    ingest(url, "h", "egress-guard", lines((T + timedelta(minutes=5), "x")))
     clock.advance(minutes=5)
     run_worker(url, rules, clock)
     [(eval_time, corr)] = query(
@@ -388,7 +393,7 @@ def test_late_row_outside_every_window_does_not_fire(
     ingest(
         url,
         "h",
-        "harava",
+        "egress-guard",
         lines((T, "x"), (T + timedelta(minutes=8), "x"), (T - timedelta(minutes=11), "x")),
     )
     run_worker(url, rules, Clock(T + timedelta(minutes=20)))
@@ -402,7 +407,7 @@ def test_rows_between_firings_are_linked_counted_and_paged(
     rules = load_rule_set(
         [write_pack(tmp_path, [_count_rule(R1, gte=2, timespan="1h", notify="each")])]
     )
-    ingest(url, "h", "harava", lines(*[(T + timedelta(minutes=i), "x") for i in range(11)]))
+    ingest(url, "h", "egress-guard", lines(*[(T + timedelta(minutes=i), "x") for i in range(11)]))
     notifier = RecordingNotifier()
     run_worker(url, rules, Clock(T + timedelta(minutes=20)), notifier)
     assert fired(url) == ["testpack.burst"]  # fired once at the second row
@@ -429,7 +434,7 @@ def test_resolving_a_finding_rearms_the_correlation(
     url = fresh_database_url
     rules = load_rule_set([write_pack(tmp_path, [_count_rule(R1, gte=2, timespan="1h")])])
     clock = Clock(T + timedelta(minutes=5))
-    ingest(url, "h", "harava", lines((T, "x"), (T + timedelta(minutes=1), "x")))
+    ingest(url, "h", "egress-guard", lines((T, "x"), (T + timedelta(minutes=1), "x")))
     run_worker(url, rules, clock)
     [(uid,)] = query(url, "SELECT uid::text FROM findings")
     triager = operator_token(url, Role.TRIAGE)
@@ -440,7 +445,7 @@ def test_resolving_a_finding_rearms_the_correlation(
             headers=auth(triager),
         )
         assert r.status_code == 200
-    ingest(url, "h", "harava", lines((T + timedelta(minutes=10), "x")))
+    ingest(url, "h", "egress-guard", lines((T + timedelta(minutes=10), "x")))
     clock.advance(minutes=10)
     run_worker(url, rules, clock)
     assert fired(url) == ["testpack.burst", "testpack.burst"]
@@ -453,11 +458,11 @@ def test_resolving_a_finding_rearms_the_correlation(
 def test_expiry_and_lifetime_open_new_findings(fresh_database_url: str) -> None:
     url = fresh_database_url
     clock = Clock(T)
-    ingest(url, "h", "harava", lines((T, "svc")))
+    ingest(url, "h", "egress-guard", lines((T, "svc")))
     run_worker(url, builtin_rules(), clock)
     # 61 minutes later the window (1h) has passed: the sweep expires it, the next opens anew.
     clock.advance(minutes=61)
-    ingest(url, "h", "harava", lines((clock.now, "svc")))
+    ingest(url, "h", "egress-guard", lines((clock.now, "svc")))
     stats = run_worker(url, builtin_rules(), clock)
     assert stats.expired_findings == 1
     assert query(url, "SELECT status, count FROM findings ORDER BY id") == [
@@ -477,7 +482,7 @@ def test_suppressed_finding_collects_evidence_silently(fresh_database_url: str) 
     T = datetime.now(UTC).replace(microsecond=0)  # noqa: N806
     url = fresh_database_url
     clock = Clock(T)
-    ingest(url, "h", "harava", lines((T, "agents")))
+    ingest(url, "h", "egress-guard", lines((T, "agents")))
     notifier = RecordingNotifier()
     run_worker(url, builtin_rules(), clock, notifier)
     [(uid,)] = query(url, "SELECT uid::text FROM findings")
@@ -495,7 +500,7 @@ def test_suppressed_finding_collects_evidence_silently(fresh_database_url: str) 
         )
     notifier.sent.clear()
     clock.advance(minutes=5)
-    ingest(url, "h", "harava", lines((clock.now, "agents")))
+    ingest(url, "h", "egress-guard", lines((clock.now, "agents")))
     run_worker(url, builtin_rules(), clock, notifier)
     assert notifier.sent == []
     assert query(url, "SELECT status, count FROM findings") == [("suppressed", 2)]
@@ -505,7 +510,7 @@ def test_suppressed_finding_collects_evidence_silently(fresh_database_url: str) 
     assert actor.startswith("operator:") and reason == "maintenance"
     # The suppression expires; paging resumes.
     clock.advance(minutes=30)
-    ingest(url, "h", "harava", lines((clock.now, "agents")))
+    ingest(url, "h", "egress-guard", lines((clock.now, "agents")))
     run_worker(url, builtin_rules(), clock, notifier)
     assert query(url, "SELECT status, count FROM findings") == [("open", 3)]
     # One summary of what the suppression held back (round ten), then paging resumes.
@@ -517,7 +522,7 @@ def test_suppressed_finding_collects_evidence_silently(fresh_database_url: str) 
 def test_new_evidence_reopens_a_contained_incident(fresh_database_url: str) -> None:
     url = fresh_database_url
     clock = Clock(T)
-    ingest(url, "h", "harava", lines((T, "agents")))
+    ingest(url, "h", "egress-guard", lines((T, "agents")))
     notifier = RecordingNotifier()
     run_worker(url, builtin_rules(), clock, notifier)
     [(uid,)] = query(url, "SELECT uid::text FROM incidents")
@@ -532,7 +537,7 @@ def test_new_evidence_reopens_a_contained_incident(fresh_database_url: str) -> N
         assert r.status_code == 409
     notifier.sent.clear()
     clock.advance(minutes=5)
-    ingest(url, "h", "harava", lines((clock.now, "agents")))
+    ingest(url, "h", "egress-guard", lines((clock.now, "agents")))
     run_worker(url, builtin_rules(), clock, notifier)
     assert query(url, "SELECT status FROM incidents") == [("investigating",)]
     assert sorted(notifier.kinds()) == ["finding_occurrence", "incident_escalated"]
@@ -547,7 +552,7 @@ def _metric(at: datetime, value: int, *, start: datetime, stage: str, cls: str =
     return (
         at + timedelta(seconds=5),
         otlp_sum(
-            "harava.destination.refused",
+            "egress_guard.destination.refused",
             value,
             time=at,
             start=start,
@@ -563,16 +568,16 @@ def test_new_label_set_on_a_long_running_process_counts_in_full(
 ) -> None:
     url = fresh_database_url
     old = T - timedelta(days=30)
-    ingest(url, "h", "harava", [_metric(T, 900, start=old, stage="hop")])
+    ingest(url, "h", "egress-guard", [_metric(T, 900, start=old, stage="hop")])
     second_start = old if same_start else old + timedelta(days=1)
     ingest(
         url,
         "h",
-        "harava",
+        "egress-guard",
         [_metric(T + timedelta(minutes=10), 15, start=second_start, stage="render", cls="overlay")],
     )
     run_worker(url, builtin_rules(), Clock(T + timedelta(minutes=20)))
-    expected = ["harava.destination_refused_trend"] if same_start else []
+    expected = ["egress-guard.destination_refused_trend"] if same_start else []
     assert fired(url) == expected
 
 
@@ -582,7 +587,7 @@ def test_out_of_order_samples_never_double_the_total(fresh_database_url: str) ->
     ingest(
         url,
         "h",
-        "harava",
+        "egress-guard",
         [
             _metric(T, 0, start=start, stage="hop"),
             _metric(T + timedelta(minutes=40), 10, start=start, stage="hop"),
@@ -611,7 +616,7 @@ def test_counter_reset_counts_the_new_value(fresh_database_url: str) -> None:
     ingest(
         url,
         "h",
-        "harava",
+        "egress-guard",
         [
             _metric(T, 5, start=start, stage="hop"),
             _metric(T + timedelta(minutes=10), 2, start=start, stage="hop"),  # lower: a reset

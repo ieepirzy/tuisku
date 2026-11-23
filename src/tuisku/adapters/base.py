@@ -25,14 +25,14 @@ OCSF_VERSION = "1.9.0"
 class Evaluator(StrEnum):
     """Who ran the logic that produced a detection (ADR 0002)."""
 
-    SENSOR = "sensor"  # Suricata, Zeek, Falco, Harava decided; adapters only ever emit this
+    SENSOR = "sensor"  # Suricata, Zeek, Falco, egress gateway decided; adapters only emit this
     TUISKU = "tuisku"  # a Tuisku rule pack rule fired in the worker
 
 
 class Authorship(StrEnum):
     """Who wrote that logic (ADR 0002)."""
 
-    BUILTIN = "builtin"  # shipped with the sensor as its own logic (Zeek notice, Harava checks)
+    BUILTIN = "builtin"  # shipped with the sensor as its own logic (Zeek notice, gateway refusals)
     COMMUNITY = "community"  # a third-party rule set (ET Open, Falco default rules)
     LOCAL = "local"  # written by the deploying estate
     TUISKU = "tuisku"  # a pack shipped in this repository
@@ -116,7 +116,7 @@ class DetectionDraft:
     the same result by index.
 
     ``rule_ref`` identifies the mechanism verbatim, e.g. ``{"engine": "suricata", "gid": 1,
-    "sid": 2045001, "rev": 1, "name": "ET ..."}`` or ``{"engine": "harava", "name":
+    "sid": 2045001, "rev": 1, "name": "ET ..."}`` or ``{"engine": "egress-guard", "name":
     "outbound_refused"}``. ``identity`` is the stable string used for finding fingerprints
     (``suricata:1:2045001``, ``falco:Terminal shell in container``,
     ``zeek:notice:Scan::Port_Scan``).

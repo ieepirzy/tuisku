@@ -1,0 +1,9 @@
+{"log":"2026-11-01 09:14:03,512 WARNING egress_guard.api outbound data refused: caller=agents urls=1 findings=email/query/percent\n","stream":"stderr","time":"2026-11-01T09:14:03.512874213Z"}
+{"log":"2026-11-01 09:15:40,207 WARNING egress_guard.api destination refused: caller=agents classes=capture_sink\n","stream":"stderr","time":"2026-11-01T09:15:40.208001930Z"}
+{"log":"2026-11-01 09:30:00,001 ERROR egress_guard.mcp MCP refuses to serve: GATEWAY_MCP_API_TOKEN is not a token the API accepts\n","stream":"stderr","time":"2026-11-01T09:30:00.001532001Z","attrs":{"tag":"egress-guard-mcp"}}
+{"log":"2026-11-01 09:31:12,045 INFO egress_guard.api applied migration 0007_frontier\n","stream":"stderr","time":"2026-11-01T09:31:12.045700000Z"}
+{"log":"2026-11-01 09:31:12,045 INFO egress_guard.api partial line wit","stream":"stderr","time":"2026-11-01T09:31:12.045700000Z"}
+{"log":"ail/query/plain,phone/host/plain\n","stream":"stderr","time":"2026-11-01T09:31:12.045800000Z"}
+{"log":"2026-11-01 09:31:12,045 INFO egress_guard.api ok\n","stream":"stderr","time":"yesterday"}
+{"stream":"stderr","time":"2026-11-01T09:31:12.045700000Z"}
+{"log":"INFO:     Application startup complete.\n","stream":"stderr","time":"2026-11-01T09:31:12.045700000Z"}

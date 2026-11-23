@@ -2,6 +2,8 @@
 
 Status: Accepted (2026-11-01)
 
+Edited 2026-11-23: internal service names replaced with their roles.
+
 ## Context
 
 The owner chose Python, FastAPI and Postgres with plain SQL (no ORM) and Alembic migrations.
@@ -93,7 +95,7 @@ are mutable working objects that keep a history.
    rotated file. A re-delivery inserts nothing and is reported as a duplicate. Each duplicate
    receipt is recorded in `raw_duplicates (raw_record_id, received_at, token_id)`, so a burst of
    byte-identical lines is visible as a count rather than lost. Sensors we target include a
-   timestamp in every line (Harava logs carry millisecond time), so real events rarely collide.
+   timestamp in every line (egress gateway logs carry millisecond time), so real events rarely collide.
 6. **Two clocks on every derived row.**
    - `event_time` comes from the sensor and may be wrong or hostile. `received_at` is Tuisku's
      own clock.
@@ -116,7 +118,7 @@ are mutable working objects that keep a history.
    period.
    Retention is a prerequisite for ingesting user-traffic sources such as HTTP and DNS logs,
    which carry personal data. It must be configured before such a source is enabled in
-   production; the first milestone's Harava source carries no URLs or values. Nothing above L0
+   production; the first milestone's egress gateway source carries no URLs or values. Nothing above L0
    needs the L0 body to stay readable.
 10. **Scale path, not built now:** monthly range partitioning of `raw_records` and `observations`
     by `received_at`, and moving cold L0 bodies to object storage by content hash. Both fit

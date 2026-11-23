@@ -1,31 +1,31 @@
 [
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [
       {
         "attack": [],
         "attributes": {},
         "authorship": "builtin",
         "entity_keys": [
-          "caller:harava/agents"
+          "caller:egress-guard/agents"
         ],
         "event_time": "2026-11-01T09:14:03.512000+00:00",
         "explanation": {
-          "check": "outbound guard (harava.outbound)",
-          "sensor": "harava",
-          "why": "Harava found what looks like personal or secret data in URLs the caller asked it to fetch, and refused the request. Harava does not log the URL or the value; the findings are on the referenced observation."
+          "check": "outbound data guard",
+          "sensor": "egress-guard",
+          "why": "The gateway found what looks like personal or secret data in URLs the caller asked it to fetch, and refused the request. The gateway does not log the URL or the value; the findings are on the referenced observation."
         },
-        "identity": "harava:outbound_refused",
-        "kind": "harava.outbound_refused",
+        "identity": "egress-guard:outbound_refused",
+        "kind": "egress-guard.outbound_refused",
         "observation_refs": [
           0
         ],
         "rule_ref": {
-          "engine": "harava",
+          "engine": "egress-guard",
           "name": "outbound_refused"
         },
         "severity": 4,
-        "title": "Harava refused outbound data"
+        "title": "The egress gateway refused outbound data"
       }
     ],
     "observations": [
@@ -41,52 +41,52 @@
             }
           ],
           "level": "WARNING",
-          "logger": "harava.api",
+          "logger": "egress_guard.api",
           "type": "outbound",
           "urls": 1
         },
         "community_id": null,
         "correlation": {},
         "entity_keys": [
-          "caller:harava/agents"
+          "caller:egress-guard/agents"
         ],
         "event_time": "2026-11-01T09:14:03.512000+00:00",
         "flags": [
           "timezone_assumed_utc"
         ],
-        "kind": "harava.refusal",
+        "kind": "egress-guard.refusal",
         "ocsf_class_uid": null,
         "unmapped": {}
       }
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [
       {
         "attack": [],
         "attributes": {},
         "authorship": "builtin",
         "entity_keys": [
-          "caller:harava/agents"
+          "caller:egress-guard/agents"
         ],
         "event_time": "2026-11-01T09:14:07.031000+00:00",
         "explanation": {
-          "check": "outbound guard (harava.outbound)",
-          "sensor": "harava",
-          "why": "Harava found what looks like personal or secret data in URLs the caller asked it to fetch, and refused the request. Harava does not log the URL or the value; the findings are on the referenced observation."
+          "check": "outbound data guard",
+          "sensor": "egress-guard",
+          "why": "The gateway found what looks like personal or secret data in URLs the caller asked it to fetch, and refused the request. The gateway does not log the URL or the value; the findings are on the referenced observation."
         },
-        "identity": "harava:outbound_refused",
-        "kind": "harava.outbound_refused",
+        "identity": "egress-guard:outbound_refused",
+        "kind": "egress-guard.outbound_refused",
         "observation_refs": [
           0
         ],
         "rule_ref": {
-          "engine": "harava",
+          "engine": "egress-guard",
           "name": "outbound_refused"
         },
         "severity": 4,
-        "title": "Harava refused outbound data"
+        "title": "The egress gateway refused outbound data"
       }
     ],
     "observations": [
@@ -112,59 +112,59 @@
             }
           ],
           "level": "WARNING",
-          "logger": "harava.api",
+          "logger": "egress_guard.api",
           "type": "outbound",
           "urls": 2
         },
         "community_id": null,
         "correlation": {},
         "entity_keys": [
-          "caller:harava/agents"
+          "caller:egress-guard/agents"
         ],
         "event_time": "2026-11-01T09:14:07.031000+00:00",
         "flags": [
           "timezone_assumed_utc"
         ],
-        "kind": "harava.refusal",
+        "kind": "egress-guard.refusal",
         "ocsf_class_uid": null,
         "unmapped": {}
       }
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [
       {
         "attack": [],
         "attributes": {},
         "authorship": "builtin",
         "entity_keys": [
-          "caller:harava/sidos"
+          "caller:egress-guard/billing"
         ],
         "event_time": "2026-11-01T09:20:11.880000+00:00",
         "explanation": {
-          "check": "outbound guard (harava.outbound)",
-          "sensor": "harava",
-          "why": "Harava found what looks like personal or secret data in URLs the caller asked it to fetch, and refused the request. Harava does not log the URL or the value; the findings are on the referenced observation."
+          "check": "outbound data guard",
+          "sensor": "egress-guard",
+          "why": "The gateway found what looks like personal or secret data in URLs the caller asked it to fetch, and refused the request. The gateway does not log the URL or the value; the findings are on the referenced observation."
         },
-        "identity": "harava:outbound_refused",
-        "kind": "harava.outbound_refused",
+        "identity": "egress-guard:outbound_refused",
+        "kind": "egress-guard.outbound_refused",
         "observation_refs": [
           0
         ],
         "rule_ref": {
-          "engine": "harava",
+          "engine": "egress-guard",
           "name": "outbound_refused"
         },
         "severity": 4,
-        "title": "Harava refused outbound data"
+        "title": "The egress gateway refused outbound data"
       }
     ],
     "observations": [
       {
         "attributes": {
           "asctime": "2026-11-01 09:20:11,880",
-          "caller": "sidos",
+          "caller": "billing",
           "findings": [
             {
               "detector": "sensitive_value",
@@ -173,52 +173,52 @@
             }
           ],
           "level": "WARNING",
-          "logger": "harava.api",
+          "logger": "egress_guard.api",
           "type": "outbound",
           "urls": 0
         },
         "community_id": null,
         "correlation": {},
         "entity_keys": [
-          "caller:harava/sidos"
+          "caller:egress-guard/billing"
         ],
         "event_time": "2026-11-01T09:20:11.880000+00:00",
         "flags": [
           "timezone_assumed_utc"
         ],
-        "kind": "harava.refusal",
+        "kind": "egress-guard.refusal",
         "ocsf_class_uid": null,
         "unmapped": {}
       }
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [
       {
         "attack": [],
         "attributes": {},
         "authorship": "builtin",
         "entity_keys": [
-          "caller:harava/agents"
+          "caller:egress-guard/agents"
         ],
         "event_time": "2026-11-01T09:21:00.100000+00:00",
         "explanation": {
-          "check": "outbound guard (harava.outbound)",
-          "sensor": "harava",
-          "why": "Harava found what looks like personal or secret data in URLs the caller asked it to fetch, and refused the request. Harava does not log the URL or the value; the findings are on the referenced observation."
+          "check": "outbound data guard",
+          "sensor": "egress-guard",
+          "why": "The gateway found what looks like personal or secret data in URLs the caller asked it to fetch, and refused the request. The gateway does not log the URL or the value; the findings are on the referenced observation."
         },
-        "identity": "harava:outbound_refused",
-        "kind": "harava.outbound_refused",
+        "identity": "egress-guard:outbound_refused",
+        "kind": "egress-guard.outbound_refused",
         "observation_refs": [
           0
         ],
         "rule_ref": {
-          "engine": "harava",
+          "engine": "egress-guard",
           "name": "outbound_refused"
         },
         "severity": 4,
-        "title": "Harava refused outbound data"
+        "title": "The egress gateway refused outbound data"
       }
     ],
     "observations": [
@@ -234,14 +234,14 @@
             }
           ],
           "level": "WARNING",
-          "logger": "harava.api",
+          "logger": "egress_guard.api",
           "type": "outbound",
           "urls": 1
         },
         "community_id": null,
         "correlation": {},
         "entity_keys": [
-          "caller:harava/agents"
+          "caller:egress-guard/agents"
         ],
         "event_time": "2026-11-01T09:21:00.100000+00:00",
         "flags": [
@@ -250,7 +250,7 @@
           "unknown_detector",
           "malformed_finding"
         ],
-        "kind": "harava.refusal",
+        "kind": "egress-guard.refusal",
         "ocsf_class_uid": null,
         "unmapped": {
           "findings_unrecognised": [
@@ -263,32 +263,32 @@
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [
       {
         "attack": [],
         "attributes": {},
         "authorship": "builtin",
         "entity_keys": [
-          "caller:harava/agents"
+          "caller:egress-guard/agents"
         ],
         "event_time": "2026-11-01T09:15:40.207000+00:00",
         "explanation": {
-          "check": "destination policy (harava.destinations), admission stage",
-          "sensor": "harava",
-          "why": "The caller asked Harava to fetch a destination in a refused class (overlay networks and gateways, request catchers, tunnels, local-network names). Harava logs the classes only, never the destination; they are on the referenced observation."
+          "check": "destination policy, admission stage",
+          "sensor": "egress-guard",
+          "why": "The caller asked the gateway to fetch a destination in a refused class (overlay networks and gateways, request catchers, tunnels, local-network names). The gateway logs the classes only, never the destination; they are on the referenced observation."
         },
-        "identity": "harava:destination_refused",
-        "kind": "harava.destination_refused",
+        "identity": "egress-guard:destination_refused",
+        "kind": "egress-guard.destination_refused",
         "observation_refs": [
           0
         ],
         "rule_ref": {
-          "engine": "harava",
+          "engine": "egress-guard",
           "name": "destination_refused"
         },
         "severity": 4,
-        "title": "Harava refused a destination"
+        "title": "The egress gateway refused a destination"
       }
     ],
     "observations": [
@@ -300,52 +300,52 @@
             "capture_sink"
           ],
           "level": "WARNING",
-          "logger": "harava.api",
+          "logger": "egress_guard.api",
           "stage": "admission",
           "type": "destination"
         },
         "community_id": null,
         "correlation": {},
         "entity_keys": [
-          "caller:harava/agents"
+          "caller:egress-guard/agents"
         ],
         "event_time": "2026-11-01T09:15:40.207000+00:00",
         "flags": [
           "timezone_assumed_utc"
         ],
-        "kind": "harava.refusal",
+        "kind": "egress-guard.refusal",
         "ocsf_class_uid": null,
         "unmapped": {}
       }
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [
       {
         "attack": [],
         "attributes": {},
         "authorship": "builtin",
         "entity_keys": [
-          "caller:harava/agents"
+          "caller:egress-guard/agents"
         ],
         "event_time": "2026-11-01T09:16:02.644000+00:00",
         "explanation": {
-          "check": "destination policy (harava.destinations), admission stage",
-          "sensor": "harava",
-          "why": "The caller asked Harava to fetch a destination in a refused class (overlay networks and gateways, request catchers, tunnels, local-network names). Harava logs the classes only, never the destination; they are on the referenced observation."
+          "check": "destination policy, admission stage",
+          "sensor": "egress-guard",
+          "why": "The caller asked the gateway to fetch a destination in a refused class (overlay networks and gateways, request catchers, tunnels, local-network names). The gateway logs the classes only, never the destination; they are on the referenced observation."
         },
-        "identity": "harava:destination_refused",
-        "kind": "harava.destination_refused",
+        "identity": "egress-guard:destination_refused",
+        "kind": "egress-guard.destination_refused",
         "observation_refs": [
           0
         ],
         "rule_ref": {
-          "engine": "harava",
+          "engine": "egress-guard",
           "name": "destination_refused"
         },
         "severity": 4,
-        "title": "Harava refused a destination"
+        "title": "The egress gateway refused a destination"
       }
     ],
     "observations": [
@@ -359,78 +359,78 @@
             "tunnel"
           ],
           "level": "WARNING",
-          "logger": "harava.api",
+          "logger": "egress_guard.api",
           "stage": "admission",
           "type": "destination"
         },
         "community_id": null,
         "correlation": {},
         "entity_keys": [
-          "caller:harava/agents"
+          "caller:egress-guard/agents"
         ],
         "event_time": "2026-11-01T09:16:02.644000+00:00",
         "flags": [
           "timezone_assumed_utc"
         ],
-        "kind": "harava.refusal",
+        "kind": "egress-guard.refusal",
         "ocsf_class_uid": null,
         "unmapped": {}
       }
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [
       {
         "attack": [],
         "attributes": {},
         "authorship": "builtin",
         "entity_keys": [
-          "caller:harava/loimi"
+          "caller:egress-guard/search"
         ],
         "event_time": "2026-11-01T09:16:30+00:00",
         "explanation": {
-          "check": "destination policy (harava.destinations), admission stage",
-          "sensor": "harava",
-          "why": "The caller asked Harava to fetch a destination in a refused class (overlay networks and gateways, request catchers, tunnels, local-network names). Harava logs the classes only, never the destination; they are on the referenced observation."
+          "check": "destination policy, admission stage",
+          "sensor": "egress-guard",
+          "why": "The caller asked the gateway to fetch a destination in a refused class (overlay networks and gateways, request catchers, tunnels, local-network names). The gateway logs the classes only, never the destination; they are on the referenced observation."
         },
-        "identity": "harava:destination_refused",
-        "kind": "harava.destination_refused",
+        "identity": "egress-guard:destination_refused",
+        "kind": "egress-guard.destination_refused",
         "observation_refs": [
           0
         ],
         "rule_ref": {
-          "engine": "harava",
+          "engine": "egress-guard",
           "name": "destination_refused"
         },
         "severity": 4,
-        "title": "Harava refused a destination"
+        "title": "The egress gateway refused a destination"
       }
     ],
     "observations": [
       {
         "attributes": {
           "asctime": "2026-11-01 09:16:30,000",
-          "caller": "loimi",
+          "caller": "search",
           "classes": [
             "overlay"
           ],
           "level": "WARNING",
-          "logger": "harava.api",
+          "logger": "egress_guard.api",
           "stage": "admission",
           "type": "destination"
         },
         "community_id": null,
         "correlation": {},
         "entity_keys": [
-          "caller:harava/loimi"
+          "caller:egress-guard/search"
         ],
         "event_time": "2026-11-01T09:16:30+00:00",
         "flags": [
           "timezone_assumed_utc",
           "unknown_class"
         ],
-        "kind": "harava.refusal",
+        "kind": "egress-guard.refusal",
         "ocsf_class_uid": null,
         "unmapped": {
           "classes_unrecognised": [
@@ -441,15 +441,15 @@
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [],
     "observations": [
       {
         "attributes": {
           "asctime": "2026-11-01 09:30:00,001",
           "level": "ERROR",
-          "logger": "harava.mcp",
-          "reason": "the MCP's API caller is not restricted: add it to HARAVA_RESTRICTED_CALLERS"
+          "logger": "egress_guard.mcp",
+          "reason": "the MCP's API caller is not restricted: add it to GATEWAY_RESTRICTED_CALLERS"
         },
         "community_id": null,
         "correlation": {},
@@ -458,21 +458,21 @@
         "flags": [
           "timezone_assumed_utc"
         ],
-        "kind": "harava.mcp_refused_to_serve",
+        "kind": "egress-guard.mcp_refused_to_serve",
         "ocsf_class_uid": null,
         "unmapped": {}
       }
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [],
     "observations": [
       {
         "attributes": {
           "asctime": "2026-11-01 09:30:05,410",
           "level": "WARNING",
-          "logger": "harava.mcp",
+          "logger": "egress_guard.mcp",
           "message": "MCP could not verify its API credential: ConnectError"
         },
         "community_id": null,
@@ -482,21 +482,21 @@
         "flags": [
           "timezone_assumed_utc"
         ],
-        "kind": "harava.log",
+        "kind": "egress-guard.log",
         "ocsf_class_uid": null,
         "unmapped": {}
       }
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [],
     "observations": [
       {
         "attributes": {
           "asctime": "2026-11-01 08:00:00,002",
           "level": "INFO",
-          "logger": "harava.telemetry",
+          "logger": "egress_guard.telemetry",
           "message": "telemetry export off (OTEL_EXPORTER_OTLP_ENDPOINT unset)"
         },
         "community_id": null,
@@ -506,18 +506,18 @@
         "flags": [
           "timezone_assumed_utc"
         ],
-        "kind": "harava.log",
+        "kind": "egress-guard.log",
         "ocsf_class_uid": null,
         "unmapped": {}
       }
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "error": "malformed outbound refusal line"
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [],
     "observations": [
       {
@@ -533,14 +533,14 @@
         "flags": [
           "message_withheld"
         ],
-        "kind": "harava.unknown",
+        "kind": "egress-guard.unknown",
         "ocsf_class_uid": null,
         "unmapped": {}
       }
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [],
     "observations": [
       {
@@ -555,22 +555,22 @@
         "flags": [
           "message_withheld"
         ],
-        "kind": "harava.unknown",
+        "kind": "egress-guard.unknown",
         "ocsf_class_uid": null,
         "unmapped": {}
       }
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "error": "log asctime is not a valid date"
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "error": "unknown log level"
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [
       {
         "attack": [],
@@ -579,21 +579,21 @@
         "entity_keys": [],
         "event_time": "2026-11-01T09:40:00.250000+00:00",
         "explanation": {
-          "check": "destination policy (harava.destinations), admission stage",
-          "sensor": "harava",
-          "why": "The caller asked Harava to fetch a destination in a refused class (overlay networks and gateways, request catchers, tunnels, local-network names). Harava logs the classes only, never the destination; they are on the referenced observation."
+          "check": "destination policy, admission stage",
+          "sensor": "egress-guard",
+          "why": "The caller asked the gateway to fetch a destination in a refused class (overlay networks and gateways, request catchers, tunnels, local-network names). The gateway logs the classes only, never the destination; they are on the referenced observation."
         },
-        "identity": "harava:destination_refused",
-        "kind": "harava.destination_refused",
+        "identity": "egress-guard:destination_refused",
+        "kind": "egress-guard.destination_refused",
         "observation_refs": [
           0
         ],
         "rule_ref": {
-          "engine": "harava",
+          "engine": "egress-guard",
           "name": "destination_refused"
         },
         "severity": 4,
-        "title": "Harava refused a destination"
+        "title": "The egress gateway refused a destination"
       }
     ],
     "observations": [
@@ -604,7 +604,7 @@
             "tunnel"
           ],
           "level": "WARNING",
-          "logger": "harava.api",
+          "logger": "egress_guard.api",
           "stage": "admission",
           "type": "destination"
         },
@@ -616,19 +616,19 @@
           "timezone_assumed_utc",
           "caller_invalid"
         ],
-        "kind": "harava.refusal",
+        "kind": "egress-guard.refusal",
         "ocsf_class_uid": null,
         "unmapped": {}
       }
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [],
     "observations": [
       {
         "attributes": {
-          "length": 52,
+          "length": 58,
           "line_type": "traceback"
         },
         "community_id": null,
@@ -638,14 +638,14 @@
         "flags": [
           "message_withheld"
         ],
-        "kind": "harava.unknown",
+        "kind": "egress-guard.unknown",
         "ocsf_class_uid": null,
         "unmapped": {}
       }
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [],
     "observations": [
       {
@@ -660,7 +660,7 @@
         "flags": [
           "message_withheld"
         ],
-        "kind": "harava.unknown",
+        "kind": "egress-guard.unknown",
         "ocsf_class_uid": null,
         "unmapped": {}
       }

@@ -2,18 +2,20 @@
 
 Status: Accepted (2026-11-01)
 
+Edited 2026-11-23: internal service names replaced with their roles.
+
 ## Context
 
 Issue #1 defines Tuisku as an open-source intrusion detection and agentic blue-team framework.
 Deterministic systems detect and preserve evidence; agents investigate that evidence. Tuisku is
 deliberately not "an LLM watching logs", not a SIEM clone, not a replacement for mature sensors,
-and not part of Apogee.
+and not part of the estate's offensive-security (red-team) service.
 
 ## Decision
 
 Tuisku owns the layer **above** sensors: ingestion, normalization, provenance, deterministic
 detection and correlation, the evidence graph, incidents, investigation tooling, and
-policy-bounded response. Sensors (Suricata, Zeek, Falco, Harava and later others) stay
+policy-bounded response. Sensors (Suricata, Zeek, Falco, an egress gateway and later others) stay
 upstream, behind versioned adapters ([0005](0005-source-adapters-and-ingestion.md)).
 
 Principles every later decision must keep:

@@ -2,6 +2,8 @@
 
 Status: Accepted (2026-11-01)
 
+Edited 2026-11-23: internal service names replaced with their roles.
+
 ## Context
 
 Issue #1 makes epistemic separation a hard requirement. The system must keep apart four kinds
@@ -19,9 +21,10 @@ distinction is lost the moment it is stored. The same rule can also be written b
 evaluated by another: a community pack can be evaluated by Tuisku, and an operator's local
 Suricata rule is evaluated by Suricata.
 
-Neighbouring systems draw similar lines. Apogee's claims carry an epistemic status
-(`observed | inferred | verified | unknown`) with evidence references. Loimi separates
-deterministic provenance from suggested relevance.
+Neighbouring systems draw similar lines. The red-team service's claims carry an epistemic
+status (`observed | inferred | verified | unknown`) with evidence references. The artifact store
+separates deterministic provenance from suggested relevance (both roles are described in
+[0008](0008-identifiers-and-interchange.md)).
 
 ## Decision
 
@@ -31,7 +34,7 @@ deterministic provenance from suggested relevance.
 |---|---|---|---|
 | L0 raw record | `raw_records` (+ `parse_attempts`, `raw_duplicates`) | the sender, verbatim | one EVE JSON line, one log line (an NDJSON envelope's `raw` or an OTLP log record's body), one OTLP metrics request body |
 | L1 observation | `observations` | a versioned adapter, deterministically from L0 | a network flow, a DNS answer, a process exec, a metric sample |
-| L2 detection | `detections` | a deterministic mechanism evaluating a rule or built-in check | Zeek `notice`, Suricata signature match, Falco rule match, Harava refusal, a Tuisku pack rule |
+| L2 detection | `detections` | a deterministic mechanism evaluating a rule or built-in check | Zeek `notice`, Suricata signature match, Falco rule match, egress gateway refusal, a Tuisku pack rule |
 | L3 finding / incident | `findings`, `incidents`, `incident_events` | Tuisku's deterministic grouping, and people | "the agent caller had outbound data refused 3× in 1h" |
 | L4 inference | `hypotheses`, `investigator_sessions`, `tool_calls`, `proposed_actions`, `evidence_requests` (later) | an agent or other investigator | "likely objective: exfiltration through an agent tool" |
 
@@ -42,11 +45,11 @@ A row's layer is fixed by the table it is in and cannot change.
 Every detection has two required columns, which keep issue #1's third category visible. They
 are not merged into one flag:
 
-- `evaluator`: `sensor` (Suricata, Zeek, Falco, Harava decided) or `tuisku` (a Tuisku rule pack
+- `evaluator`: `sensor` (Suricata, Zeek, Falco, an egress gateway decided) or `tuisku` (a Tuisku rule pack
   rule fired in the worker).
 - `authorship`: who wrote the logic.
   - `builtin`: shipped with the sensor as its own logic. Examples: Zeek's notice scripts,
-    Suricata's protocol anomaly checks, Harava's refusal checks.
+    Suricata's protocol anomaly checks, an egress gateway's refusal checks.
   - `community`: a third-party rule set, such as ET Open, Falco's default rules, or a community
     Tuisku pack.
   - `local`: written by the deploying estate.

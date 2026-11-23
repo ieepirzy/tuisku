@@ -11,7 +11,7 @@ Accepted:
   (Falco ``evt.time``).
 
 **Zone-less strings are ambiguous.** An ISO string without ``Z`` or an offset is interpreted as
-UTC, because that is how Harava's containers log. :func:`parse_timestamp` hides that
+UTC, because that is how the egress gateway's containers log. :func:`parse_timestamp` hides that
 assumption; adapters that want to record it call :func:`parse_timestamp_with_zone_flag` and add
 the ``timezone_assumed_utc`` flag to the observation when the returned ``zone_given`` is False.
 Epoch values carry no zone ambiguity and report ``zone_given=True``.

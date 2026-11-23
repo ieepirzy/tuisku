@@ -126,6 +126,35 @@ Operator tokens with the `read` role (or `triage`/`admin`) can read evidence:
 each raw record's newest successful parse attempt unless `all_attempts=true`) and
 `GET /v1/raw/{uid}` (metadata and the body as base64).
 
+### Egress gateway sources (`egress-guard`)
+
+The built-in `egress-guard` adapter and pack read an agent egress safety proxy: an outbound fetch
+gateway that agents call to fetch URLs, and that refuses unsafe outbound requests (URLs carrying
+personal or secret data) and unsafe destinations. The adapter reads the gateway's Python log
+lines and its OTLP JSON metrics (the formats are in `src/tuisku/adapters/egress_guard.py`). The
+gateway's own logger and metric names belong to the deployment, so the adapter and the pack
+default to neutral names (`egress_guard.api`, `egress_guard.mcp`,
+`egress_guard.destination.refused`, ...) and a deployment points them at its gateway's names in
+its own configuration repository:
+
+```sh
+# Adapter options: refusals are read from <logger_prefix>.api and <logger_prefix>.mcp, and the
+# label values of <metric_prefix>.outbound.refused (and the other security counters) are checked.
+uv run tuisku source ensure edge-gateway --adapter egress-guard \
+  --option logger_prefix=acme_gw --option metric_prefix=acme.gateway --token-env GATEWAY_TOKEN
+```
+
+```yaml
+# TUISKU_RULE_PARAMS_FILE: the pack matches the same counter names.
+egress-guard:
+  restricted_callers: [agents]
+  destination_refused_metric: acme.gateway.destination.refused
+  content_signals_metric: acme.gateway.content.signals
+```
+
+Unknown adapter option keys are refused, so a misspelt option fails every record loudly instead
+of turning refusals into generic log lines.
+
 ## Rules, findings and incidents
 
 `tuisku worker` evaluates every new observation and detection against the rule packs (ADR 0006)
@@ -139,12 +168,12 @@ uv run tuisku worker                        # poll the evaluation queue
 ```
 
 Packs are directories with a `pack.yaml` and `rules/*.yaml` (see `packs/` and ADR 0006). The
-built-in packs (`harava`, `sensors-default`, `tuisku-meta`) ship generic defaults only, and only
+built-in packs (`egress-guard`, `sensors-default`, `tuisku-meta`) ship generic defaults only, and only
 they may declare `authorship: tuisku`. A deployment mounts
 its own packs and params from its configuration repository:
 `TUISKU_RULE_PACK_PATHS=/etc/tuisku/packs` (separated by `:`) and
 `TUISKU_RULE_PARAMS_FILE=/etc/tuisku/params.yaml`, which maps pack ids to param overrides, e.g.
-`harava: {restricted_callers: [agents, crawler]}`. Every pack's SHA-256 is recorded in
+`egress-guard: {restricted_callers: [agents, crawler]}`. Every pack's SHA-256 is recorded in
 `pack_loads` and in each detection's explanation. Each rule ships positive and negative fixtures
 in its pack's `fixtures/`, run through the real adapters by `tests/test_packs.py`.
 

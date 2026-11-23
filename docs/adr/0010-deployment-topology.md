@@ -2,6 +2,8 @@
 
 Status: Accepted (2026-11-01)
 
+Edited 2026-11-23: internal service names replaced with their roles.
+
 ## Context
 
 Tuisku is not deployed anywhere yet. Its first target is intrusion detection and cyber-defense
@@ -37,10 +39,10 @@ Also:
   a disk buffer ([0005](0005-source-adapters-and-ingestion.md)). An OpenTelemetry Collector
   (`filelog` receiver) can ship the same raw lines as OTLP/HTTP JSON logs instead. Each sensor deployment is one
   Tuisku source with its own token.
-- **OTLP metrics → collector → Tuisku.** Sources that emit OTLP, Harava first, reach Tuisku
+- **OTLP metrics → collector → Tuisku.** Sources that emit OTLP, the egress gateway first, reach Tuisku
   through an OpenTelemetry Collector pipeline that fans out to Tuisku's OTLP endpoint (JSON),
   in addition to the metrics store.
-- **Harava.** Harava's refusal events are plain-text log lines; it exports metrics and traces
+- **The egress gateway.** Its refusal events are plain-text log lines; it exports metrics and traces
   over OTLP, but not logs. Its refusal log lines are therefore shipped raw from the container
   log, and its metrics arrive over OTLP when a collector forwards them. The adapter accepts the
   bare line, the Docker json-file wrapper and the CRI format.
@@ -57,7 +59,7 @@ These are recommendations for the estate's sensor decision, not assumptions Tuis
   visibility without a new sensor. An adapter for them is a natural next step. Suricata or Zeek
   in AF_PACKET mode on a host-networked node adds L7 signatures and protocol logs where deep
   inspection is wanted, for example where traffic enters or leaves the cluster.
-- **Application signals:** Harava's agent-safety signals (issue #2) need no new sensor.
+- **Application signals:** the egress gateway's agent-safety signals (issue #2) need no new sensor.
 
 ### Exposure
 
@@ -67,7 +69,7 @@ public endpoint in the first milestone.
 
 ## Consequences
 
-- A deployment can start with application signals alone (such as Harava's), then add sensors,
+- A deployment can start with application signals alone (such as the egress gateway's), then add sensors,
   with no Tuisku change.
 - Shipping logs to the estate's own log store and also to Tuisku is a
   fan-out at the shipper, not a dependency between the two.

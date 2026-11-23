@@ -1,4 +1,5 @@
-"""Every revision declares `expand_only` (Tyyni convention); the template enforces it."""
+"""Every revision declares `expand_only` (the expand/contract migration-safety convention); the
+template enforces it."""
 
 import ast
 import re

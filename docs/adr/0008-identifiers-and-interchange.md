@@ -1,19 +1,22 @@
-# 0008. Identifiers, vocabularies, and interchange with Loimi and Apogee
+# 0008. Identifiers, vocabularies, and interchange with an artifact store and a red-team service
 
 Status: Accepted (2026-11-01)
 
+Edited 2026-11-23: internal service names replaced with their roles.
+
 ## Context
 
-Tuisku will later exchange knowledge with **Loimi**, an immutable artifact store with
-provenance, and with **Apogee**, an offensive-security service ("how can this system be
-broken?"). Neither side may own the other (issue #1).
+Tuisku will later exchange knowledge with **an artifact store**, an immutable artifact/knowledge
+store with one-hop provenance, and with **a red-team service**, an offensive-security service
+("how can this system be broken?"). Neither side may own the other (issue #1).
 
 What matters for interchange:
 
-- **Loimi:** artifacts are immutable and carry a `kind`, `properties`, one-hop `sources`
-  provenance and an `as_of` time. Changes are made by supersession.
-- **Apogee:** keeps its durable findings in Loimi under its own kinds. It records CVSS vectors
-  and CWE ids verbatim, and its claims carry an epistemic status plus evidence references.
+- **The artifact store:** artifacts are immutable and carry a `kind`, `properties`, one-hop
+  `sources` provenance and an `as_of` time. Changes are made by supersession.
+- **The red-team service:** keeps its durable findings in the artifact store under its own kinds.
+  It records CVSS vectors and CWE ids verbatim, and its claims carry an epistemic status plus
+  evidence references.
 
 ## Decision
 
@@ -25,13 +28,13 @@ typed, normalized keys that make pivots and cross-system links possible:
 | Key | Form | Normalization |
 |---|---|---|
 | IP address | `ip:203.0.113.5`, `ip:2001:db8::1` | `ipaddress` compressed form |
-| Domain | `domain:example.com` | lowercase, IDNA A-label, no trailing dot (matches Apogee's target domain) |
+| Domain | `domain:example.com` | lowercase, IDNA A-label, no trailing dot (matches the red-team service's target domain) |
 | Host / node | `host:<hostname>` | lowercase |
 | Kubernetes workload | `k8s:<namespace>/<pod>`; `k8s-ns:<namespace>` | as reported |
 | Container image | `image:<repository>` | as reported |
-| File / artifact | `sha256:<hex>` | lowercase hex (matches Apogee's digests) |
+| File / artifact | `sha256:<hex>` | lowercase hex (matches the red-team service's digests) |
 | Process | `process:<host>/<pid>/<start>` when the start time is known | |
-| Caller / identity | `caller:<source>/<name>` (for example `caller:harava/agents`); later `identity:<idp>/<subject>` | |
+| Caller / identity | `caller:<source>/<name>` (for example `caller:egress-guard/agents`); later `identity:<idp>/<subject>` | |
 
 A cluster or tenant qualifier can be prefixed when Tuisku watches more than one estate. That is
 a later decision; keys are strings, so adding it is a data migration, not a schema change.
@@ -43,7 +46,7 @@ These go in attributes and are never Tuisku enums:
 - MITRE ATT&CK technique ids (`T1567`, `T1059.004`), recorded with the ATT&CK version they were
   mapped against.
 - Sensor rule identities: Suricata `gid:sid:rev`, Falco rule name, Zeek notice name.
-- CVE, CWE and CVSS v4 vectors when present, the same as Apogee.
+- CVE, CWE and CVSS v4 vectors when present, the same as the red-team service.
 - OCSF class and status names for export.
 
 ### STIX 2.1 identity for shareable things
@@ -53,7 +56,7 @@ Objects that leave Tuisku as STIX get ids by the STIX rules:
 - **Cyber observables (SCOs):** UUIDv5 in the STIX SCO namespace
   (`00abedb4-aa42-466c-9c01-fed23315a9b7`), computed over the ID-contributing properties
   serialized with RFC 8785 (JCS). The same IP, domain or file hash therefore gets the same id
-  from Tuisku, Apogee or anyone else.
+  from Tuisku, the red-team service or anyone else.
 - **Domain and relationship objects** (`indicator`, `sighting`, `observed-data`, `grouping`,
   `note`): UUIDv5 in a **Tuisku-specific namespace**
   (`e45f460c-9810-4548-8a33-e0b6397b6608`), computed over the Tuisku `uid` of the source row.
@@ -61,19 +64,19 @@ Objects that leave Tuisku as STIX get ids by the STIX rules:
   STIX 2.1 recommends (SHOULD) UUIDv4 for these objects; we deviate on purpose so that exports
   are idempotent.
 
-This prepares the purple-team loop: Apogee can later publish
+This prepares the purple-team loop: the red-team service can later publish
 *expected indicators* (`indicator` linked to an `attack-pattern`), and Tuisku records a STIX
 `sighting` when an observation matches one.
 
-### Loimi export (curated, not raw)
+### Artifact store export (curated, not raw)
 
 - Tuisku keeps its operational state (L0–L3, incidents) in its own Postgres. It **exports
-  curated, durable records to Loimi**: closed or escalated incidents, their findings, and later
-  L4 hypotheses. Raw telemetry and observations are never exported: telemetry can contain
-  personal data, and Loimi is not meant to hold it.
-- Kinds, prefixed like Apogee's: `tuisku_incident`, `tuisku_finding`, and later
+  curated, durable records to the artifact store**: closed or escalated incidents, their
+  findings, and later L4 hypotheses. Raw telemetry and observations are never exported:
+  telemetry can contain personal data, and the artifact store is not meant to hold it.
+- Kinds, prefixed like the red-team service's: `tuisku_incident`, `tuisku_finding`, and later
   `tuisku_hypothesis`, `tuisku_rule_pack` (a pack version as published). Each incident status
-  change after export is a Loimi supersession. `as_of` is the event time and `properties` carry
+  change after export is a supersession in the artifact store. `as_of` is the event time and `properties` carry
   the entity keys, ATT&CK ids, rule refs and Tuisku `uid`s.
 - **Personal data is minimised on export.** IP, identity and caller entity keys are
   pseudonymised by default. The pseudonym is HMAC-SHA-256 under a deployment-held key, with the
@@ -90,15 +93,16 @@ This prepares the purple-team loop: Apogee can later publish
   from in `sources`; a `tuisku_hypothesis` lists the findings it cites.
 - Export is a separate, idempotent job keyed by Tuisku `uid`. It is not in the first milestone.
   Registering the `tuisku_*` kinds with property schemas, and the access model
-  for security records, are agreed with Loimi before export is built.
+  for security records, are agreed with the artifact store before export is built.
 
 ### Links, not foreign keys
 
-Across systems, references are Loimi artifact ids, STIX ids, or entity keys. No cross-database
+Across systems, references are artifact-store artifact ids, STIX ids, or entity keys. No cross-database
 foreign keys and no shared tables.
 
 ## Consequences
 
-- Correlating Tuisku and Apogee is a join on entity keys and ATT&CK ids, with no shared schema.
+- Correlating Tuisku and the red-team service is a join on entity keys and ATT&CK ids, with no
+  shared schema.
 - Agents (Tuisku's own or Miragen-hosted) can pivot on keys without knowing sensor formats.
-- Loimi stays a knowledge store, not a SIEM.
+- The artifact store stays a knowledge store, not a SIEM.

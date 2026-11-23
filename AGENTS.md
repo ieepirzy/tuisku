@@ -17,9 +17,10 @@
   no autogenerate, no `target_metadata`.
 - **Migrations** are hand-written Alembic revisions using `op.execute()` with raw
   SQL. Every revision declares exactly one module-level `expand_only = True` or
-  `expand_only = False` (the Tyyni migration-safety convention; the template
-  starts at `False`). Set `True` only when the revision only adds tables,
-  nullable or defaulted columns, or plain indexes. Never edit a merged revision.
+  `expand_only = False` (the expand/contract migration-safety convention: an
+  `expand_only` declaration; the template starts at `False`). Set `True` only
+  when the revision only adds tables, nullable or defaulted columns, or plain
+  indexes. Never edit a merged revision.
 - **Never migrate on boot.** The API does not run migrations; `tuisku migrate`
   runs as a separate job, under a Postgres advisory lock.
 - **Epistemic separation.** Keep four kinds of knowledge apart, in storage and in
@@ -32,7 +33,12 @@
   hostnames, IP ranges, network topology or rules tuned to a specific deployment
   or estate; those live in the deploying organisation's own infrastructure
   repository. Never commit secrets, credentials, or real telemetry or logs that
-  could contain personal data; test fixtures are synthetic.
+  could contain personal data; test fixtures are synthetic. The deploying
+  organisation's internal service, product and project names (and its
+  hostnames) never appear in code, comments, fixtures, docs or commit messages:
+  name the role instead ("the egress gateway", "the artifact store").
+  `tests/test_no_internal_names.py` fails on known names; it stores only
+  SHA-256 digests of them, so the list itself discloses nothing in clear text.
 - **Tests must be able to fail.** A new test is checked by breaking the code it
   covers and watching it go red before restoring it.
 - **Architecture decisions** are recorded in `docs/adr/`. Read the relevant ADRs
