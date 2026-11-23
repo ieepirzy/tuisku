@@ -29,7 +29,7 @@ deterministic provenance from suggested relevance.
 
 | Layer | Table(s) | Produced by | Example |
 |---|---|---|---|
-| L0 raw record | `raw_records` (+ `parse_attempts`, `raw_duplicates`) | the sender, verbatim | one EVE JSON line, one log line, one OTLP request body |
+| L0 raw record | `raw_records` (+ `parse_attempts`, `raw_duplicates`) | the sender, verbatim | one EVE JSON line, one log line (an NDJSON envelope's `raw` or an OTLP log record's body), one OTLP metrics request body |
 | L1 observation | `observations` | a versioned adapter, deterministically from L0 | a network flow, a DNS answer, a process exec, a metric sample |
 | L2 detection | `detections` | a deterministic mechanism evaluating a rule or built-in check | Zeek `notice`, Suricata signature match, Falco rule match, Harava refusal, a Tuisku pack rule |
 | L3 finding / incident | `findings`, `incidents`, `incident_events` | Tuisku's deterministic grouping, and people | "the agent caller had outbound data refused 3× in 1h" |
