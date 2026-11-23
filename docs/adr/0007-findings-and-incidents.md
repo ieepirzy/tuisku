@@ -135,6 +135,43 @@ The first implementation writes structured logs only. Which channels page whom i
 decision, configured outside this repository. Notifications carry ids, titles, severities and
 entity keys, never L0 bodies.
 
+**Alertmanager** (added 2026-11-13). The log stays on for every notification. When
+`TUISKU_NOTIFY_ALERTMANAGER_URL` is set, each one is also POSTed as one alert to
+`/api/v2/alerts` of that Alertmanager; routing to people stays in the deployment's Alertmanager
+configuration.
+
+- **One alert per request**, so each outbox row gets its own `delivered` or `failed` record.
+  The notification uid is a label, so Alertmanager never merges two pages.
+- **What leaves Tuisku:** fixed labels (`alertname`, `source="tuisku"`, `tuisku_kind`,
+  `severity`, `notification_uid`, `meta`) plus static labels from configuration; a `summary`
+  that is the rule's or meta-detection's title (pack-authored or fixed text); and a
+  description of ids only. No entity keys and no telemetry values by default, because an
+  Alertmanager receiver may be an outside service; entity keys are opt-in, as an annotation
+  (a JSON array, control characters removed, capped in count and length; still untrusted text).
+- **Severity** is the OCSF caption of `severity_id`, lowercased (`informational` to `fatal`,
+  `unknown`, `other`), not Prometheus' `critical`/`warning`/`info`, so no distinction is lost;
+  a deployment matches on it in its routes.
+- **Delivery semantics are the outbox's.** A non-2xx or a timeout is a failed delivery, retried
+  with the same backoff, and `notification_undeliverable` still pages at 10 failures. The
+  notifier runs off the event loop (a thread).
+- **Bounded.** The drain holds its transaction and the worker's pass while it delivers, so
+  evaluation waits for it. Three bounds keep that wait short:
+  - each POST has a total deadline (`TUISKU_NOTIFY_ALERTMANAGER_TIMEOUT_SECONDS`, 5 s),
+    connection included; a watchdog cuts off a server that answers byte by byte;
+  - a drain starts no new delivery once `TUISKU_NOTIFY_DRAIN_BUDGET_SECONDS` (10 s) are spent;
+  - a notifier may say its channel is down as a whole, and the drain then records that one
+    failure and ends the pass. For Alertmanager that is a timeout, a connection error, a 3xx
+    (redirects are not followed), 401, 403, 404, 405, 408, 413, 429 or a 5xx.
+
+  Either way the notifications not yet tried get no record and stay due for the next pass. So
+  one drain delays evaluation by at most about the budget plus one deadline (15 s by default),
+  and an outage costs one deadline per pass. Only 400 and 422 refuse a single alert; the drain
+  carries on with the next.
+- **Transport.** No environment proxy is used, and credentials in the URL (sent as basic auth)
+  are accepted only with https.
+- `endsAt` is not sent: a page is an event, and Alertmanager resolves it after its own
+  `resolve_timeout`.
+
 ## Consequences
 
 - Volume control (window, lifetime, group-by) is part of each rule and explicit, not a global

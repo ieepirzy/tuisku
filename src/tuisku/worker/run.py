@@ -13,7 +13,7 @@ from psycopg import AsyncConnection
 from tuisku.adapters import builtin as _builtin_adapters  # noqa: F401  (registers adapters)
 from tuisku.config import ConfigError, Settings
 from tuisku.rules.packs import RuleSet, load_rule_set
-from tuisku.worker import health
+from tuisku.worker import health, notify
 from tuisku.worker.engine import Worker, WorkerConfig
 from tuisku.worker.export import ExportConfig, Exporter
 
@@ -46,6 +46,26 @@ def worker_config(settings: Settings) -> WorkerConfig:
         export_interval=timedelta(seconds=settings.worker_export_interval_seconds),
         allowed_lateness=timedelta(seconds=settings.worker_allowed_lateness_seconds),
         backlog_after=timedelta(seconds=settings.worker_backlog_seconds),
+        notify_drain_budget=timedelta(seconds=settings.notify_drain_budget_seconds),
+    )
+
+
+def build_notifier(settings: Settings) -> notify.Notifier:
+    """The structured log always; Alertmanager too when its URL is set (ADR 0007)."""
+    if settings.notify_alertmanager_url is None:
+        return notify.LogNotifier()
+    from tuisku.worker.alertmanager import AlertmanagerNotifier
+
+    return notify.FanOutNotifier(
+        (
+            notify.LogNotifier(),
+            AlertmanagerNotifier(
+                settings.notify_alertmanager_url,
+                static_labels=settings.notify_alertmanager_labels_json,
+                include_entities=settings.notify_alertmanager_include_entities,
+                timeout_seconds=settings.notify_alertmanager_timeout_seconds,
+            ),
+        )
     )
 
 
@@ -89,7 +109,12 @@ def run_worker(settings: Settings, *, once: bool = False, check_only: bool = Fal
     if check_only:
         return 0
     exp = exporter(settings)
-    worker = Worker(rule_set=rule_set, clock=_system_clock, config=worker_config(settings))
+    worker = Worker(
+        rule_set=rule_set,
+        clock=_system_clock,
+        config=worker_config(settings),
+        notifier=build_notifier(settings),
+    )
     if not exp.enabled:
         log.info("event export off (TUISKU_EXPORT_OTLP_LOGS_URL unset)")
     backlog_after = timedelta(seconds=settings.worker_backlog_seconds)

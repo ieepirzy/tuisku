@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Literal, Self
+from typing import Annotated, Any, Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 _ALLOWED_SCHEMES = frozenset({"postgresql", "postgres"})
 # A plain, unquoted Postgres role name: it is interpolated into GRANT statements.
@@ -22,6 +22,36 @@ _ENTITY_KIND = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 # HTTP header names (RFC 9110 tokens) and values without control characters.
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}")
 _HEADER_VALUE = re.compile(r"[\x20-\x7e]{0,4096}")
+
+# Prometheus/Alertmanager label names.
+_LABEL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+# Labels the Alertmanager notifier sets on every alert (tuisku.worker.alertmanager). Static
+# labels may not override them; `source` may only repeat its fixed value.
+ALERTMANAGER_OWN_LABELS = frozenset(
+    {"alertname", "source", "tuisku_kind", "severity", "notification_uid", "meta"}
+)
+ALERTMANAGER_SOURCE = "tuisku"
+MAX_STATIC_LABELS = 32
+
+
+def check_alertmanager_url(raw: str) -> None:
+    """Raise ValueError unless ``raw`` is a usable Alertmanager base URL: http or https, a host,
+    a port in 1-65535 if given, printable ASCII only (no whitespace, control characters or
+    non-ASCII), no query or fragment, and credentials only over https. The messages never
+    echo the value: it may carry a password."""
+    if not raw or any(not ("!" <= c <= "~") for c in raw):
+        raise ValueError("must be a printable-ASCII http:// or https:// base URL")
+    try:
+        parts = urlsplit(raw)
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        raise ValueError("must be an http:// or https:// base URL") from None
+    if parts.scheme not in ("http", "https") or not host or port == 0:
+        raise ValueError("must be an http:// or https:// base URL")
+    if parts.query or parts.fragment:
+        raise ValueError("must be a base URL without a query or fragment")
+    if (parts.username is not None or parts.password is not None) and parts.scheme != "https":
+        raise ValueError("may carry credentials only with https://")
 
 
 class ConfigError(RuntimeError):
@@ -199,6 +229,24 @@ class Settings(BaseSettings):
             return {}
         return json.loads(self.export_otlp_headers_json.get_secret_value())
 
+    # Notifications (ADR 0007 "Notifications"). The structured log is always written. With an
+    # Alertmanager base URL (http or https, may carry user:password), the worker also POSTs each
+    # notification to <url>/api/v2/alerts. The URL is a secret: it is never logged.
+    notify_alertmanager_url: SecretStr | None = None
+    # Extra static labels, a JSON object of strings, e.g. {"team": "security"}.
+    notify_alertmanager_labels_json: Annotated[dict[str, str], NoDecode] = Field(
+        default_factory=dict
+    )
+    # Off: no entity keys in alerts, whose receiver may be an external service.
+    notify_alertmanager_include_entities: bool = False
+    # Total time one POST may take, connection included; a timeout is a failed delivery,
+    # retried with backoff.
+    notify_alertmanager_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    # Wall-clock budget of one notification drain: once spent, the drain stops and the rest
+    # stay due for the next pass, so a slow channel delays evaluation by about this much at most
+    # (plus one delivery's timeout).
+    notify_drain_budget_seconds: float = Field(default=10.0, gt=0, le=600)
+
     @field_validator("database_url")
     @classmethod
     def _check_scheme(cls, value: SecretStr | None) -> SecretStr | None:
@@ -225,6 +273,42 @@ class Settings(BaseSettings):
             return None
         if not _ROLE_NAME.fullmatch(value):
             raise ValueError("must be a lowercase Postgres role name ([a-z_][a-z0-9_]*)")
+        return value
+
+    @field_validator("notify_alertmanager_url")
+    @classmethod
+    def _check_alertmanager_url(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None or value.get_secret_value() == "":
+            return None
+        check_alertmanager_url(value.get_secret_value())
+        return value
+
+    @field_validator("notify_alertmanager_labels_json", mode="before")
+    @classmethod
+    def _parse_alertmanager_labels(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return json.loads(value) if value.strip() else {}
+            except ValueError:
+                raise ValueError("must be a JSON object of strings") from None
+        return value
+
+    @field_validator("notify_alertmanager_labels_json")
+    @classmethod
+    def _check_alertmanager_labels(cls, value: dict[str, str]) -> dict[str, str]:
+        if len(value) > MAX_STATIC_LABELS:
+            raise ValueError(f"at most {MAX_STATIC_LABELS} labels")
+        for name, label in value.items():
+            if not _LABEL_NAME.fullmatch(name) or name.startswith("__"):
+                raise ValueError(
+                    f"label name {name!r} must match [A-Za-z_][A-Za-z0-9_]* without a leading __"
+                )
+            if not label.strip() or len(label) > 1024:
+                raise ValueError(f"label {name!r} must be a non-blank string of 1024 chars max")
+            if name == "source" and label != ALERTMANAGER_SOURCE:
+                raise ValueError(f"label 'source' is always {ALERTMANAGER_SOURCE!r}")
+            if name in ALERTMANAGER_OWN_LABELS - {"source"}:
+                raise ValueError(f"label {name!r} is set by Tuisku and cannot be overridden")
         return value
 
     @model_validator(mode="after")
