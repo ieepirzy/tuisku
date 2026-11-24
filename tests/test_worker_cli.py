@@ -12,9 +12,9 @@ from tuisku import adapters, cli
 from tuisku.adapters import builtin
 
 
-def test_builtin_imports_all_four_adapters() -> None:
-    assert {a.name for a in builtin.BUILTIN} == {"falco", "harava", "suricata", "zeek"}
-    assert {"falco", "harava", "suricata", "zeek"} <= set(adapters.names())
+def test_builtin_imports_all_five_adapters() -> None:
+    assert {a.name for a in builtin.BUILTIN} == {"falco", "harava", "shirudo", "suricata", "zeek"}
+    assert {"falco", "harava", "shirudo", "suricata", "zeek"} <= set(adapters.names())
 
 
 def _env(monkeypatch: pytest.MonkeyPatch, url: str | None = None) -> None:
@@ -49,4 +49,9 @@ def test_worker_once_records_pack_loads(
     rows = query(
         fresh_database_url, "SELECT pack, max_lookback_seconds FROM pack_loads ORDER BY pack"
     )
-    assert rows == [("harava", 25 * 3600), ("sensors-default", 0), ("tuisku-meta", 0)]
+    assert rows == [
+        ("harava", 25 * 3600),
+        ("sensors-default", 0),
+        ("shirudo", 600),
+        ("tuisku-meta", 0),
+    ]

@@ -178,7 +178,7 @@ def _pack(tmp_path: Path, *rules: dict[str, Any], params: Any = None, name: str 
 def test_builtin_packs_load_with_hashes_and_lookback() -> None:
     rs = load_rule_set([], builtin=[PACKS])
     by_id = {p.info.id: p for p in rs.packs}
-    assert set(by_id) == {"harava", "sensors-default", "tuisku-meta"}
+    assert set(by_id) == {"harava", "sensors-default", "shirudo", "tuisku-meta"}
     assert len(by_id["harava"].info.sha256) == 64
     assert by_id["harava"].max_lookback == timedelta(hours=25)  # (24 + 1) baseline windows
     assert by_id["sensors-default"].max_lookback == timedelta(0)
