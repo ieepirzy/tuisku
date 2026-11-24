@@ -2,6 +2,10 @@ name: CI
 
 on:
   pull_request:
+    # edited: changing a pull request's base branch fires only this event, and changes the
+    # range name-guard-tree scans. Every job runs in full on it: a required check whose steps
+    # were skipped would report success for a head that failed (ADR 0013).
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 
@@ -9,11 +13,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # A pull request's runs share a group, and a newer one cancels the older. Each push to main
+  # has a group of its own, so no pushed range is cancelled before it is scanned.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
+    # Needs no secret, so lint, types and tests report on fork and Dependabot pull requests too.
+    # The tree and commit scans for internal names are the name-guard-tree job's (ADR 0013).
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -50,4 +58,77 @@ jobs:
       - name: Pyright
         run: uv run pyright
       - name: Pytest
-        run: uv run pytest -q -ra
+        # The tree test needs the denylist, which this job does not have; the name-guard-tree
+        # job runs the same scan with the list. Without the list the test would skip, and
+        # CI=true turns a skip into a failure: if the test is renamed and this deselect stops
+        # matching, this job fails rather than passing unscanned.
+        run: >-
+          uv run pytest -q -ra
+          --deselect tests/test_no_internal_names.py::test_tree_has_no_internal_names
+
+  name-guard-tree:
+    # ADR 0013. The denylist is the secret TUISKU_DENYLIST_B64: the list base64-encoded on one
+    # line, so the log masks one value instead of every entry. Without it (a fork, or a
+    # Dependabot run without the Dependabot secret) this job fails; CI is never green unscanned.
+    # This job holds the list, so it installs nothing and runs no dependency, test runner or
+    # project code: only the standard-library scanner, with the runner's python3 in isolated
+    # mode (-I: no PYTHON* variables, no user site, not the script's directory on the path).
+    # Its name must differ from every other job's: branch protection matches checks by name.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the commits of a pull request or a push are scanned
+      - name: Decode the denylist
+        env:
+          TUISKU_DENYLIST_B64: ${{ secrets.TUISKU_DENYLIST_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TUISKU_DENYLIST_B64" ]; then
+            echo "::error::secret TUISKU_DENYLIST_B64 is not available; the name guard cannot run (ADR 0013)"
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$TUISKU_DENYLIST_B64" | base64 --decode > "$RUNNER_TEMP/denylist.txt"
+      - name: Name guard (tree)
+        env:
+          TUISKU_DENYLIST_FILE: ${{ runner.temp }}/denylist.txt
+        run: python3 -I scripts/name_guard.py tree
+      - name: Name guard (commits)
+        # Each commit's author, committer, subject and body, the lines its diff adds and the
+        # paths it adds or changes: intermediate commits reach main's history under merge and
+        # rebase merges. A pull request's commits; on a push to main, the pushed range (a newly
+        # created branch, whose before is all zeros, has only its head commit scanned). The
+        # bodies of commits authored by dependabot[bot] are upstream release notes and are left
+        # out, in a pull request only when Dependabot opened it; their subjects, diffs and paths
+        # are scanned. Pull request title, body and branch: workflow pr-text.yml.
+        env:
+          TUISKU_DENYLIST_FILE: ${{ runner.temp }}/denylist.txt
+          EVENT: ${{ github.event_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          skip=()
+          if [ "$EVENT" = pull_request ]; then
+            range="$PR_BASE..$PR_HEAD"
+            if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
+              skip=(--skip-bodies-of "dependabot[bot]")
+            fi
+          else
+            skip=(--skip-bodies-of "dependabot[bot]")
+            if [ -z "${PUSH_BEFORE//0/}" ]; then
+              range="$PUSH_AFTER^!"
+            else
+              git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null \
+                || git fetch --quiet --no-tags origin "$PUSH_BEFORE" \
+                || { echo "::error::cannot fetch the commit before the push"; exit 1; }
+              range="$PUSH_BEFORE..$PUSH_AFTER"
+            fi
+          fi
+          python3 -I scripts/name_guard.py commits "${skip[@]}" "$range"

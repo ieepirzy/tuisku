@@ -1,36 +1,59 @@
-"""Harava adapter: plain-text log lines and OTLP JSON metrics (ADR 0005).
+"""Egress-guard adapter: an agent egress safety proxy's log lines and OTLP JSON metrics (ADR 0005).
 
-Log lines come from Python logging with Harava's format
-``%(asctime)s %(levelname)s %(name)s %(message)s`` (``harava.cli.configure_logging``); asctime is
-``YYYY-MM-DD HH:MM:SS,mmm`` in the container's zone, UTC. A line arrives bare, wrapped by Docker's
-json-file driver (``{"log": "<line>\\n", "stream": "stderr", "time": "<RFC3339Nano>"}``) or in the
-CRI format used by Kubernetes (``<RFC3339Nano> <stream> <P|F> <line>``). The wrapper's timestamp,
-when there is one, is the event time; the inner asctime is kept in the attributes.
+The source is an outbound fetch gateway: an HTTP service that agents and other callers ask to
+fetch URLs, and that refuses unsafe outbound requests (URLs carrying personal or secret data) and
+unsafe destinations (overlay networks, request catchers, tunnels, local names). Tuisku records
+what the gateway refused; it does not reimplement the gateway's checks.
 
-Recognised messages (``harava.api.app`` and ``harava.mcp``):
+Log lines are read in the form ``<asctime> <LEVEL> <logger> <message>`` (Python logging's
+``%(asctime)s %(levelname)s %(name)s %(message)s``), with asctime ``YYYY-MM-DD HH:MM:SS,mmm``
+read as UTC; configure the gateway's logging to match. A line arrives bare, wrapped by Docker's
+json-file driver (``{"log": "<line>\\n", "stream": "stderr", "time": "<RFC3339Nano>"}``) or in
+the CRI format used by Kubernetes (``<RFC3339Nano> <stream> <P|F> <line>``). The wrapper's
+timestamp, when there is one, is the event time; the inner asctime is kept in the attributes.
 
-- ``outbound data refused: caller=%s urls=%d findings=det/loc/enc,...`` (harava.api, WARNING)
-- ``destination refused: caller=%s classes=a,b`` (harava.api, WARNING; only the admission stage
-  logs, so ``stage = admission`` is implied)
-- ``MCP refuses to serve: %s`` (harava.mcp, ERROR)
+Recognised messages, by logger name (``<logger_prefix>`` is an adapter option, below):
 
-Refusals become a ``harava.refusal`` observation (the facts) plus a sensor detection (only the
-verdict, authorship ``builtin``). Any other line in the logging format becomes ``harava.log``.
-Uvicorn's own lines, traceback continuation lines and, inside a wrapper, chunks that do not start
-with a timestamp (the tail of a line Docker or the CRI runtime split) become ``harava.unknown``
-with the text withheld: uvicorn access lines and exception messages can carry request URLs, which
-Harava itself never logs. Anything else is a parse failure.
+- ``outbound data refused: caller=%s urls=%d findings=det/loc/enc,...`` (``<logger_prefix>.api``,
+  WARNING)
+- ``destination refused: caller=%s classes=a,b`` (``<logger_prefix>.api``, WARNING; recorded
+  with ``stage = admission``)
+- ``MCP refuses to serve: %s`` (``<logger_prefix>.mcp``, ERROR)
+
+The same text from any other logger is not a refusal. Refusals become an
+``egress-guard.refusal`` observation (the facts) plus a sensor detection (only the verdict,
+authorship ``builtin``). Any other line in the logging format becomes ``egress-guard.log``.
+Lines of the form ``LEVEL:  text`` (a web server's own output, ``line_type`` ``uvicorn``),
+traceback continuation lines and, inside a wrapper, chunks that do not start with a timestamp
+(the tail of a line Docker or the CRI runtime split) become ``egress-guard.unknown`` with the text
+withheld, because access lines and exception messages can carry request URLs. Anything else is a
+parse failure.
 
 OTLP: an ``ExportMetricsServiceRequest`` in OTLP/JSON encoding, detected by a top-level
-``resourceMetrics``. Each datapoint of a cumulative sum becomes a ``metric.sample``. Other metrics
-(gauges, histograms, non-cumulative sums), malformed metrics and datapoints that cannot be read
-become flagged ``harava.unknown`` observations; the rest of the request is kept. A sum that is
-not monotonic (``isMonotonic`` false or absent) is flagged ``non_monotonic_sum`` and a negative
-value on a monotonic counter ``negative_counter``: both become ``harava.unknown``, so no rule
-ever sums a value that can go down.
+``resourceMetrics``. Each datapoint of a cumulative sum becomes a ``metric.sample``, its metric
+name kept verbatim. Other metrics (gauges, histograms, non-cumulative sums), malformed metrics and
+datapoints that cannot be read become flagged ``egress-guard.unknown`` observations; the rest of
+the request is kept. A sum that is not monotonic (``isMonotonic`` false or absent) is flagged
+``non_monotonic_sum`` and a negative value on a monotonic counter ``negative_counter``: both
+become ``egress-guard.unknown``, so no rule ever sums a value that can go down. The label values
+of the three security counters ``<metric_prefix>.outbound.refused``,
+``<metric_prefix>.destination.refused`` and ``<metric_prefix>.content.signals`` are checked
+against the closed sets below, so a forged sample is flagged ``unknown_label_value``.
 
-Privacy: Harava never logs the refused URL, the matched value or a hash of either, and its
-metrics never carry caller, host or URL. This adapter adds no field for any of them.
+Adapter options (the source's ``adapter_options``):
+
+- ``logger_prefix`` (default ``egress_guard``): set it to your gateway's logger namespace.
+- ``metric_prefix`` (default ``egress_guard``): set it to your gateway's metric namespace.
+
+Any other option key, and a prefix that is not a dotted name, is refused: ``tuisku source add``
+and ``tuisku source ensure`` refuse to register such a source, and a source stored with such
+options (written to the database directly) fails every record, instead of silently turning
+refusals into generic log lines. The ``egress-guard`` rule pack matches metric names through its
+``destination_refused_metric`` and ``content_signals_metric`` params, which a deployment sets to
+the same names in ``TUISKU_RULE_PARAMS_FILE``.
+
+Privacy: the recognised messages carry no refused URL, matched value or hash of either, and this
+adapter adds no field for any of them; metric samples keep only the labels the source sent.
 
 U+0000 and lone surrogates are replaced with U+FFFD by the shared decoders
 (``invalid_unicode_replaced``). In every stored string the backslash is escaped as ``\\\\`` and
@@ -67,12 +90,12 @@ from tuisku.adapters.timeparse import parse_timestamp, parse_timestamp_with_zone
 # --- limits -------------------------------------------------------------------------------------
 
 MAX_LINE = 256 * 1024  # ADR 0005 line limit; log records longer than this are refused
-MAX_INNER_LINE = 64 * 1024  # a Harava log line; the regexes never see more than this
+MAX_INNER_LINE = 64 * 1024  # a gateway log line; the regexes never see more than this
 MAX_OTLP_BYTES = 5 * 1024 * 1024  # ADR 0005 body limit
 MAX_OTLP_KEYS = 262_144  # ~13 keys per datapoint at the 10,000-datapoint cap, plus headroom
 MAX_DATAPOINTS = 10_000  # ADR 0005
-MAX_MESSAGE = 2048  # generic harava.log message, truncated beyond this
-MAX_REFUSAL_MESSAGE = 8192  # 240 possible findings x ~30 characters; longer is not Harava's
+MAX_MESSAGE = 2048  # generic egress-guard.log message, truncated beyond this
+MAX_REFUSAL_MESSAGE = 8192  # well above any refusal message; a longer one is not a refusal
 MAX_REASON = 512
 MAX_CALLER_FIELD = 256
 MAX_LABELS = 32
@@ -90,7 +113,7 @@ INT64_MIN, INT64_MAX = -(2**63), 2**63 - 1
 UINT64_MAX = 2**64 - 1
 NO_RECORDED_VALUE = 1  # DataPointFlags.DATA_POINT_FLAGS_NO_RECORDED_VALUE_MASK
 
-# --- Harava's closed sets (harava.outbound, harava.destinations, harava.telemetry) --------------
+# --- the gateway's closed sets (outbound guard, destination policy, telemetry) ----------------
 
 DETECTORS = frozenset(
     {
@@ -123,16 +146,55 @@ DESTINATION_STAGES = frozenset({"admission", "side_request", "hop", "discovery",
 VERDICTS = frozenset({"none", "suspected", "likely"})
 LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 
-# Label value sets for Harava's security metrics, checked so a forged sample is flagged.
+# Label value sets for the gateway's security metrics, by metric name below ``metric_prefix``,
+# checked so a forged sample is flagged.
 KNOWN_LABELS: dict[str, dict[str, frozenset[str]]] = {
-    "harava.outbound.refused": {
-        "detector": DETECTORS,
-        "location": LOCATIONS,
-        "encoding": ENCODINGS,
-    },
-    "harava.destination.refused": {"class": DESTINATION_CLASSES, "stage": DESTINATION_STAGES},
-    "harava.content.signals": {"verdict": VERDICTS},
+    "outbound.refused": {"detector": DETECTORS, "location": LOCATIONS, "encoding": ENCODINGS},
+    "destination.refused": {"class": DESTINATION_CLASSES, "stage": DESTINATION_STAGES},
+    "content.signals": {"verdict": VERDICTS},
 }
+
+# --- options ------------------------------------------------------------------------------------
+
+DEFAULT_PREFIX = "egress_guard"
+OPTION_KEYS = frozenset({"logger_prefix", "metric_prefix"})
+MAX_PREFIX = 100  # leaves room for ``.api`` / ``.mcp`` within the 128-character logger name
+_PREFIX = re.compile(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*", re.ASCII)
+
+
+class _Options:
+    """The gateway's own names. The defaults are neutral; a deployment sets its gateway's."""
+
+    __slots__ = ("api_logger", "mcp_logger", "known_labels")
+
+    def __init__(self, logger_prefix: str, metric_prefix: str) -> None:
+        self.api_logger = f"{logger_prefix}.api"
+        self.mcp_logger = f"{logger_prefix}.mcp"
+        self.known_labels = {f"{metric_prefix}.{name}": v for name, v in KNOWN_LABELS.items()}
+
+    @classmethod
+    def parse(cls, options: Mapping[str, Any]) -> _Options:
+        unknown = set(options) - OPTION_KEYS
+        if unknown:
+            # Names only the offending keys; a misspelt prefix must not pass silently.
+            names = ", ".join(sorted(repr(k)[:64] for k in unknown))
+            raise AdapterError(
+                f"unknown adapter option(s) {names}; known: logger_prefix, metric_prefix"
+            )
+        prefixes = []
+        for key in ("logger_prefix", "metric_prefix"):
+            value = options.get(key, DEFAULT_PREFIX)
+            if (
+                not isinstance(value, str)
+                or len(value) > MAX_PREFIX
+                or not _PREFIX.fullmatch(value)
+            ):
+                raise AdapterError(
+                    f"adapter option {key} must be a dotted name of letters, digits, '_' and '-'"
+                )
+            prefixes.append(value)
+        return cls(*prefixes)
+
 
 # --- patterns (fullmatch, ASCII classes, no nested quantifiers, applied to capped input) --------
 
@@ -157,7 +219,7 @@ _DESTINATION_PREFIX = "destination refused:"
 _MCP_PREFIX = "MCP refuses to serve: "
 _DIGITS = re.compile(r"-?\d{1,20}", _A)
 _UVICORN = re.compile(r"(?:INFO|WARNING|ERROR|DEBUG|CRITICAL):\s", _A)
-# ``ValueError: msg``, ``httpx2.ConnectError:``, or a bare ``KeyError`` / ``a.b.CancelledError``.
+# ``ValueError: msg``, ``example.ConnectError:``, or a bare ``KeyError`` / ``a.b.CancelledError``.
 _EXCEPTION_LINE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,255}(?::(?: .*)?)?", _A | re.DOTALL)
 _TRACEBACK_HEADERS = frozenset(
     {
@@ -359,7 +421,7 @@ class _Line:
         if self.level not in LEVELS:
             raise AdapterError("unknown log level")
         try:
-            # No zone: UTC, as in Harava's containers.
+            # No zone: UTC, as in the gateway's containers.
             inner_time, zone_given = parse_timestamp_with_zone_flag(self.asctime)
         except (ValueError, OverflowError, OSError):
             raise AdapterError("log asctime is not a valid date") from None
@@ -377,7 +439,7 @@ class _Line:
 
 def _caller(raw_caller: str, flags: list[str]) -> tuple[dict[str, str], tuple[str, ...]]:
     """The caller attribute and entity key, or neither (flagged) when the name is not plain."""
-    key = caller_key("harava", raw_caller) if _CALLER.fullmatch(raw_caller) else None
+    key = caller_key("egress-guard", raw_caller) if _CALLER.fullmatch(raw_caller) else None
     if key is None:
         flags.append("caller_invalid")
         return {}, ()
@@ -435,7 +497,7 @@ def _outbound(ln: _Line) -> ParseResult:
         unmapped["findings_unrecognised"] = unrecognised
     entity_keys = unique(*keys)
     observation = _observation(
-        "harava.refusal",
+        "egress-guard.refusal",
         ln.event_time,
         {"type": "outbound", **caller, "urls": urls, "findings": findings, **ln.base()},
         flags,
@@ -443,22 +505,22 @@ def _outbound(ln: _Line) -> ParseResult:
         entity_keys,
     )
     detection = DetectionDraft(
-        kind="harava.outbound_refused",
+        kind="egress-guard.outbound_refused",
         authorship=Authorship.BUILTIN,
-        identity="harava:outbound_refused",
-        title="Harava refused outbound data",
+        identity="egress-guard:outbound_refused",
+        title="The egress gateway refused outbound data",
         severity=Severity.HIGH,
         event_time=ln.event_time,
-        rule_ref={"engine": "harava", "name": "outbound_refused"},
+        rule_ref={"engine": "egress-guard", "name": "outbound_refused"},
         entity_keys=entity_keys,
         observation_refs=(0,),
         explanation={
-            "sensor": "harava",
-            "check": "outbound guard (harava.outbound)",
+            "sensor": "egress-guard",
+            "check": "outbound data guard",
             "why": (
-                "Harava found what looks like personal or secret data in URLs the caller asked "
-                "it to fetch, and refused the request. Harava does not log the URL or the value; "
-                "the findings are on the referenced observation."
+                "The gateway found what looks like personal or secret data in URLs the caller "
+                "asked it to fetch, and refused the request. The gateway does not log the URL or "
+                "the value; the findings are on the referenced observation."
             ),
         },
     )
@@ -485,13 +547,13 @@ def _destination(ln: _Line) -> ParseResult:
         unmapped["classes_unrecognised"] = unrecognised
     entity_keys = unique(*keys)
     observation = _observation(
-        "harava.refusal",
+        "egress-guard.refusal",
         ln.event_time,
         {
             "type": "destination",
             **caller,
             "classes": classes,
-            # Only the admission stage logs this line (harava.api.app._refuse_destinations).
+            # A destination refusal line is recorded as the admission stage.
             "stage": "admission",
             **ln.base(),
         },
@@ -500,22 +562,22 @@ def _destination(ln: _Line) -> ParseResult:
         entity_keys,
     )
     detection = DetectionDraft(
-        kind="harava.destination_refused",
+        kind="egress-guard.destination_refused",
         authorship=Authorship.BUILTIN,
-        identity="harava:destination_refused",
-        title="Harava refused a destination",
+        identity="egress-guard:destination_refused",
+        title="The egress gateway refused a destination",
         severity=Severity.HIGH,
         event_time=ln.event_time,
-        rule_ref={"engine": "harava", "name": "destination_refused"},
+        rule_ref={"engine": "egress-guard", "name": "destination_refused"},
         entity_keys=entity_keys,
         observation_refs=(0,),
         explanation={
-            "sensor": "harava",
-            "check": "destination policy (harava.destinations), admission stage",
+            "sensor": "egress-guard",
+            "check": "destination policy, admission stage",
             "why": (
-                "The caller asked Harava to fetch a destination in a refused class (overlay "
-                "networks and gateways, request catchers, tunnels, local-network names). Harava "
-                "logs the classes only, never the destination; they are on the referenced "
+                "The caller asked the gateway to fetch a destination in a refused class (overlay "
+                "networks and gateways, request catchers, tunnels, local-network names). The "
+                "gateway logs the classes only, never the destination; they are on the referenced "
                 "observation."
             ),
         },
@@ -529,7 +591,7 @@ def _mcp_refused(ln: _Line) -> ParseResult:
     return ParseResult(
         observations=(
             _observation(
-                "harava.mcp_refused_to_serve",
+                "egress-guard.mcp_refused_to_serve",
                 ln.event_time,
                 {"reason": reason, **ln.base()},
                 flags,
@@ -545,7 +607,7 @@ def _generic(ln: _Line) -> ParseResult:
     return ParseResult(
         observations=(
             _observation(
-                "harava.log",
+                "egress-guard.log",
                 ln.event_time,
                 {"message": message, **ln.base()},
                 flags,
@@ -570,7 +632,7 @@ def _unknown_line(env: _Envelope, line: str, line_type: str, extra_flags: list[s
     return ParseResult(
         observations=(
             _observation(
-                "harava.unknown",
+                "egress-guard.unknown",
                 env.wrapper_time,
                 attributes,
                 [*env.flags, *extra_flags, "message_withheld"],
@@ -580,7 +642,7 @@ def _unknown_line(env: _Envelope, line: str, line_type: str, extra_flags: list[s
     )
 
 
-def _parse_line(env: _Envelope) -> ParseResult:
+def _parse_line(env: _Envelope, opts: _Options) -> ParseResult:
     line = env.line.rstrip("\r\n")
     if len(line) > MAX_INNER_LINE:
         raise AdapterError(f"log line longer than {MAX_INNER_LINE} characters")
@@ -595,14 +657,14 @@ def _parse_line(env: _Envelope) -> ParseResult:
             # The tail of a line the runtime split (Docker at 16 KiB, CRI ``P`` chunks): the
             # chunk itself does not say so, so it is kept, withheld and flagged.
             return _unknown_line(env, line, "fragment", ["possible_continuation"])
-        raise AdapterError("not a Harava log line (asctime levelname name message)")
+        raise AdapterError("not a gateway log line (asctime levelname name message)")
     ln = _Line(env, m)
-    if ln.logger == "harava.api":
+    if ln.logger == opts.api_logger:
         if ln.message.startswith(_OUTBOUND_PREFIX):
             return _outbound(ln)
         if ln.message.startswith(_DESTINATION_PREFIX):
             return _destination(ln)
-    if ln.logger == "harava.mcp" and ln.message.startswith(_MCP_PREFIX):
+    if ln.logger == opts.mcp_logger and ln.message.startswith(_MCP_PREFIX):
         return _mcp_refused(ln)
     return _generic(ln)
 
@@ -611,7 +673,7 @@ def _parse_line(env: _Envelope) -> ParseResult:
 
 
 class _Skip(Exception):
-    """A datapoint or metric that cannot be read; kept as a flagged ``harava.unknown``."""
+    """A datapoint or metric that cannot be read; kept as a flagged ``egress-guard.unknown``."""
 
     def __init__(self, flag: str, reason: str) -> None:
         super().__init__(reason)
@@ -770,6 +832,7 @@ def _sample(
     temporality: str,
     is_monotonic: bool,
     metric_unmapped: dict[str, Any],
+    known: Mapping[str, Mapping[str, frozenset[str]]],
 ) -> ObservationDraft:
     point_flags = dp.get("flags", 0)
     if (
@@ -793,9 +856,9 @@ def _sample(
     value = _value(dp)
     if value < 0:
         # A monotonic counter never goes below zero; a negative start could cancel a whole
-        # stage's sum downstream. Kept as harava.unknown, flagged.
+        # stage's sum downstream. Kept as egress-guard.unknown, flagged.
         raise _Skip("negative_counter", "monotonic counter value is negative")
-    for label, allowed in KNOWN_LABELS.get(name, {}).items():
+    for label, allowed in known.get(name, {}).items():
         if labels.get(label) not in allowed:
             flags.append("unknown_label_value")
     unmapped = dict(metric_unmapped)
@@ -828,6 +891,7 @@ def _samples(
     common: dict[str, Any],
     common_flags: list[str],
     metric_unmapped: dict[str, Any],
+    known: Mapping[str, Mapping[str, frozenset[str]]],
 ) -> list[ObservationDraft]:
     is_monotonic = data.get("isMonotonic", False)
     if not isinstance(is_monotonic, bool):
@@ -846,7 +910,15 @@ def _samples(
                 raise _Skip("invalid_datapoint", str(exc)) from None
             out.append(
                 _sample(
-                    name, dp, common, flags, labels, "cumulative", is_monotonic, metric_unmapped
+                    name,
+                    dp,
+                    common,
+                    flags,
+                    labels,
+                    "cumulative",
+                    is_monotonic,
+                    metric_unmapped,
+                    known,
                 )
             )
         except _Skip as skip:
@@ -857,7 +929,7 @@ def _samples(
                 event_time = None
             out.append(
                 _observation(
-                    "harava.unknown",
+                    "egress-guard.unknown",
                     event_time,
                     {
                         "metric": name,
@@ -881,7 +953,11 @@ def _samples(
 
 
 def _metric(
-    metric: object, common: dict[str, Any], rflags: list[str], context: dict[str, Any]
+    metric: object,
+    common: dict[str, Any],
+    rflags: list[str],
+    context: dict[str, Any],
+    known: Mapping[str, Mapping[str, frozenset[str]]],
 ) -> list[ObservationDraft]:
     """One metric's observations. ``context`` holds the namespaced unmapped sections of the
     request, resource and scope; this adds ``metric`` (and ``datapoint``), so source keys from
@@ -914,7 +990,9 @@ def _metric(
                 MAX_UNMAPPED_REPEATED,
             )
             try:
-                return _samples(name, data, common, flags, context | _section("metric", extra))
+                return _samples(
+                    name, data, common, flags, context | _section("metric", extra), known
+                )
             except AdapterError as exc:
                 raise _Skip("invalid_metric", str(exc)) from None
         if "non_monotonic_sum" in flags:
@@ -925,7 +1003,7 @@ def _metric(
             flags.append("unsupported_metric_type")
         return [
             _observation(
-                "harava.unknown",
+                "egress-guard.unknown",
                 None,
                 {"metric": name, "type": mtype, **common},
                 flags,
@@ -944,7 +1022,7 @@ def _metric(
         kept = metric if isinstance(metric, dict) else {"metric": metric}
         return [
             _observation(
-                "harava.unknown",
+                "egress-guard.unknown",
                 None,
                 {"metric": name, "type": None, **common, "error": skip.reason},
                 [*flags, skip.flag],
@@ -967,7 +1045,7 @@ def _repeated(source: Mapping[str, Any], skip: tuple[str, ...], flags: list[str]
     )
 
 
-def _parse_otlp(obj: dict[str, Any], json_flags: tuple[str, ...]) -> ParseResult:
+def _parse_otlp(obj: dict[str, Any], json_flags: tuple[str, ...], opts: _Options) -> ParseResult:
     resource_metrics = _list(obj["resourceMetrics"], "resourceMetrics")
     _count_datapoints(resource_metrics)  # enforce the cap before building anything
     observations: list[ObservationDraft] = []
@@ -1013,38 +1091,43 @@ def _parse_otlp(obj: dict[str, Any], json_flags: tuple[str, ...]) -> ParseResult
             )
             common: dict[str, Any] = {"resource": resource, "scope": scope}
             for metric in _list(sm.get("metrics"), "metrics"):
-                observations.extend(_metric(metric, common, sflags, context))
+                observations.extend(_metric(metric, common, sflags, context, opts.known_labels))
     return ParseResult(observations=tuple(observations))
 
 
 # --- adapter ------------------------------------------------------------------------------------
 
 
-class HaravaAdapter:
-    name = "harava"
-    version = "1.1.0"
+class EgressGuardAdapter:
+    name = "egress-guard"
+    version = "2.0.0"
+
+    def validate_options(self, options: Mapping[str, Any]) -> None:
+        """Refuse, at registration, the options ``parse`` would refuse (``AdapterError``)."""
+        _Options.parse(options)
 
     def parse(self, raw: RawRecord, options: Mapping[str, Any]) -> ParseResult:
         if len(raw.body) > MAX_OTLP_BYTES:
             raise LimitExceeded("body_bytes", f"record larger than {MAX_OTLP_BYTES} bytes")
+        opts = _Options.parse(options)
         text = raw.text()
         stripped = text.strip()
         if stripped.startswith("{"):
             # LimitExceeded (json_depth, json_keys) propagates for ingest to record.
             obj, json_flags = loads_object_flagged(stripped, max_keys=MAX_OTLP_KEYS)
             if "resourceMetrics" in obj:
-                return _parse_otlp(obj, json_flags)
+                return _parse_otlp(obj, json_flags, opts)
             if len(text) > MAX_LINE:
                 raise LimitExceeded("line_length", f"log record longer than {MAX_LINE} characters")
-            return _parse_line(_docker_envelope(obj, json_flags))
+            return _parse_line(_docker_envelope(obj, json_flags), opts)
         if len(text) > MAX_LINE:
             raise LimitExceeded("line_length", f"log record longer than {MAX_LINE} characters")
         text, replaced = sanitize_text(text.rstrip("\r\n"))
         env = _cri_envelope(text) or _Envelope(text, False, None, {}, [])
         if replaced:
             env.flags.append(INVALID_UNICODE_FLAG)
-        return _parse_line(env)
+        return _parse_line(env, opts)
 
 
-ADAPTER = HaravaAdapter()
+ADAPTER = EgressGuardAdapter()
 register(ADAPTER)

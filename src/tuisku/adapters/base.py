@@ -25,14 +25,14 @@ OCSF_VERSION = "1.9.0"
 class Evaluator(StrEnum):
     """Who ran the logic that produced a detection (ADR 0002)."""
 
-    SENSOR = "sensor"  # Suricata, Zeek, Falco, Harava decided; adapters only ever emit this
+    SENSOR = "sensor"  # Suricata, Zeek, Falco, egress gateway decided; adapters only emit this
     TUISKU = "tuisku"  # a Tuisku rule pack rule fired in the worker
 
 
 class Authorship(StrEnum):
     """Who wrote that logic (ADR 0002)."""
 
-    BUILTIN = "builtin"  # shipped with the sensor as its own logic (Zeek notice, Harava checks)
+    BUILTIN = "builtin"  # shipped with the sensor as its own logic (Zeek notice, gateway refusals)
     COMMUNITY = "community"  # a third-party rule set (ET Open, Falco default rules)
     LOCAL = "local"  # written by the deploying estate
     TUISKU = "tuisku"  # a pack shipped in this repository
@@ -116,7 +116,7 @@ class DetectionDraft:
     the same result by index.
 
     ``rule_ref`` identifies the mechanism verbatim, e.g. ``{"engine": "suricata", "gid": 1,
-    "sid": 2045001, "rev": 1, "name": "ET ..."}`` or ``{"engine": "harava", "name":
+    "sid": 2045001, "rev": 1, "name": "ET ..."}`` or ``{"engine": "egress-guard", "name":
     "outbound_refused"}``. ``identity`` is the stable string used for finding fingerprints
     (``suricata:1:2045001``, ``falco:Terminal shell in container``,
     ``zeek:notice:Scan::Port_Scan``).
@@ -160,9 +160,31 @@ class Adapter(Protocol):
 
     Bump ``version`` (semver) on any change to the output for the same input; golden tests
     enforce this.
+
+    An adapter may also define ``validate_options(self, options) -> None``, raising
+    :class:`AdapterError` for options its ``parse`` would refuse. It is optional, so it is not a
+    member of this protocol; call it through :func:`validate_options`, which treats an adapter
+    without it as accepting any options at registration (``parse`` still checks them).
     """
 
     name: str
     version: str
 
     def parse(self, raw: RawRecord, options: Mapping[str, Any]) -> ParseResult: ...
+
+
+def validate_options(adapter: Adapter, options: Mapping[str, Any]) -> None:
+    """Check a source's adapter options when the source is registered, so a misspelt option is
+    refused then instead of failing every record. A no-op for an adapter without the hook.
+
+    Raises :class:`AdapterError` for options the adapter refuses, and :class:`TypeError` when
+    the adapter's ``validate_options`` attribute is not callable (a bug in the adapter). Any
+    other exception is a bug in the hook and propagates as it is."""
+    hook = getattr(adapter, "validate_options", None)
+    if hook is None:
+        return
+    if not callable(hook):
+        raise TypeError(
+            f"adapter {adapter.name}: validate_options is not callable (a bug in the adapter)"
+        )
+    hook(options)

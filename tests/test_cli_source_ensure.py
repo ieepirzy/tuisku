@@ -187,6 +187,18 @@ def test_ensure_validates_the_token_without_echoing_it(
     assert query(env.owner_url, "SELECT count(*) FROM sources WHERE name = %s", (name,)) == [(0,)]
 
 
+def test_ensure_refuses_options_the_adapter_would_refuse(
+    env: AppDatabase, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(ENV, new_source_token())
+    name = _name()
+    for bad in (["--option", "loger_prefix=gw"], ["--option-json", "logger_prefix=5"]):
+        assert _ensure(name, *bad, adapter="egress-guard") == 2
+        assert "refuses these options" in capsys.readouterr().err
+    assert query(env.owner_url, "SELECT count(*) FROM sources WHERE name = %s", (name,)) == [(0,)]
+    assert _ensure(name, "--option", "logger_prefix=gw", adapter="egress-guard") == 0
+
+
 def test_ensure_rejects_an_unknown_adapter(
     env: AppDatabase, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

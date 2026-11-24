@@ -56,7 +56,7 @@ OPERATOR = "00000000-0000-4000-8000-000000000000"  # its token secret is its uid
 def _line(at: datetime, caller: str) -> tuple[datetime, bytes, Transport]:
     stamp = at.strftime("%Y-%m-%d %H:%M:%S,000")
     body = (
-        f"{stamp} WARNING harava.api outbound data refused: caller={caller} "
+        f"{stamp} WARNING egress_guard.api outbound data refused: caller={caller} "
         "urls=1 findings=email/query/plain"
     )
     return at + timedelta(seconds=1), body.encode(), Transport.NDJSON
@@ -66,11 +66,11 @@ def _line(at: datetime, caller: str) -> tuple[datetime, bytes, Transport]:
 def worked(app_db: AppDatabase) -> AppDatabase:
     """Rows in every new evidence table, written by the worker connected as the app role."""
     source = f"w{uuid.uuid4().hex[:10]}"
-    callers = ["agents", f"s{uuid.uuid4().hex[:6]}", f"t{uuid.uuid4().hex[:6]}"]
+    callers = ["example-agent", f"s{uuid.uuid4().hex[:6]}", f"t{uuid.uuid4().hex[:6]}"]
     ingest(
         app_db.app_url,
         source,
-        "harava",
+        "egress-guard",
         [_line(T + timedelta(minutes=i), c) for i, c in enumerate(callers)],
     )
     stats = run_worker(

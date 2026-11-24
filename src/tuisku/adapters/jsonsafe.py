@@ -38,7 +38,7 @@ def _reject_constant(name: str) -> Any:
 def sanitize_text(value: str) -> tuple[str, bool]:
     """Replace U+0000 and lone surrogates with U+FFFD; return ``(text, replaced)``.
 
-    For plain-text inputs such as Harava log lines; add ``invalid_unicode_replaced`` to the
+    For plain-text inputs such as egress gateway log lines; add ``invalid_unicode_replaced`` to the
     observation's flags when ``replaced`` is True. Valid text is returned unchanged.
     """
     cleaned, count = _FORBIDDEN_CHARS.subn("\ufffd", value)

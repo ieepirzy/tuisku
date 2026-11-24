@@ -13,17 +13,18 @@ change one only with new evidence, by writing a new ADR that names the one it re
 | [0005](0005-source-adapters-and-ingestion.md) | Source adapter contract and ingestion path | Accepted |
 | [0006](0006-detection-rules-and-correlation.md) | Deterministic rules, correlation and rule packs | Accepted |
 | [0007](0007-findings-and-incidents.md) | Findings, incidents and their lifecycle | Accepted |
-| [0008](0008-identifiers-and-interchange.md) | Identifiers, vocabularies, and interchange with Loimi and Apogee | Accepted |
+| [0008](0008-identifiers-and-interchange.md) | Identifiers, vocabularies, and interchange with other systems | Accepted |
 | [0009](0009-agent-runtime-and-authority.md) | Agent runtime interface and response authority | Accepted (design; not built yet) |
-| [0010](0010-deployment-topology.md) | Deployment topology for the first target | Accepted |
+| [0010](0010-deployment-topology.md) | Deployment topology | Accepted |
 | [0011](0011-separate-worker-database-role.md) | Separate worker database role (amends 0004 §3) | Accepted |
 | [0012](0012-export-of-finding-and-incident-events.md) | Export of finding and incident events to an append-only sink | Accepted |
+| [0013](0013-deployment-neutral-names.md) | Deployment-neutral names for built-in adapters and packs | Accepted |
 
 Status words: *Accepted* (in force), *Superseded by NNNN*, *Proposed* (not in force).
 
 The research these ADRs rest on (OCSF, STIX 2.1, Sigma correlations, sensor output formats,
-Community ID, collector transports, and the neighbouring Loimi, Apogee and Harava services) is
-summarised in the ADRs that use it, with links to primary sources.
+Community ID, collector transports, and interchange with other systems) is summarised in the
+ADRs that use it, with links to primary sources.
 
 ## Decided later, on purpose
 
@@ -38,8 +39,8 @@ not forgotten:
   (telemetry → incident → agent analysis) comes with the agent layer.
 - **Response policy and approval**: ADR 0009 fixes human-only approval and closed catalogues.
   A containment ADR will design autonomous actions.
-- **The first milestone's agent half**: a Miragen-backed investigator through the ADR 0009
-  interface. The deterministic half comes first.
+- **The first milestone's agent half**: an investigator on the reference agent runtime,
+  through the ADR 0009 interface. The deterministic half comes first.
 - **Dashboards** (issue #2): trends are queryable from the API; a dashboard is a follow-up.
 - **Tenancy**: entity keys gain an estate qualifier if Tuisku ever watches more than one estate.
 - **Partitioning, cold storage and incremental aggregates** (ADRs 0004, 0006), when volume

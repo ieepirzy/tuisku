@@ -51,7 +51,7 @@ select = ["E", "F", "I", "UP", "B"]
 "migrations/**" = ["E501"]
 
 [tool.pyright]
-include = ["src"]
+include = ["src", "scripts"]
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
 venvPath = "."

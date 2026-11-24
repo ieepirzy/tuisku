@@ -3,10 +3,14 @@
 Status: Accepted (2026-11-01). Amended 2026-11-13: OTLP/HTTP JSON logs transport and
 `tuisku source ensure`.
 
+Edited 2026-11-23 and 2026-11-24: wording generalised.
+
 ## Context
 
-Tuisku must ingest Suricata EVE JSON, Zeek JSON logs, Falco JSON, and Harava's plain-text log
-lines and OTLP metrics, with more to come. Industry practice is to parse in the shipping
+Tuisku must ingest Suricata EVE JSON, Zeek JSON logs, Falco JSON, and an egress gateway's
+plain-text log lines and OTLP metrics, with more to come. The egress gateway is an agent egress
+safety proxy: an HTTP gateway that agents call to fetch URLs, and that refuses unsafe outbound
+requests and destinations. Industry practice is to parse in the shipping
 pipeline (Logstash, Vector remaps). That would put normalization, and with it provenance,
 outside Tuisku. Shippers deliver at least once, so duplicates arrive. Every sender is a
 potential attacker: anyone who holds a source token, and anyone who can influence what a
@@ -27,7 +31,7 @@ sensor sees.
   - An `http` sink sends to Tuisku, with end-to-end acknowledgements and a disk buffer.
   - Falco writes to a file that the same shipper tails, rather than using falcosidekick's
     webhook, which has no durable queue.
-- **OTLP sources** (Harava exports OTLP/HTTP metrics) post to
+- **OTLP sources** (the egress gateway exports OTLP/HTTP metrics) post to
   `POST /v1/sources/{source}/otlp/v1/metrics` using OTLP JSON encoding. The whole request body
   is one L0 record, and the adapter expands it into metric samples. An OpenTelemetry Collector
   in front (with the `otlphttp` exporter set to JSON) provides retries and queueing. Protobuf
@@ -120,7 +124,7 @@ sensor sees.
 ### Sources, tokens and roles
 
 - A **source** is a registered sender. It has a name, an adapter (`suricata`, `zeek`, `falco`,
-  `harava`), adapter options, and one or more **tokens**.
+  `egress-guard`), adapter options, and one or more **tokens**.
 - **Token format and storage**
   - Tokens are 256-bit random values with a recognisable prefix (`tsk_src_`), so secret
     scanners catch leaks.
@@ -179,7 +183,7 @@ class Adapter(Protocol):
 references observations from the same result by index, and carries `evaluator = sensor`, an
 `authorship` ([0002](0002-epistemic-layers.md)) and a stable `identity` string
 (`suricata:1:2045001`, `falco:Terminal shell in container`, `zeek:notice:Scan::Port_Scan`,
-`harava:outbound_refused`). Rules:
+`egress-guard:outbound_refused`). Rules:
 
 1. **Pure and deterministic.** No I/O, no clock, no randomness, no network lookups, no
    enrichment. The same bytes and options always give the same drafts. Enrichment, such as asset
@@ -196,8 +200,8 @@ references observations from the same result by index, and carries `evaluator = 
    - IP addresses parsed with `ipaddress`
    - text formats parsed with anchored patterns whose matching is linear in input length (no
      nested quantifiers), and input capped before matching
-6. **Respect upstream privacy guarantees.** For example, Harava never logs the refused URL or
-   value. Its adapter must not try to reconstruct or enrich them.
+6. **Respect upstream privacy guarantees.** For example, where a source withholds a refused URL
+   or value, its adapter must not try to reconstruct or enrich them.
 7. **Fixtures are the spec.** Each adapter ships fixtures (synthetic, or from public sample sets
    whose licence is recorded) with golden expected outputs. A change in output without a version
    bump fails the tests.
@@ -219,7 +223,7 @@ correlation run asynchronously, so slow rules never apply back-pressure to senso
 | `suricata` | EVE JSON: `alert`, `flow`, `dns` v2/v3, `http`, `tls`, `fileinfo`, `anomaly`; other types become generic | flow, DNS, HTTP, TLS and file facts | `alert` → authorship `local` for sids 1000000–1999999, `builtin` for 2200000–2299999, otherwise `community` (`gid:sid:rev`, signature, category, metadata); `anomaly` → `builtin` |
 | `zeek` | JSON logs: `conn`, `dns`, `http`, `ssl`, `files`, `notice`, `weird`; epoch or ISO-8601 `ts`. The log type comes from the source's adapter option `log` (one source per log stream), or failing that from the record's own required fields, never from `collector` | conn, DNS, HTTP, SSL and file facts | `notice`, `weird` → `builtin` |
 | `falco` | Falco JSON output: `rule`, `priority`, `source`, `tags`, `time`, `output_fields` | process, file and container facts from `output_fields` | rule match → `community`, or `local` if the rule name is listed in adapter options; priority mapped to severity; ATT&CK ids parsed from tags |
-| `harava` | plain-text log lines (bare, or wrapped in Docker json-file or CRI format); OTLP JSON metrics | `harava.refusal` (one per refusal line); `harava.mcp_refused_to_serve` (a misconfiguration, so an observation only); `metric.sample` | `harava.outbound_refused` and `harava.destination_refused` → `builtin`. Destination refusals are logged only at the `admission` stage, so the adapter sets `stage = admission` |
+| `egress-guard` | an egress gateway's plain-text log lines (bare, or wrapped in Docker json-file or CRI format); OTLP JSON metrics. The gateway's own logger and metric namespaces are the adapter options `logger_prefix` and `metric_prefix` (neutral defaults), so no deployment's names are built in | `egress-guard.refusal` (one per refusal line); `egress-guard.mcp_refused_to_serve` (a misconfiguration, so an observation only); `metric.sample` | `egress-guard.outbound_refused` and `egress-guard.destination_refused` → `builtin`. The adapter records a destination refusal line with `stage = admission` |
 
 ## Consequences
 
@@ -228,7 +232,7 @@ correlation run asynchronously, so slow rules never apply back-pressure to senso
   KiB, CRI writes partial `P` chunks), arrives as a separate line. Such a line can look exactly
   like a sensor verdict. Adapters flag partial and continuation chunks where the wrapper allows
   it. Pack rules that page on a text-log verdict should require corroboration from an
-  independent channel of the same sensor where one exists, for example Harava's refusal
+  independent channel of the same sensor where one exists, for example the egress gateway's refusal
   counters over OTLP; without it, they should lower the severity.
 
 - Shipper configuration is minimal and the same across sensors.

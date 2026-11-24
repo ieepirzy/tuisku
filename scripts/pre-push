@@ -1,0 +1,49 @@
+#!/bin/sh
+# Optional git pre-push hook: the name guard (ADR 0013) over what a push publishes, before it
+# leaves this machine. A push to any branch of a public repository is public at once, and a
+# guard failure in CI comes too late and points at a line in a public log.
+#
+# It scans the work tree, the name of each ref being pushed, the message and tagger of each
+# annotated tag being pushed, and the commits being pushed that the remote already has in none
+# of its remote-tracking refs (all of them, when pushing to a URL) and not in the ref's old
+# value: history that is public already does not refuse a push. Deleting a ref publishes
+# nothing and is not checked.
+#
+# Install:  ln -s ../../scripts/pre-push .git/hooks/pre-push
+# It needs the private list in TUISKU_DENYLIST_FILE (a path) or TUISKU_DENYLIST (the text);
+# without one, the guard exits 2 and the push is refused.
+set -eu
+
+remote="$1"
+guard() { python3 -I scripts/name_guard.py "$@"; }
+
+if git config --get "remote.$remote.url" >/dev/null 2>&1; then
+    public="refs/remotes/$remote"
+else # pushing to a URL: what any remote-tracking ref holds
+    public="refs/remotes"
+fi
+
+status=0
+guard tree </dev/null || status=1
+while read -r local_ref local_sha remote_ref remote_sha; do
+    case "$local_sha" in *[!0]*) ;; *) continue ;; esac # a deletion
+    printf '%s\n' "$remote_ref" | guard text --label ref || status=1
+    object="$local_sha"
+    while [ "$(git cat-file -t "$object")" = tag ]; do # an annotated tag, perhaps of a tag
+        git cat-file tag "$object" | guard text --label tag || status=1
+        object=$(git cat-file tag "$object" | sed -n '1s/^object //p')
+    done
+    # A tag of a tree or a blob has no commits.
+    git rev-parse -q --verify "$object^{commit}" >/dev/null || continue
+    old=""
+    case "$remote_sha" in *[!0]*)
+        if git rev-parse -q --verify "$remote_sha^{commit}" >/dev/null; then
+            old="^$remote_sha"
+        fi
+        ;;
+    esac
+    # shellcheck disable=SC2046,SC2086 # one argument per ref; object names have no spaces
+    guard commits "$object" $old \
+        $(git for-each-ref --format='^%(objectname)' "$public") </dev/null || status=1
+done
+exit "$status"

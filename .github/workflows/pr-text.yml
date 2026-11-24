@@ -1,0 +1,61 @@
+name: PR text
+
+# The name guard over a pull request's title, body and branch name (ADR 0013), again whenever
+# they are edited. Commits and the tree are scanned by the name-guard-tree job in ci.yml.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-text-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  name-guard-pr-text:
+    # Its name must differ from every other job's: branch protection matches checks by name, so
+    # a passing run of this job must never stand in for the tree scan. It holds the list, so
+    # it runs only the standard-library scanner, with python3 -I, and installs nothing.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Decode the denylist
+        # One base64 line, so the log masks one value instead of every entry. Without the
+        # secret (a fork, or Dependabot without the Dependabot secret) this job fails.
+        env:
+          TUISKU_DENYLIST_B64: ${{ secrets.TUISKU_DENYLIST_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TUISKU_DENYLIST_B64" ]; then
+            echo "::error::secret TUISKU_DENYLIST_B64 is not available; the name guard cannot run (ADR 0013)"
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$TUISKU_DENYLIST_B64" | base64 --decode > "$RUNNER_TEMP/denylist.txt"
+      - name: Name guard (title, body and branch)
+        # Untrusted PR text reaches the script only through environment variables, never by
+        # interpolation into the script. A Dependabot pull request's body is upstream release
+        # notes, text this repository does not write and cannot change, so it is not scanned;
+        # its title, branch, commits and tree are.
+        env:
+          TUISKU_DENYLIST_FILE: ${{ runner.temp }}/denylist.txt
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          status=0  # every input is checked before the step fails
+          guard() { python3 -I scripts/name_guard.py text --label "$1" || status=1; }
+          guard pr-title <<< "$PR_TITLE"
+          if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
+            echo "pr-body: not scanned (a Dependabot pull request, ADR 0013)"
+          else
+            guard pr-body <<< "$PR_BODY"
+          fi
+          guard pr-branch <<< "$PR_BRANCH"
+          exit "$status"

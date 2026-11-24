@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 
 from tuisku.adapters import (
+    Adapter,
     AdapterError,
     Authorship,
     DetectionDraft,
@@ -15,6 +16,7 @@ from tuisku.adapters import (
     RawRecord,
     Severity,
     registry,
+    validate_options,
 )
 from tuisku.adapters.entities import (
     caller_key,
@@ -131,6 +133,31 @@ class TestRegistry:
             registry.get("no-such-adapter")
 
 
+class TestValidateOptions:
+    def test_an_adapter_without_the_hook_accepts_any_options(self) -> None:
+        validate_options(_Dummy(), {"anything": [1, 2]})
+
+    def test_the_hook_is_called_with_the_options(self) -> None:
+        seen: list[object] = []
+
+        class Checked(_Dummy):
+            def validate_options(self, options: object) -> None:
+                seen.append(options)
+                raise AdapterError("no")
+
+        assert isinstance(Checked(), Adapter)
+        with pytest.raises(AdapterError, match="no"):
+            validate_options(Checked(), {"k": "v"})
+        assert seen == [{"k": "v"}]
+
+    def test_a_hook_that_is_not_callable_is_an_adapter_bug(self) -> None:
+        class Broken(_Dummy):
+            validate_options = "not a function"
+
+        with pytest.raises(TypeError, match="validate_options is not callable"):
+            validate_options(Broken(), {})
+
+
 class TestEntities:
     @pytest.mark.parametrize(
         ("value", "expected"),
@@ -178,8 +205,8 @@ class TestEntities:
         h = "A" * 64
         assert sha256_key("sha256:" + h) == "sha256:" + "a" * 64
         assert sha256_key("abc") is None
-        assert caller_key("harava", "agents") == "caller:harava/agents"
-        assert caller_key("har/ava", "agents") is None
+        assert caller_key("egress-guard", "example-agent") == "caller:egress-guard/example-agent"
+        assert caller_key("egress/guard", "example-agent") is None
 
     def test_unique(self) -> None:
         assert unique("a", None, "b", "a") == ("a", "b")
@@ -327,8 +354,8 @@ class TestHostileEntities:
         assert k8s_pod_key("default", "web-1" + bad) is None
         assert k8s_pod_key("default" + bad, "web-1") is None
         assert image_key("ghcr.io/org/app" + bad) is None
-        assert caller_key("harava" + bad, "agents") is None
-        assert caller_key("harava", "agents" + bad) is None
+        assert caller_key("egress-guard" + bad, "example-agent") is None
+        assert caller_key("egress-guard", "example-agent" + bad) is None
         assert process_key("node-1" + bad, 1, T0) is None
 
     def test_ip_scope_and_mapped(self) -> None:

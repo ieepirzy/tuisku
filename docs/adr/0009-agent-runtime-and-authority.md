@@ -2,14 +2,17 @@
 
 Status: Accepted as design (2026-11-01). Not built in the first milestone.
 
+Edited 2026-11-23: wording generalised.
+
 ## Context
 
 Issue #1 sets these requirements for agents:
 
 - Agents investigate evidence through controlled tools.
 - Their conclusions cite evidence.
-- The runtime is harness-swappable by contract. Miragen is the reference runtime; alternatives
-  include local or open models, third-party frameworks, and non-agent investigators.
+- The runtime is harness-swappable by contract. The reference agent runtime comes first;
+  alternatives include local or open models, third-party frameworks, and non-agent
+  investigators.
 - Authority is tiered: observe, investigate, recommend, contain, remediate.
 
 Prompt injection is Tuisku's central design problem. Every string an agent reads from telemetry
@@ -189,7 +192,7 @@ login or rate limits for their products, including agents built on the Claude Ag
   result schema.
 - The tier bounds what an injected instruction can achieve. At most, it produces a wrong
   hypothesis or a proposal that a human must approve. Nothing the agent writes executes.
-- Harava's content-signal verdicts, and similar injection detectors, can be applied to evidence
+- An egress gateway's content-signal verdicts, and similar injection detectors, can be applied to evidence
   text before it is shown. Their results are ordinary L1/L2 rows from their own adapters. They
   appear as evidence like anything else and are not special-cased.
 
@@ -197,5 +200,5 @@ login or rate limits for their products, including agents built on the Claude Ag
 
 - The deterministic core ships first and is useful on its own. The agent layer plugs in later,
   with no schema changes beyond the L4 tables (`hypotheses`, `investigator_sessions`, `tool_calls`, `proposed_actions`, `evidence_requests`).
-- Swapping Miragen for another harness changes no Tuisku code.
+- Swapping the reference agent runtime for another harness changes no Tuisku code.
 - Autonomous containment needs its own ADR, and the deploying estate's own decision.
