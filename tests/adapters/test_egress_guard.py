@@ -325,10 +325,13 @@ class TestOtherLines:
         ("text", "line_type"),
         [
             ("INFO:     example server line", "uvicorn"),
-            ('INFO:     192.0.2.1:5000 - "GET /v1/fetch?e=a@example.com HTTP/1.1" 422', "uvicorn"),
+            (
+                'INFO:     192.0.2.1:5000 - "GET /v1/example?e=a@example.com HTTP/1.1" 422',
+                "uvicorn",
+            ),
             ("ERROR:    Exception in ASGI application", "uvicorn"),
             ("Traceback (most recent call last):", "traceback"),
-            ('  File "/app/egress_guard/api/app.py", line 355, in _refuse', "traceback"),
+            ('  File "/srv/example/handler.py", line 10, in handle', "traceback"),
             ("ValueError: bad https://example.com/?x=1", "traceback"),
             ("example.ConnectError:", "traceback"),
             ("KeyError", "traceback"),

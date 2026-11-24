@@ -10,8 +10,8 @@ Accepted:
 - epoch seconds as int/float (Zeek ``ts``), or epoch nanoseconds as an int above 10**17
   (Falco ``evt.time``).
 
-**Zone-less strings are ambiguous.** An ISO string without ``Z`` or an offset is interpreted as
-UTC, because that is how the egress gateway's containers log. :func:`parse_timestamp` hides that
+**Zone-less strings are ambiguous.** Timestamps without a zone are read as UTC: an ISO string
+without ``Z`` or an offset is interpreted as UTC. :func:`parse_timestamp` hides that
 assumption; adapters that want to record it call :func:`parse_timestamp_with_zone_flag` and add
 the ``timezone_assumed_utc`` flag to the observation when the returned ``zone_given`` is False.
 Epoch values carry no zone ambiguity and report ``zone_given=True``.

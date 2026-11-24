@@ -39,8 +39,8 @@
   could contain personal data; test fixtures are synthetic. The deploying
   organisation's internal service, product and project names (and its
   hostnames) never appear in code, comments, fixtures, docs, file names, commit
-  messages or pull request text: name the role instead ("the egress gateway",
-  "the artifact store"). `scripts/name_guard.py` enforces this with a denylist
+  messages or pull request text: name the role instead (such as "the egress
+  gateway"). `scripts/name_guard.py` enforces this with a denylist
   that is not in the repository: it is read from `TUISKU_DENYLIST` (the text)
   or `TUISKU_DENYLIST_FILE` (a path); the maintainers hold a copy. CI holds it
   as the secret `TUISKU_DENYLIST_B64` (the list base64-encoded on one line, so

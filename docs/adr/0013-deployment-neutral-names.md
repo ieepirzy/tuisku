@@ -40,9 +40,9 @@ repository already keeps out (detection logic, thresholds, hostnames, topology).
   `tuisku source ensure` call it before writing anything. A source whose options reach the
   database another way and fail the check fails every record, with a parse failure recorded per
   raw record, instead of turning refusals into generic log lines.
-- **Documents name roles** ("the egress gateway", "the artifact store", "the red-team service",
-  "the reference agent runtime"). The earlier ADRs were edited to do so; the edits change no
-  decision and each carries a dated edit note.
+- **Documents name roles**, such as "the egress gateway", and otherwise speak of other systems
+  generically. The earlier ADRs were edited to do so; the edits change no decision and each
+  carries a dated edit note.
 - **A guard keeps names out, and its list is not in the repository.** `scripts/name_guard.py`
   scans every tracked file and every untracked file that is not ignored, the name of each file
   and directory, and each symlink's target; CI also runs it over commits and pull request text
@@ -63,7 +63,8 @@ repository already keeps out (detection logic, thresholds, hostnames, topology).
     it is blanked before matching (with a private-use character; one in the text itself counts
     as a separator), and a compound match that spans a blanked word does not count. Entries and
     lines alike are NFKC-normalised, stripped of format characters (zero-width characters, the
-    soft hyphen), casefolded, and common Cyrillic, Greek, Armenian and Latin look-alikes are
+    soft hyphen) and of characters that render blank (the Hangul fillers, the blank braille
+    pattern), casefolded, and common Cyrillic, Greek, Armenian and Latin look-alikes are
     mapped to Latin; each line is checked again accent-folded (NFKD without nonspacing marks).
     Percent-decoded (twice), HTML-unescaped and JSON-unescaped (`\uXXXX`) copies of a line are
     checked too, at most eight forms of a line in all and only for lines of at most 4096
@@ -98,7 +99,10 @@ repository already keeps out (detection logic, thresholds, hostnames, topology).
     `TUISKU_DENYLIST` and `TUISKU_DENYLIST_FILE` remain for local use.
   - **CI jobs.** Two jobs hold the list: `name-guard-tree` in `ci.yml`, which scans the tree and
     the commits of a pull request, or of a push to main (`before..after`; a newly created
-    branch, whose `before` is all zeros, has only its head commit scanned), and
+    branch, whose `before` is all zeros, has only its head commit scanned). `ci.yml` runs on
+    every pull request event that `pr-text.yml` does, `edited` included, because changing a
+    pull request's base branch is an edit that changes its range; each push to main runs in a
+    concurrency group of its own, so no pushed range is cancelled unscanned. The other job is
     `name-guard-pr-text` in `pr-text.yml`, which scans a pull request's title, body and branch
     name when it is opened, edited, reopened or pushed to. Intermediate commits are scanned
     because they reach main's history under merge and rebase merges. Neither job installs
@@ -107,8 +111,10 @@ repository already keeps out (detection logic, thresholds, hostnames, topology).
     dependency's install hook, `.pth` file or test plugin therefore never runs where the list
     is, which matters because Dependabot pull requests, which change dependencies, receive the
     secret too. The `test` job needs no secret, so lint, types and tests report on every pull
-    request; it deselects the tree test, which without the list would skip and so fail under
-    `CI=true` (so a renamed tree test cannot pass unnoticed). The tree test and the
+    request. It runs in full on an edit too: skipping its steps then would report success for a
+    head whose tests had failed, and a skipped required check counts as passed. It deselects
+    the tree test, which without the list would skip and so fail under `CI=true` (so a renamed
+    tree test cannot pass unnoticed). The tree test and the
     `name-guard-tree` job run the same function, `scan_repo`. The job names differ because
     branch protection matches required checks by name: two jobs of one name would let a passing
     run of one stand in for a failing run of the other.
@@ -116,12 +122,23 @@ repository already keeps out (detection logic, thresholds, hostnames, topology).
     `name-guard-pr-text` are required status checks on main, through branch protection or a
     ruleset, and `.github/CODEOWNERS`, which names the owner for the scanner, its tests, the
     pre-push hook and the workflows, is enforced by requiring a code owner's review. Until
-    then, CI reports a hit but does not stop a merge.
+    then, CI reports a hit but does not stop a merge. Even then the limit is inherent: both
+    guard jobs run the scanner and the workflow files of the pull request itself, so a pull
+    request from a branch of this repository can change them to pass without scanning, and
+    anyone who can push a branch here can make a workflow read the secret. Only an enforced
+    code owner's review (which keeps such a change out of main) or a ruleset that requires
+    workflows from a protected ref (which keeps it from running) stops that, and a sole
+    maintainer cannot be required to review their own pull request: for them the jobs catch
+    mistakes, not intent.
   - **Before pushing.** A push to any branch of a public repository is public at once, before
     CI runs, and a CI failure points at a line in a public log. Maintainers therefore run the
-    guard locally first; `scripts/pre-push` is an optional pre-push hook that runs it over the
-    work tree and over the commits being pushed (`ln -s ../../scripts/pre-push
-    .git/hooks/pre-push`), and refuses the push without the list.
+    guard locally first; `scripts/pre-push` is an optional pre-push hook (`ln -s
+    ../../scripts/pre-push .git/hooks/pre-push`) that runs it over the work tree, the name of
+    each ref being pushed, the message and tagger of each annotated tag being pushed, and the
+    commits being pushed: those that no remote-tracking ref of the remote (of any remote, when
+    pushing to a URL) and not the ref's old value already hold, so history that is public
+    already does not refuse a push. Deleting a ref is not checked. It refuses the push without
+    the list.
   - **Dependabot.** A Dependabot pull request's body, and the bodies of the commits Dependabot
     authors, are upstream release notes and changelogs: text this repository does not write
     and cannot change. They are not scanned: the PR body when the pull request's author is
@@ -188,10 +205,14 @@ estate detail, and are accepted or open:
   every name that was ever committed. Removing them needs a history rewrite and a request to
   GitHub Support to purge cached views and pull request refs, and clones and forks keep their
   copies regardless.
-- **Earlier pull request branches and diffs**, including those of an earlier revision of this
-  change, stay readable through the pull requests that carried them. One such revision held a
-  list of SHA-256 digests of the names (see "Rejected" above); digests of short names are
-  reversible, so every name exposed that way should be treated as disclosed.
+- **Earlier pull request branches and diffs** stay readable through the pull requests that
+  carried them, and **remote branches of earlier work** that still exist show their names and
+  contents until they are deleted.
+- **An earlier, unmerged revision of this change** held a list of SHA-256 digests of the names
+  (see "Rejected" above); digests of short names are reversible, so every name exposed that way
+  should be treated as disclosed.
+- **This change's own diff** pairs each removed wording with its generic replacement, so a
+  reader of the diff sees what each replacement stands for.
 - **Issues, pull request titles, bodies and comments, and old CI logs** keep what they said.
   The guard scans pull request titles, bodies and branch names from this change on; it never
   scans issues or comments, and an edit to any of them leaves the earlier text in its history.
@@ -200,7 +221,10 @@ estate detail, and are accepted or open:
   guard before pushing (the pre-push hook above), not only in CI.
 - **Container images** built before this change contain the earlier tree.
 - **The egress-guard adapter's vocabulary.** Its closed sets of detectors, locations, encodings,
-  stages and verdicts, and the shapes of the log messages it parses, are those of one gateway
+  destination classes, stages and verdicts; the shapes of the log messages it parses; the fixed
+  logger suffixes (`<prefix>.api`, `<prefix>.mcp`), metric suffixes (`.outbound.refused`,
+  `.destination.refused`, `.content.signals`) and label keys under its configurable prefixes;
+  and its concepts of restricted callers and content signals are those of one gateway
   product. Renaming the adapter removed the product's name, but the vocabulary still identifies
   the product to someone who knows it. Open question: move the adapter out of the core into a
   plugin that the deploying organisation keeps, or make those sets configuration with neutral

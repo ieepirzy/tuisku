@@ -1,4 +1,4 @@
-# 0008. Identifiers, vocabularies, and interchange with an artifact store and a red-team service
+# 0008. Identifiers, vocabularies, and interchange with other systems
 
 Status: Accepted (2026-11-01)
 
@@ -6,9 +6,8 @@ Edited 2026-11-23 and 2026-11-24: wording generalised.
 
 ## Context
 
-Tuisku will later exchange knowledge with **an artifact store**, a store for durable knowledge
-records, and with **a red-team service**, an offensive-security service
-("how can this system be broken?"). Neither side may own the other (issue #1).
+Tuisku will later exchange knowledge with other systems. Neither side may own the other
+(issue #1).
 
 What interchange needs is a contract on Tuisku's side, not knowledge of how the other systems
 store their data:
@@ -57,7 +56,7 @@ Objects that leave Tuisku as STIX get ids by the STIX rules:
 - **Cyber observables (SCOs):** UUIDv5 in the STIX SCO namespace
   (`00abedb4-aa42-466c-9c01-fed23315a9b7`), computed over the ID-contributing properties
   serialized with RFC 8785 (JCS). The same IP, domain or file hash therefore gets the same id
-  from Tuisku, the red-team service or anyone else.
+  from Tuisku or anyone else.
 - **Domain and relationship objects** (`indicator`, `sighting`, `observed-data`, `grouping`,
   `note`): UUIDv5 in a **Tuisku-specific namespace**
   (`e45f460c-9810-4548-8a33-e0b6397b6608`), computed over the Tuisku `uid` of the source row.
@@ -65,14 +64,14 @@ Objects that leave Tuisku as STIX get ids by the STIX rules:
   STIX 2.1 recommends (SHOULD) UUIDv4 for these objects; we deviate on purpose so that exports
   are idempotent.
 
-This prepares the purple-team loop: the red-team service can later publish
+This prepares the purple-team loop: an offensive-security tool can later publish
 *expected indicators* (`indicator` linked to an `attack-pattern`), and Tuisku records a STIX
 `sighting` when an observation matches one.
 
-### Artifact store export (curated, not raw)
+### Export to a knowledge store (curated, not raw)
 
 - Tuisku keeps its operational state (L0–L3, incidents) in its own Postgres. It **exports
-  curated, durable records to the artifact store**: closed or escalated incidents, their
+  curated, durable records to a knowledge store**: closed or escalated incidents, their
   findings, and later L4 hypotheses. Raw telemetry and observations are never exported:
   telemetry can contain personal data, and Tuisku keeps it under its own retention policy.
 - Kinds are Tuisku's own, prefixed `tuisku_`: `tuisku_incident`, `tuisku_finding`, and later
@@ -104,8 +103,8 @@ foreign keys and no shared tables.
 
 ## Consequences
 
-- Correlating Tuisku and the red-team service is a join on entity keys and ATT&CK ids, with no
+- Correlating Tuisku with another system is a join on entity keys and ATT&CK ids, with no
   shared schema.
-- Agents (Tuisku's own, or ones the reference agent runtime hosts) can pivot on keys without
+- Agents (Tuisku's own, or ones an agent runtime hosts) can pivot on keys without
   knowing sensor formats.
-- The artifact store stays a knowledge store, not a SIEM.
+- A knowledge store that receives exports stays a knowledge store, not a SIEM.

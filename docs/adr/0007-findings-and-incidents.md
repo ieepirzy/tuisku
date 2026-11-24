@@ -2,7 +2,7 @@
 
 Status: Accepted (2026-11-01)
 
-Edited 2026-11-23: wording generalised.
+Edited 2026-11-23 and 2026-11-24: wording generalised.
 
 ## Context
 
@@ -180,5 +180,5 @@ configuration.
   knob.
 - The incident timeline is the audit log. It is also exactly what an investigator, human or
   agent, reads first.
-- OCSF Incident Finding and the artifact store export ([0008](0008-identifiers-and-interchange.md)) are
-  projections of the incident and its timeline.
+- OCSF Incident Finding and the knowledge-store export
+  ([0008](0008-identifiers-and-interchange.md)) are projections of the incident and its timeline.

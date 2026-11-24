@@ -19,6 +19,7 @@ import hashlib
 import importlib.util
 import io
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -220,6 +221,25 @@ def test_added_lookalikes(lookalike: str) -> None:
             assert ng.line_matches("dhyogai"[:i] + lookalike + "dhyogai"[i + 1 :], denylist)
             return
     pytest.fail("the look-alike maps to no letter of the test word")
+
+
+@pytest.mark.parametrize(
+    ("lookalike", "letter"),
+    [("\u04cf", "l"), ("\u04c0", "l"), ("\u0475", "v"), ("\u028b", "v")],
+)
+def test_more_lookalikes(lookalike: str, letter: str) -> None:
+    denylist = ng.parse_denylist("zevlak\n")
+    word = "zevlak".replace(letter, lookalike)
+    assert word != "zevlak"
+    assert ng.line_matches(word, denylist)
+    assert ng.line_matches(word.upper(), denylist)
+
+
+@pytest.mark.parametrize("filler", ["\u115f", "\u1160", "\u3164", "\uffa0", "\u2800"])
+def test_blank_fillers_are_dropped_like_format_characters(denylist, filler: str) -> None:
+    assert ng.line_matches(f"zor{filler}blat", denylist)
+    assert ng.line_matches(f"quux{filler}frob", denylist)
+    assert ng.normalize(f"a{filler}b") == "ab"
 
 
 def test_an_accented_entry_matches_plain_and_accented_text() -> None:
@@ -614,6 +634,17 @@ def test_commits_lfs_pointers_are_reported(tmp_path: Path, denylist) -> None:
     ]
 
 
+def test_commits_report_the_path_of_a_modified_file(tmp_path: Path, denylist) -> None:
+    # A file that is changed, not added, still has its path published by the commit.
+    _git(tmp_path, "init", "-q")
+    _write(tmp_path, "docs/zorblat.txt", b"clean\n")
+    base = _commit(tmp_path, "Start")
+    _write(tmp_path, "docs/zorblat.txt", b"clean\nmore\n")
+    changed = _commit(tmp_path, "Change")
+    hits = _commit_hits(tmp_path, [f"{base}..{changed}"], denylist)
+    assert f"commit {changed[:12]} paths:1" in hits
+
+
 def test_list_paths_tracked_untracked_not_ignored_not_deleted(tmp_path: Path) -> None:
     # A repository of its own, so the result does not depend on where tmp_path lives.
     _git(tmp_path, "init", "-q")
@@ -732,3 +763,144 @@ def test_cli_tree(monkeypatch, capsys, tmp_path: Path) -> None:
     _write(tmp_path, "new.txt", b"clean\nzorblat\n")
     code, out, _ = _run_cli(monkeypatch, capsys, ["tree", str(tmp_path)])
     assert (code, out) == (1, "internal name: new.txt:2\n")
+
+
+# --- the pre-push hook ------------------------------------------------------------------------
+
+
+def _hooked_clone(tmp_path: Path) -> tuple[Path, Path]:
+    """A bare remote and a clone of it with ``scripts/pre-push`` installed as ADR 0013 says.
+    The scripts are copied in and excluded, so they are neither committed nor scanned; the
+    copied scanner has no exceptions, since this repository's migrations are not there."""
+    remote, work = tmp_path / "remote.git", tmp_path / "work"
+    _git(tmp_path, "init", "-q", "--bare", "-b", "main", str(remote))
+    _git(tmp_path, "clone", "-q", str(remote), str(work))
+    _git(work, "checkout", "-q", "-b", "main")
+    (work / "scripts").mkdir()
+    scanner = (REPO_ROOT / "scripts" / "name_guard.py").read_text()
+    main = 'if __name__ == "__main__":'
+    assert scanner.count(main) == 1
+    scanner = scanner.replace(main, f"TREE_EXCEPTIONS = frozenset()\n\n\n{main}")
+    (work / "scripts" / "name_guard.py").write_text(scanner)
+    shutil.copy2(REPO_ROOT / "scripts" / "pre-push", work / "scripts")
+    (work / ".git" / "info" / "exclude").write_text("/scripts/\n")
+    (work / ".git" / "hooks" / "pre-push").symlink_to("../../scripts/pre-push")
+    return remote, work
+
+
+def _push(work: Path, *args: str, denylist: str | None = SYNTHETIC) -> tuple[int, str]:
+    env = {k: v for k, v in (os.environ | _GIT_ENV).items() if k not in (ng.ENV_TEXT, ng.ENV_FILE)}
+    if denylist is not None:
+        env[ng.ENV_TEXT] = denylist
+    run = subprocess.run(
+        ["git", "-C", str(work), "push", "-q", *args], capture_output=True, env=env
+    )
+    out = (run.stdout + run.stderr).decode()
+    hook_lines = [line for line in out.splitlines() if line.startswith("internal name: ")]
+    assert not any(term in "\n".join(hook_lines).lower() for term in TERMS)
+    return run.returncode, out
+
+
+def test_pre_push_new_branch(tmp_path: Path) -> None:
+    _, work = _hooked_clone(tmp_path)
+    _write(work, "a.txt", b"clean\n")
+    _commit(work, "Start")
+    assert _push(work, "origin", "main")[0] == 0
+    _git(work, "checkout", "-q", "-b", "feature")
+    _write(work, "b.txt", b"ok\nzorblat\n")
+    bad = _commit(work, "Add b")
+    code, out = _push(work, "origin", "feature")
+    assert code != 0 and f"internal name: commit {bad[:12]} diff:" in out
+    _write(work, "b.txt", b"ok\n")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "--amend", "-m", "Add b")
+    assert _push(work, "origin", "feature")[0] == 0
+    _write(work, "c.txt", b"ok\n")
+    _commit(work, "Add c")
+    assert _push(work, "origin", "feature", denylist=None)[0] != 0  # no list, no push
+
+
+def test_pre_push_already_public_history_does_not_refuse(tmp_path: Path) -> None:
+    # The remote's main holds a commit that added a name and one that removed it again: public
+    # history from before the guard. A branch created before them, brought up to date with main
+    # and pushed, sends that range again, which must not refuse the push.
+    remote, work = _hooked_clone(tmp_path)
+    _write(work, "a.txt", b"clean\n")
+    _commit(work, "Start")
+    assert _push(work, "origin", "main")[0] == 0
+    _git(work, "checkout", "-q", "-b", "old")
+    _write(work, "o.txt", b"old work\n")
+    _commit(work, "Old work")
+    assert _push(work, "origin", "old")[0] == 0
+    _git(work, "checkout", "-q", "main")
+    _write(work, "b.txt", b"the zorblat\n")
+    _commit(work, "Add b")
+    _write(work, "b.txt", b"the gateway\n")
+    _commit(work, "Generalise b")
+    assert _push(work, "--no-verify", "origin", "main")[0] == 0
+    _git(work, "checkout", "-q", "old")
+    _git(work, "merge", "-q", "--no-ff", "--no-edit", "main")
+    _write(work, "o.txt", b"old work, updated\n")
+    _commit(work, "Update old work")
+    assert _push(work, "origin", "old") == (0, "")
+    # The same to a URL, with no remote name: every remote-tracking ref counts as public.
+    assert _push(work, str(remote), "old:refs/heads/copy")[0] == 0
+    _write(work, "o.txt", b"old work\nquux frob\n")
+    bad = _commit(work, "Bad")
+    for target in ("origin", str(remote)):
+        code, out = _push(work, target, "old")
+        assert code != 0 and f"internal name: commit {bad[:12]} diff:" in out
+        assert out.count("internal name: commit ") == 1  # the public commits are not reported
+        assert "internal name: o.txt:2" in out  # and the work tree is scanned too
+
+
+def test_pre_push_excludes_the_old_value_of_the_ref(tmp_path: Path) -> None:
+    # Public history that no remote-tracking ref holds (one deleted, or never fetched) is still
+    # excluded when it is the old value of the ref being pushed.
+    _, work = _hooked_clone(tmp_path)
+    _write(work, "a.txt", b"the zorblat\n")
+    _commit(work, "Start")
+    _write(work, "a.txt", b"the gateway\n")
+    _commit(work, "Generalise a")
+    assert _push(work, "--no-verify", "origin", "main")[0] == 0
+    _git(work, "update-ref", "-d", "refs/remotes/origin/main")
+    _write(work, "b.txt", b"ok\n")
+    _commit(work, "Add b")
+    assert _push(work, "origin", "main") == (0, "")
+
+
+def test_pre_push_deleting_a_ref_is_not_checked(tmp_path: Path) -> None:
+    _, work = _hooked_clone(tmp_path)
+    _commit(work, "Start")
+    assert _push(work, "--no-verify", "origin", "main", "main:refs/heads/zorblat-x")[0] == 0
+    assert _push(work, "origin", "--delete", "zorblat-x") == (0, "")
+
+
+def test_pre_push_annotated_tags(tmp_path: Path) -> None:
+    _, work = _hooked_clone(tmp_path)
+    _commit(work, "Start")
+    assert _push(work, "origin", "main")[0] == 0
+    _git(work, "tag", "-a", "v1", "-m", "Release\n\nFor the zorblat cluster.")
+    code, out = _push(work, "origin", "v1")
+    assert code != 0 and "internal name: tag:" in out
+    _git(work, "tag", "-a", "v2", "-m", "Release", GIT_COMMITTER_NAME="Quux Frob")
+    code, out = _push(work, "origin", "v2")
+    assert code != 0 and "internal name: tag:" in out
+    _git(work, "tag", "-a", "v3", "-m", "Release")
+    _git(work, "tag", "-a", "v3-signed-off", "-m", "Release of v3", "v3")  # a tag of a tag
+    assert _push(work, "origin", "v3", "v3-signed-off") == (0, "")
+    # The tag a pushed tag points at is published with it, though no pushed ref names it.
+    _git(work, "tag", "-a", "v4", "-m", "Zorblat release")
+    _git(work, "tag", "-a", "v4-again", "-m", "Release of v4", "v4")
+    code, out = _push(work, "origin", "v4-again")
+    assert code != 0 and out.count("internal name: tag:") == 1
+
+
+def test_pre_push_ref_names(tmp_path: Path) -> None:
+    _, work = _hooked_clone(tmp_path)
+    _commit(work, "Start")
+    assert _push(work, "origin", "main")[0] == 0
+    for ref in ("refs/heads/fix-zorblat", "refs/heads/QuuxFrob", "refs/tags/zorblat-1"):
+        code, out = _push(work, "origin", f"main:{ref}")
+        assert code != 0 and "internal name: ref:1" in out
+    assert _push(work, "origin", "main:refs/heads/fix-gateway") == (0, "")

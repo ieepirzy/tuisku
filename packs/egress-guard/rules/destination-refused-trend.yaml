@@ -3,9 +3,10 @@ rev: 2
 name: egress-guard.destination_refused_trend
 title: Destination refusals beyond admission are rising
 description: >-
-  The egress gateway logs destination refusals only at admission; the other stages (side
-  requests, hops, discovery, render) are visible only in its destination-refused counter (param
-  destination_refused_metric). Sums the counter's deltas per stage over an hour.
+  Destination refusal log lines are recorded with stage admission; refusals at the other
+  stages (side requests, hops, discovery, render) are counted in the gateway's
+  destination-refused counter (param destination_refused_metric). Sums the counter's deltas per
+  stage over an hour.
 severity: medium
 select:
   layer: observation

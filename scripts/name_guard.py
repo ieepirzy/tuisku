@@ -26,14 +26,15 @@ found in ``term-x``, ``Term_Thing`` and ``term.example`` as well as in ``termthi
 
 Normalisation, applied to the list's entries and to the text alike: NFKC; format characters
 removed (zero-width spaces and joiners, U+2060, U+FEFF, the soft hyphen and the rest of Unicode
-category Cf); casefolding; and common Cyrillic, Greek, Armenian and Latin look-alikes mapped to
-Latin letters. Every line is also checked in a second, accent-folded form (NFKD with the
-nonspacing marks, category Mn, removed), so an accented or decomposed spelling of an entry is
-found. Each line is checked as written and as decoded: percent-decoded (twice, for double
-encoding), HTML-unescaped and with JSON ``\\uXXXX`` escapes decoded, in combination. To bound
-the work on crafted input, decoded forms are made only for lines of at most ``MAX_DECODED_LINE``
-characters, and at most ``MAX_VARIANTS`` forms per line; every line is still checked in full as
-written.
+category Cf), and with them the characters that render as blank space (the Hangul fillers and
+the blank braille pattern); casefolding; and common Cyrillic, Greek, Armenian and Latin
+look-alikes mapped to Latin letters. Every line is also checked in a second, accent-folded form
+(NFKD with the nonspacing marks, category Mn, removed), so an accented or decomposed spelling of
+an entry is found. Each line is checked as written and as decoded: percent-decoded (twice, for
+double encoding), HTML-unescaped and with JSON ``\\uXXXX`` escapes decoded, in combination. To
+bound the work on crafted input, decoded forms are made only for lines of at most
+``MAX_DECODED_LINE`` characters, and at most ``MAX_VARIANTS`` forms per line; every line is
+still checked in full as written.
 
 Lines are also checked in pairs, for a name split across a line break: each line joined to the
 next with a line break between them (a compound spans it, as it spans any separator) and, when
@@ -172,8 +173,15 @@ _HOMOGLYPHS = str.maketrans(
         "\u0131": "i",  # Latin dotless ı
         "\u0251": "a",  # Latin ɑ
         "\u0261": "g",  # Latin ɡ
+        "\u028b": "v",  # Latin ʋ
+        "\u04c0": "l",  # Cyrillic Ӏ (palochka; casefolds to ӏ, listed for clarity)
+        "\u04cf": "l",  # Cyrillic ӏ
+        "\u0475": "v",  # Cyrillic ѵ
     }
 )
+# Letters and symbols that render as blank space, dropped like format characters: the Hangul
+# fillers and the blank braille pattern (NFKC maps U+3164 and U+FFA0 to U+1160).
+_BLANK_FILLERS = "\u115f\u1160\u3164\uffa0\u2800"
 
 
 class DenylistError(Exception):
@@ -209,12 +217,14 @@ class Hit:
 
 @functools.cache
 def _category_patterns() -> dict[str, re.Pattern[str]]:
-    """Character classes of the categories that are dropped (Cf, Mn), built once per process."""
+    """Character classes of what is dropped, built once per process: format characters (Cf)
+    with the blank fillers, and nonspacing marks (Mn)."""
     codes: dict[str, list[int]] = {"Cf": [], "Mn": []}
     for code in range(0x110000):
         found = codes.get(unicodedata.category(chr(code)))
         if found is not None:
             found.append(code)
+    codes["Cf"] = sorted({*codes["Cf"], *map(ord, _BLANK_FILLERS)})
     patterns: dict[str, re.Pattern[str]] = {}
     for category, members in codes.items():
         ranges: list[str] = []

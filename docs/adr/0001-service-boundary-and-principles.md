@@ -9,7 +9,7 @@ Edited 2026-11-23 and 2026-11-24: wording generalised.
 Issue #1 defines Tuisku as an open-source intrusion detection and agentic blue-team framework.
 Deterministic systems detect and preserve evidence; agents investigate that evidence. Tuisku is
 deliberately not "an LLM watching logs", not a SIEM clone, not a replacement for mature sensors,
-and not part of the estate's offensive-security (red-team) service.
+and not an offensive-security tool.
 
 ## Decision
 

@@ -2,6 +2,10 @@ name: CI
 
 on:
   pull_request:
+    # edited: changing a pull request's base branch fires only this event, and changes the
+    # range name-guard-tree scans. Every job runs in full on it: a required check whose steps
+    # were skipped would report success for a head that failed (ADR 0013).
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 
@@ -9,7 +13,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # A pull request's runs share a group, and a newer one cancels the older. Each push to main
+  # has a group of its own, so no pushed range is cancelled before it is scanned.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
