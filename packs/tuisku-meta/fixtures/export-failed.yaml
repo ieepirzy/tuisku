@@ -3,16 +3,16 @@
 rule: tuisku-meta.export_failed
 cases:
   - name: records the sink rejects for good raise a meta-detection that pages
-    source: {adapter: harava}
+    source: {adapter: egress-guard}
     export_rejects: 1
     records:
       - at: "2026-11-01T09:14:04Z"
-        raw: "2026-11-01 09:14:03,512 WARNING harava.api outbound data refused: caller=agents urls=1 findings=email/query/percent"
-    fires: [harava.agent_outbound_refused, tuisku-meta.export_failed]
+        raw: "2026-11-01 09:14:03,512 WARNING egress_guard.api outbound data refused: caller=example-agent urls=1 findings=email/query/percent"
+    fires: [egress-guard.agent_outbound_refused, tuisku-meta.export_failed]
   - name: records the sink accepts raise nothing
-    source: {adapter: harava}
+    source: {adapter: egress-guard}
     export_rejects: 0
     records:
       - at: "2026-11-01T09:14:04Z"
-        raw: "2026-11-01 09:14:03,512 WARNING harava.api outbound data refused: caller=agents urls=1 findings=email/query/percent"
-    fires: [harava.agent_outbound_refused]
+        raw: "2026-11-01 09:14:03,512 WARNING egress_guard.api outbound data refused: caller=example-agent urls=1 findings=email/query/percent"
+    fires: [egress-guard.agent_outbound_refused]

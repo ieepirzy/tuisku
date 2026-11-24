@@ -1,6 +1,6 @@
 [
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [],
     "observations": [
       {
@@ -11,15 +11,15 @@
             "encoding": "percent",
             "location": "query"
           },
-          "metric": "harava.outbound.refused",
+          "metric": "egress_guard.outbound.refused",
           "resource": {
-            "harava.role": "api",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-1",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "start_time": "2026-11-01T09:00:00+00:00",
           "temporality": "cumulative",
@@ -48,15 +48,15 @@
             "encoding": "plain",
             "location": "host"
           },
-          "metric": "harava.outbound.refused",
+          "metric": "egress_guard.outbound.refused",
           "resource": {
-            "harava.role": "api",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-1",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "start_time": "2026-11-01T09:00:00+00:00",
           "temporality": "cumulative",
@@ -84,15 +84,15 @@
             "class": "capture_sink",
             "stage": "admission"
           },
-          "metric": "harava.destination.refused",
+          "metric": "egress_guard.destination.refused",
           "resource": {
-            "harava.role": "api",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-1",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "start_time": "2026-11-01T09:00:00+00:00",
           "temporality": "cumulative",
@@ -117,19 +117,18 @@
         "attributes": {
           "is_monotonic": true,
           "labels": {
-            "method": "POST",
-            "route": "/v1/fetches",
-            "status_class": "4xx"
+            "operation": "example_a",
+            "outcome": "error"
           },
-          "metric": "harava.api.requests",
+          "metric": "egress_guard.example.requests",
           "resource": {
-            "harava.role": "api",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-1",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "start_time": "2026-11-01T09:00:00+00:00",
           "temporality": "cumulative",
@@ -152,15 +151,15 @@
       },
       {
         "attributes": {
-          "metric": "harava.fetch.duration",
+          "metric": "egress_guard.example.latency",
           "resource": {
-            "harava.role": "api",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-1",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "type": "histogram",
           "unit": "s"
@@ -172,7 +171,7 @@
         "flags": [
           "unsupported_metric_type"
         ],
-        "kind": "harava.unknown",
+        "kind": "egress-guard.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
           "metric": {
@@ -200,7 +199,7 @@
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [],
     "observations": [
       {
@@ -209,15 +208,15 @@
           "labels": {
             "verdict": "none"
           },
-          "metric": "harava.content.signals",
+          "metric": "egress_guard.content.signals",
           "resource": {
-            "harava.role": "fetcher",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-2",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "start_time": "2026-11-01T09:00:00+00:00",
           "temporality": "cumulative",
@@ -244,15 +243,15 @@
           "labels": {
             "verdict": "likely"
           },
-          "metric": "harava.content.signals",
+          "metric": "egress_guard.content.signals",
           "resource": {
-            "harava.role": "fetcher",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-2",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "start_time": "2026-11-01T09:00:00+00:00",
           "temporality": "cumulative",
@@ -279,15 +278,15 @@
           "labels": {
             "verdict": "certain"
           },
-          "metric": "harava.content.signals",
+          "metric": "egress_guard.content.signals",
           "resource": {
-            "harava.role": "fetcher",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-2",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "start_time": "2026-11-01T09:00:00+00:00",
           "temporality": "cumulative",
@@ -316,15 +315,15 @@
           "labels": {
             "verdict": "none"
           },
-          "metric": "harava.content.signals",
+          "metric": "egress_guard.content.signals",
           "resource": {
-            "harava.role": "fetcher",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-2",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "type": "sum",
           "unit": "1"
@@ -336,7 +335,7 @@
         "flags": [
           "invalid_value"
         ],
-        "kind": "harava.unknown",
+        "kind": "egress-guard.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
           "datapoint": {
@@ -355,15 +354,15 @@
           "labels": {
             "verdict": "likely"
           },
-          "metric": "harava.content.signals",
+          "metric": "egress_guard.content.signals",
           "resource": {
-            "harava.role": "fetcher",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-2",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "type": "sum",
           "unit": "1"
@@ -375,7 +374,7 @@
         "flags": [
           "no_recorded_value"
         ],
-        "kind": "harava.unknown",
+        "kind": "egress-guard.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
           "datapoint": {
@@ -395,15 +394,15 @@
             "class": "tunnel",
             "stage": "hop"
           },
-          "metric": "harava.destination.refused",
+          "metric": "egress_guard.destination.refused",
           "resource": {
-            "harava.role": "fetcher",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-2",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "start_time": "2026-11-01T09:00:00+00:00",
           "temporality": "cumulative",
@@ -431,15 +430,15 @@
             "class": "overlay",
             "stage": "discovery"
           },
-          "metric": "harava.destination.refused",
+          "metric": "egress_guard.destination.refused",
           "resource": {
-            "harava.role": "fetcher",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-2",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "start_time": "2026-11-01T09:00:00+00:00",
           "temporality": "cumulative",
@@ -463,7 +462,7 @@
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [],
     "observations": [
       {
@@ -473,15 +472,15 @@
             "class": "ip_literal",
             "stage": "render"
           },
-          "metric": "harava.destination.refused",
+          "metric": "egress_guard.destination.refused",
           "resource": {
-            "harava.role": "renderer",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-3",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "start_time": "2026-11-01T09:00:00+00:00",
           "temporality": "cumulative",
@@ -504,15 +503,15 @@
       },
       {
         "attributes": {
-          "metric": "harava.render.backlog",
+          "metric": "egress_guard.example.queue_depth",
           "resource": {
-            "harava.role": "renderer",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-3",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "type": "gauge",
           "unit": "1"
@@ -524,7 +523,7 @@
         "flags": [
           "unsupported_metric_type"
         ],
-        "kind": "harava.unknown",
+        "kind": "egress-guard.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
           "metric": {
@@ -534,9 +533,9 @@
                   "asInt": "7",
                   "attributes": [
                     {
-                      "key": "state",
+                      "key": "queue",
                       "value": {
-                        "stringValue": "pending"
+                        "stringValue": "q1"
                       }
                     }
                   ],
@@ -550,15 +549,15 @@
       },
       {
         "attributes": {
-          "metric": "harava.fetch.attempts",
+          "metric": "egress_guard.example.deltas",
           "resource": {
-            "harava.role": "renderer",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-3",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "type": "sum",
           "unit": "1"
@@ -570,7 +569,7 @@
         "flags": [
           "non_cumulative_sum"
         ],
-        "kind": "harava.unknown",
+        "kind": "egress-guard.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
           "metric": {
@@ -582,9 +581,9 @@
                   "asInt": "9",
                   "attributes": [
                     {
-                      "key": "lane",
+                      "key": "kind",
                       "value": {
-                        "stringValue": "render"
+                        "stringValue": "beta"
                       }
                     },
                     {
@@ -607,18 +606,18 @@
         "attributes": {
           "is_monotonic": true,
           "labels": {
-            "action": "up",
+            "direction": "up",
             "outcome": "ok"
           },
-          "metric": "harava.render.scale_actions",
+          "metric": "egress_guard.example.adjustments",
           "resource": {
-            "harava.role": "renderer",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-3",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "start_time": "2026-11-01T09:00:00+00:00",
           "temporality": "cumulative",
@@ -642,7 +641,7 @@
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [],
     "observations": [
       {
@@ -653,15 +652,15 @@
             "encoding": "percent",
             "location": "query"
           },
-          "metric": "harava.outbound.refused",
+          "metric": "egress_guard.outbound.refused",
           "resource": {
-            "harava.role": "api",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-1",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "type": "sum",
           "unit": "1"
@@ -673,7 +672,7 @@
         "flags": [
           "invalid_value"
         ],
-        "kind": "harava.unknown",
+        "kind": "egress-guard.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
           "datapoint": {
@@ -694,15 +693,15 @@
             "encoding": "plain",
             "location": "host"
           },
-          "metric": "harava.outbound.refused",
+          "metric": "egress_guard.outbound.refused",
           "resource": {
-            "harava.role": "api",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-1",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "start_time": "2026-11-01T09:00:00+00:00",
           "temporality": "cumulative",
@@ -730,15 +729,15 @@
             "class": "capture_sink",
             "stage": "admission"
           },
-          "metric": "harava.destination.refused",
+          "metric": "egress_guard.destination.refused",
           "resource": {
-            "harava.role": "api",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-1",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "start_time": "2026-11-01T09:00:00+00:00",
           "temporality": "cumulative",
@@ -763,19 +762,18 @@
         "attributes": {
           "is_monotonic": true,
           "labels": {
-            "method": "POST",
-            "route": "/v1/fetches",
-            "status_class": "4xx"
+            "operation": "example_a",
+            "outcome": "error"
           },
-          "metric": "harava.api.requests",
+          "metric": "egress_guard.example.requests",
           "resource": {
-            "harava.role": "api",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-1",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "start_time": "2026-11-01T09:00:00+00:00",
           "temporality": "cumulative",
@@ -798,15 +796,15 @@
       },
       {
         "attributes": {
-          "metric": "harava.fetch.duration",
+          "metric": "egress_guard.example.latency",
           "resource": {
-            "harava.role": "api",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-1",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "type": "histogram",
           "unit": "s"
@@ -818,7 +816,7 @@
         "flags": [
           "unsupported_metric_type"
         ],
-        "kind": "harava.unknown",
+        "kind": "egress-guard.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
           "metric": {
@@ -846,11 +844,11 @@
     ]
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "error": "resourceMetrics is not a list"
   },
   {
-    "adapter": "harava@1.1.0",
+    "adapter": "egress-guard@2.0.0",
     "detections": [],
     "observations": [
       {
@@ -860,15 +858,15 @@
             "class": "ip_literal",
             "stage": "render"
           },
-          "metric": "harava.destination.refused",
+          "metric": "egress_guard.destination.refused",
           "resource": {
-            "harava.role": "renderer",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-3",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "type": "sum",
           "unit": "1"
@@ -880,7 +878,7 @@
         "flags": [
           "invalid_time"
         ],
-        "kind": "harava.unknown",
+        "kind": "egress-guard.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
           "datapoint": {
@@ -895,15 +893,15 @@
       },
       {
         "attributes": {
-          "metric": "harava.render.backlog",
+          "metric": "egress_guard.example.queue_depth",
           "resource": {
-            "harava.role": "renderer",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-3",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "type": "gauge",
           "unit": "1"
@@ -915,7 +913,7 @@
         "flags": [
           "unsupported_metric_type"
         ],
-        "kind": "harava.unknown",
+        "kind": "egress-guard.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
           "metric": {
@@ -925,9 +923,9 @@
                   "asInt": "7",
                   "attributes": [
                     {
-                      "key": "state",
+                      "key": "queue",
                       "value": {
-                        "stringValue": "pending"
+                        "stringValue": "q1"
                       }
                     }
                   ],
@@ -941,15 +939,15 @@
       },
       {
         "attributes": {
-          "metric": "harava.fetch.attempts",
+          "metric": "egress_guard.example.deltas",
           "resource": {
-            "harava.role": "renderer",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-3",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "type": "sum",
           "unit": "1"
@@ -961,7 +959,7 @@
         "flags": [
           "non_cumulative_sum"
         ],
-        "kind": "harava.unknown",
+        "kind": "egress-guard.unknown",
         "ocsf_class_uid": null,
         "unmapped": {
           "metric": {
@@ -973,9 +971,9 @@
                   "asInt": "9",
                   "attributes": [
                     {
-                      "key": "lane",
+                      "key": "kind",
                       "value": {
-                        "stringValue": "render"
+                        "stringValue": "beta"
                       }
                     },
                     {
@@ -1002,15 +1000,15 @@
             "encoding": "percent",
             "location": "query"
           },
-          "metric": "harava.outbound.refused",
+          "metric": "egress_guard.outbound.refused",
           "resource": {
-            "harava.role": "renderer",
-            "service.name": "harava",
-            "service.namespace": "muutto365-fleet",
-            "service.version": "0.9.2"
+            "service.instance.id": "instance-3",
+            "service.name": "egress-guard",
+            "service.namespace": "example-fleet",
+            "service.version": "1.0.0"
           },
           "scope": {
-            "name": "harava"
+            "name": "egress-guard"
           },
           "start_time": "2026-11-01T09:00:00+00:00",
           "temporality": "cumulative",

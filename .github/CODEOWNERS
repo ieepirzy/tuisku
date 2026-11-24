@@ -1,0 +1,7 @@
+# The name guard, its tests and the workflows that run it with the private list (ADR 0013).
+# Enforced when branch protection on main requires a review from code owners.
+/scripts/name_guard.py @ieepirzy
+/scripts/pre-push @ieepirzy
+/tests/test_no_internal_names.py @ieepirzy
+/.github/workflows/ @ieepirzy
+/.github/CODEOWNERS @ieepirzy

@@ -1,0 +1,27 @@
+#!/bin/sh
+# Optional git pre-push hook: the name guard (ADR 0013) over the work tree and over the commits
+# being pushed, before they leave this machine. A push to any branch of a public repository is
+# public at once, and a guard failure in CI comes too late and points at a line in a public log.
+#
+# Install:  ln -s ../../scripts/pre-push .git/hooks/pre-push
+# It needs the private list in TUISKU_DENYLIST_FILE (a path) or TUISKU_DENYLIST (the text);
+# without one, the guard exits 2 and the push is refused.
+set -eu
+
+remote="$1"
+status=0
+python3 -I scripts/name_guard.py tree || status=1
+while read -r local_ref local_sha remote_ref remote_sha; do
+    case "$local_sha" in *[!0]*) ;; *) continue ;; esac # deleting a ref pushes no commits
+    case "$remote_sha" in
+    *[!0]*) # an existing ref: what the push adds to it
+        python3 -I scripts/name_guard.py commits "$remote_sha..$local_sha" || status=1
+        ;;
+    *) # a new ref: what no remote-tracking ref of this remote has yet
+        # shellcheck disable=SC2046 # one argument per ref, and object names have no spaces
+        python3 -I scripts/name_guard.py commits "$local_sha" \
+            $(git for-each-ref --format='^%(objectname)' "refs/remotes/$remote") || status=1
+        ;;
+    esac
+done
+exit "$status"

@@ -34,7 +34,7 @@ from tuisku.worker import run as worker_run
 from tuisku.worker.engine import Worker
 from tuisku.worker.export import SCHEMA, ExportConfig, Exporter, Pseudonyms, Round, build_record
 
-FIXTURES = REPO_ROOT / "tests" / "fixtures" / "harava"
+FIXTURES = REPO_ROOT / "tests" / "fixtures" / "egress-guard"
 T0 = datetime(2026, 11, 1, 9, 30, tzinfo=UTC)
 REASON = "Checked with A. Person: the agent run was expected"  # free text a person typed
 KEY = "synthetic-test-pseudonym-key-7f3a9c1e5b"  # a test key, never a deployment's
@@ -151,13 +151,13 @@ def export_failed(url: str) -> list[tuple[str, dict[str, Any]]]:
     )
 
 
-def harava_finding(url: str, clock: Clock) -> None:
-    """Ingest the Harava fixture through the API, then evaluate: the agent outbound rule opens a
-    finding and an incident."""
-    token = new_source(url, "harava-edge", adapter="harava")
+def egress_guard_finding(url: str, clock: Clock) -> None:
+    """Ingest the egress gateway fixture through the API, then evaluate: the agent outbound rule
+    opens a finding and an incident."""
+    token = new_source(url, "egress-edge", adapter="egress-guard")
     lines = (FIXTURES / "plain.log").read_text().splitlines()
     with client(url, clock=clock) as c:
-        assert post_records(c, "harava-edge", token, ndjson(*lines)).status_code == 200
+        assert post_records(c, "egress-edge", token, ndjson(*lines)).status_code == 200
     run_worker(url, builtin_rules(), clock)
 
 
@@ -165,7 +165,7 @@ def agent_finding_uid(url: str) -> str:
     [(uid,)] = query(
         url,
         "SELECT uid::text FROM findings WHERE rule_ref ->> 'name' = "
-        "'harava.agent_outbound_refused'",
+        "'egress-guard.agent_outbound_refused'",
     )
     return uid
 
@@ -181,7 +181,7 @@ def test_findings_and_triage_are_exported_and_survive_a_failing_sink(
     clock = Clock(T0)
     ticks = Ticks()
     exp = exporter(sink.url, ticks)
-    harava_finding(url, clock)
+    egress_guard_finding(url, clock)
     assert export_round(url, exp).delivered > 0
     assert queued(url) == 0
 
@@ -223,11 +223,11 @@ def test_findings_and_triage_are_exported_and_survive_a_failing_sink(
     assert opened["event"]["reason_hmac"] is None
     finding = opened["finding"]
     assert finding["rule_id"] == "f542db3a-6926-4df9-9183-449491345d3c"
-    assert finding["pack_id"] == "harava" and len(finding["pack_sha256"]) == 64
+    assert finding["pack_id"] == "egress-guard" and len(finding["pack_sha256"]) == 64
     assert finding["status"] == "open" and finding["severity_id"] == 4
     # The caller is pseudonymised by default (ADR 0008): never raw in the sink.
-    assert finding["entity_keys"] == [f"caller:hmac:{mac('harava/agents')}"]
-    assert "caller:harava/agents" not in json.dumps(sink.posts)
+    assert finding["entity_keys"] == [f"caller:hmac:{mac('egress-guard/example-agent')}"]
+    assert "caller:egress-guard/example-agent" not in json.dumps(sink.posts)
     assert finding["first_seen_at"] == "2026-11-01T09:14:03.512000Z"
     # The state is what the event's transaction committed: linked to its incident already.
     [(incident_uid,)] = query(
@@ -308,11 +308,12 @@ def test_a_lower_id_that_commits_later_is_not_lost(fresh_database_url: str, sink
     commits after a later one has been exported. The queue does not."""
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     exp = exporter(sink.url)
     export_round(url, exp)
     [(finding_id,)] = query(
-        url, "SELECT id FROM findings WHERE rule_ref ->> 'name' = 'harava.agent_outbound_refused'"
+        url,
+        "SELECT id FROM findings WHERE rule_ref ->> 'name' = 'egress-guard.agent_outbound_refused'",
     )
     insert = (
         "INSERT INTO finding_events (finding_id, actor, kind, new_value) "
@@ -340,7 +341,7 @@ def test_a_timeout_or_refused_connection_leaves_rows_queued(
 ) -> None:
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     ticks = Ticks()
     down = exporter("http://127.0.0.1:1/v1/logs", ticks)  # nothing listens on port 1
     assert export_round(url, down).delivered == 0
@@ -363,7 +364,7 @@ def test_a_slow_sink_holds_no_transaction_and_never_delays_evaluation(
     url = fresh_database_url
     enable_export(url)
     clock = Clock(T0)
-    harava_finding(url, clock)
+    egress_guard_finding(url, clock)
     sink.delay = 1.5
     exp = exporter(sink.url, timeout_seconds=5)
     worker = Worker(rule_set=builtin_rules(), clock=clock, notifier=RecordingNotifier())
@@ -393,7 +394,7 @@ def test_a_slow_sink_holds_no_transaction_and_never_delays_evaluation(
 def test_exporters_take_turns_by_a_lease(fresh_database_url: str, sink: Sink) -> None:
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     n = queued(url)
     with psycopg.connect(url) as conn:  # another exporter holds a live lease
         conn.execute(
@@ -414,7 +415,7 @@ def test_exporters_take_turns_by_a_lease(fresh_database_url: str, sink: Sink) ->
 def test_a_round_sends_many_batches(fresh_database_url: str, sink: Sink) -> None:
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     n = queued(url)
     assert n > 4
     done = export_round(url, exporter(sink.url, batch_size=2))
@@ -425,7 +426,7 @@ def test_a_backlog_of_exports_pages(fresh_database_url: str) -> None:
     url = fresh_database_url
     enable_export(url)
     clock = Clock(T0)
-    harava_finding(url, clock)
+    egress_guard_finding(url, clock)
     exp = exporter("http://127.0.0.1:1/v1/logs")
     export_round(url, exp, timedelta(minutes=5))
     assert queued(url) > 0
@@ -451,7 +452,7 @@ def test_a_backlog_of_exports_pages(fresh_database_url: str) -> None:
 def test_export_off_enqueues_nothing(fresh_database_url: str) -> None:
     url = fresh_database_url  # migrated without an export URL: the default
     assert query(url, "SELECT enabled FROM export_state") == [(False,)]
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     assert query(url, "SELECT count(*) FROM finding_events") != [(0,)]
     assert queued(url) == 0
 
@@ -459,7 +460,7 @@ def test_export_off_enqueues_nothing(fresh_database_url: str) -> None:
 def test_export_off_discards_what_was_left_and_never_pages(fresh_database_url: str) -> None:
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     assert queued(url) > 0
     enable_export(url, False)  # export turned off by the next `tuisku migrate`
     off = exporter(None)
@@ -476,7 +477,7 @@ def test_a_worker_without_export_never_discards_what_is_meant_to_be_exported(
     misconfiguration). It leaves the rows, and once they are old the backlog pages."""
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     n = queued(url)
     off = exporter(None)
     export_round(url, off, timedelta(minutes=5))
@@ -496,7 +497,7 @@ def test_a_worker_that_exports_while_the_database_does_not_enqueue_pages(
 ) -> None:
     url = fresh_database_url  # export_state off: `tuisku migrate` ran without the URL
     clock = Clock(T0)
-    harava_finding(url, clock)
+    egress_guard_finding(url, clock)
     export_round(url, exporter(sink.url))
     [(subject, _)] = export_failed(url)
     assert subject == "not_enqueued"
@@ -532,7 +533,7 @@ def test_a_partial_success_pages(fresh_database_url: str, sink: Sink) -> None:
     url = fresh_database_url
     enable_export(url)
     clock = Clock(T0)
-    harava_finding(url, clock)
+    egress_guard_finding(url, clock)
     n = queued(url)
     sink.answer = lambda records: (200, b'{"partialSuccess": {"rejectedLogRecords": 2}}')
     done = export_round(url, exporter(sink.url))
@@ -554,7 +555,7 @@ def test_one_bad_record_among_good_ones_is_isolated(
     stub replaces it, it pages, and every other record is delivered."""
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     n = queued(url)
     which = "ORDER BY id LIMIT 1" if position == "head" else "ORDER BY id OFFSET 5 LIMIT 1"
     [(bad_uid,)] = query(url, f"SELECT event ->> 'uid' FROM export_queue {which}")  # type: ignore[arg-type]
@@ -584,13 +585,13 @@ def test_a_sink_that_refuses_everything_keeps_the_queue_and_backs_off(
     dropped or stubbed, and delivery backs off, whether or not the sink worked before."""
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     ticks = Ticks()
     exp = exporter(sink.url, ticks, batch_size=8)
     if proven:  # it worked a moment ago
         export_round(url, exp)
         assert queued(url) == 0
-        harava_finding_again(url)
+        egress_guard_finding_again(url)
     n = queued(url)
     before = len(sink.posts)
     sink.answer = lambda records: (400, b"{}")
@@ -609,7 +610,7 @@ def test_a_sink_that_takes_only_stubs_cannot_turn_the_queue_into_stubs(
 ) -> None:
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     ticks = Ticks()
     exp = exporter(sink.url, ticks, batch_size=8)
     export_round(url, exp)  # the sink worked
@@ -647,7 +648,7 @@ def test_two_bad_records_at_the_head_are_isolated(fresh_database_url: str, sink:
     further record is accepted."""
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     n = queued(url)
     bad = {r[0] for r in query(url, "SELECT event ->> 'uid' FROM export_queue ORDER BY id LIMIT 2")}
 
@@ -670,7 +671,7 @@ def test_a_flaky_sink_does_not_stub_sound_records(fresh_database_url: str, sink:
     is accepted. Every record still arrives whole, none as a stub."""
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     n = queued(url)
     count = [0]
 
@@ -695,7 +696,7 @@ def test_a_record_refused_alone_twice_then_accepted_arrives_whole(
     It is resent after each proof, so it arrives whole, never as a stub."""
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     [(flaky,)] = query(url, "SELECT event ->> 'uid' FROM export_queue ORDER BY id LIMIT 1")
     alone = [0]
 
@@ -727,7 +728,7 @@ def test_a_run_of_big_records_at_the_head_is_isolated(fresh_database_url: str, s
     and the big ones are isolated one by one."""
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     with psycopg.connect(url) as conn:  # the five oldest rows' snapshots are big
         big = {
             r[0]
@@ -761,7 +762,7 @@ def test_a_refused_stub_of_an_unencodable_record_is_kept(
     encoded: that is the sink's to fix. The row is kept, nothing is dropped, and it backs off."""
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     n = queued(url)
     with psycopg.connect(url) as conn:
         [(bad_id,)] = conn.execute(
@@ -783,7 +784,7 @@ def test_a_refused_stub_of_an_unencodable_record_is_kept(
     assert [s for s, _ in export_failed(url)] == []
 
 
-def harava_finding_again(url: str) -> None:
+def egress_guard_finding_again(url: str) -> None:
     """More events: the agent finding resolved by triage."""
     triager = operator_token(url, Role.TRIAGE)
     with client(url, clock=Clock(T0)) as c:
@@ -801,11 +802,11 @@ def test_the_only_queued_record_refused_on_its_own_is_kept(
     """Nothing else can show whether the record or the sink is at fault: it waits."""
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     exp = exporter(sink.url)
     export_round(url, exp)
     exp2 = exporter(sink.url)  # a fresh exporter: nothing proven yet
-    harava_finding_again(url)
+    egress_guard_finding_again(url)
     assert queued(url) == 1
     sink.answer = lambda records: (400, b"{}")
     export_round(url, exp2)
@@ -833,7 +834,7 @@ def test_a_row_that_cannot_be_encoded_never_blocks_the_rest(
 ) -> None:
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     n = queued(url)
     with psycopg.connect(url) as conn:  # the oldest row's snapshot is malformed
         [(bad_id, bad_uid)] = conn.execute(
@@ -856,14 +857,14 @@ def test_out_of_range_times_and_odd_time_zones_still_encode(
     triage now refuses it) once made every export attempt fail. Times are text from SQL now."""
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     exp = exporter(sink.url)
     export_round(url, exp)
     with psycopg.connect(url) as conn:
         conn.execute("SET TIME ZONE 'Asia/Kathmandu'")
         [(fid, count)] = conn.execute(
             "SELECT id, count FROM findings WHERE rule_ref ->> 'name' = "
-            "'harava.agent_outbound_refused'"
+            "'egress-guard.agent_outbound_refused'"
         ).fetchall()
         conn.execute(
             "UPDATE findings SET status = 'suppressed', suppressed_until = '-infinity', "
@@ -909,7 +910,7 @@ def test_a_bad_request_never_retries_the_same_batch_forever(
 ) -> None:
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     n = queued(url)
     sink.statuses[:] = [413]  # the first, full batch is too large; halves fit
     done = export_round(url, exporter(sink.url))
@@ -998,7 +999,7 @@ def test_headers_are_sent_and_environment_proxies_ignored(
         monkeypatch.delenv(name, raising=False)
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     exp = exporter(sink.url, headers={"X-Tuisku-Test": "synthetic"})
     assert export_round(url, exp).delivered > 0
     assert sink.posts[0]["_headers"]["X-Tuisku-Test"] == "synthetic"
@@ -1009,7 +1010,7 @@ def test_headers_are_sent_and_environment_proxies_ignored(
 # Entity keys as the real adapters build them (tuisku.adapters.entities), synthetic values.
 ADAPTER_KEYS = [
     "ip:192.0.2.1",
-    "caller:harava/agents",
+    "caller:egress-guard/example-agent",
     "identity:idp.example/subject-1",
     "host:node-a",
     "process:node-a/42/1793000000000000000",
@@ -1050,7 +1051,7 @@ def test_ip_caller_and_identity_keys_are_hmac_pseudonyms() -> None:
     record = build_record("incident", _event(), STATE, P, "r")
     assert record["incident"]["entity_keys"] == [
         f"ip:hmac:{mac('192.0.2.1')}",
-        f"caller:hmac:{mac('harava/agents')}",
+        f"caller:hmac:{mac('egress-guard/example-agent')}",
         f"identity:hmac:{mac('idp.example/subject-1')}",
         "host:node-a",
         "process:node-a/42/1793000000000000000",
@@ -1060,7 +1061,11 @@ def test_ip_caller_and_identity_keys_are_hmac_pseudonyms() -> None:
         "nokind",
     ]
     text = json.dumps(record)
-    assert "192.0.2.1" not in text and "harava/agents" not in text and "subject-1" not in text
+    assert (
+        "192.0.2.1" not in text
+        and "egress-guard/example-agent" not in text
+        and "subject-1" not in text
+    )
     # Keyed: an unsalted hash of the address (enumerable) appears nowhere.
     assert hashlib.sha256(b"192.0.2.1").hexdigest() not in text
     other = Pseudonyms(b"another-synthetic-key-for-this-test!!", P.kinds)
@@ -1116,11 +1121,11 @@ def _app_db_finding(app_db: AppDatabase, tmp_path: Path) -> str:
     clock = Clock(T0)
     caller = f"c{uuid.uuid4().hex[:10]}"
     params = tmp_path / "params.yaml"
-    params.write_text(f"harava: {{restricted_callers: [{caller}]}}\n")
+    params.write_text(f"egress-guard: {{restricted_callers: [{caller}]}}\n")
     source = f"h{uuid.uuid4().hex[:10]}"
-    token = new_source(app_db.app_url, source, adapter="harava")
+    token = new_source(app_db.app_url, source, adapter="egress-guard")
     line = (
-        f"2026-11-01 09:14:03,512 WARNING harava.api outbound data refused: caller={caller} "
+        f"2026-11-01 09:14:03,512 WARNING egress_guard.api outbound data refused: caller={caller} "
         "urls=1 findings=email/query/percent"
     )
     with client(app_db.app_url, clock=clock) as c:
@@ -1129,7 +1134,7 @@ def _app_db_finding(app_db: AppDatabase, tmp_path: Path) -> str:
     [(finding_uid,)] = query(
         app_db.owner_url,
         "SELECT uid::text FROM findings WHERE rule_ref ->> 'name' = "
-        "'harava.agent_outbound_refused' AND group_values = %s::jsonb",
+        "'egress-guard.agent_outbound_refused' AND group_values = %s::jsonb",
         (json.dumps([caller]),),
     )
     return finding_uid
@@ -1204,10 +1209,10 @@ def test_tuisku_worker_exports_and_refuses_to_start_without_a_key(
 
     url = fresh_database_url
     enable_export(url)
-    token = new_source(url, "harava-edge", adapter="harava")
+    token = new_source(url, "egress-edge", adapter="egress-guard")
     lines = (FIXTURES / "plain.log").read_text().splitlines()
     with client(url, clock=Clock(T0)) as c:
-        assert post_records(c, "harava-edge", token, ndjson(*lines)).status_code == 200
+        assert post_records(c, "egress-edge", token, ndjson(*lines)).status_code == 200
     monkeypatch.setenv("TUISKU_BUILTIN_PACKS_DIR", str(REPO_ROOT / "packs"))
     monkeypatch.setenv("TUISKU_DATABASE_URL", url)
     monkeypatch.setenv("TUISKU_EXPORT_OTLP_LOGS_URL", sink.url)
@@ -1221,7 +1226,7 @@ def test_tuisku_worker_exports_and_refuses_to_start_without_a_key(
 def test_the_export_task_runs_until_cancelled(fresh_database_url: str, sink: Sink) -> None:
     url = fresh_database_url
     enable_export(url)
-    harava_finding(url, Clock(T0))
+    egress_guard_finding(url, Clock(T0))
     exp = exporter(sink.url, statement_timeout_seconds=7)
 
     async def scenario() -> None:

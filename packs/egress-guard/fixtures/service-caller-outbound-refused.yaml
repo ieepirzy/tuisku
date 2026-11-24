@@ -1,0 +1,20 @@
+rule: egress-guard.service_caller_outbound_refused
+cases:
+  - name: a non-restricted caller's outbound refusal fires
+    source: {adapter: egress-guard}
+    records:
+      - at: "2026-11-01T09:20:12Z"
+        raw: "2026-11-01 09:20:11,880 WARNING egress_guard.api outbound data refused: caller=example-service urls=0 findings=sensitive_value/crawl_scope/plain"
+    fires: [egress-guard.service_caller_outbound_refused]
+  - name: a caller the gateway did not name plainly is not in the allowlist either
+    source: {adapter: egress-guard}
+    records:
+      - at: "2026-11-01T09:20:12Z"
+        raw: "2026-11-01 09:20:11,880 WARNING egress_guard.api outbound data refused: caller=two words urls=1 findings=email/query/plain"
+    fires: [egress-guard.service_caller_outbound_refused]
+  - name: a restricted caller is the agent rule's business
+    source: {adapter: egress-guard}
+    records:
+      - at: "2026-11-01T09:14:04Z"
+        raw: "2026-11-01 09:14:03,512 WARNING egress_guard.api outbound data refused: caller=example-agent urls=1 findings=email/query/percent"
+    fires: [egress-guard.agent_outbound_refused]

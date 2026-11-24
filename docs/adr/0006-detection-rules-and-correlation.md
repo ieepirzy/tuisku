@@ -2,11 +2,13 @@
 
 Status: Accepted (2026-11-01)
 
+Edited 2026-11-23 and 2026-11-24: wording generalised.
+
 ## Context
 
 Tuisku needs deterministic logic of its own on top of sensor verdicts. Examples:
 
-- page on a single Harava refusal from an agent caller
+- page on a single egress gateway refusal from an agent caller
 - count refusals per caller per hour
 - notice a rise in `likely` content signals
 - later, correlate across sensors
@@ -30,26 +32,26 @@ code.
 
 ```yaml
 # pack.yaml
-pack: harava                 # pack id
+pack: egress-guard           # pack id
 version: 1.0.0
 authorship: tuisku           # tuisku | community | local  (ADR 0002)
 license: MIT                 # the pack's licence; a rule may declare its own, which wins
-description: Agent-safety signals from Harava.
+description: Agent-safety signals from an egress gateway.
 params:                      # defaults; a deployment overrides them
-  restricted_callers: [agents]
+  restricted_callers: [example-agent]
 ```
 
 ```yaml
 # rules/agent-outbound-refused.yaml
 id: 6c1f0f8e-…               # stable UUID; never reused
 rev: 1                       # bump on any semantic change
-name: harava.agent_outbound_refused
+name: egress-guard.agent_outbound_refused
 title: Agent caller had outbound data refused
 severity: high               # informational | low | medium | high | critical
 attack: [T1567]              # ATT&CK technique ids, verbatim, optional
 select:                      # which rows feed the rule
   layer: observation         # observation | detection
-  kind: harava.refusal       # the fact; the sensor's verdict is a separate detection row
+  kind: egress-guard.refusal # the fact; the sensor's verdict is a separate detection row
   where:                     # all predicates must hold
     - {field: attributes.type, op: eq, value: outbound}
     - {field: attributes.caller, op: in, value: {param: restricted_callers}}
@@ -127,9 +129,9 @@ Tuisku loads packs from the built-in `packs/` directory **and** from the directo
 `TUISKU_RULE_PACK_PATHS`, plus a params override file (`TUISKU_RULE_PARAMS_FILE`). A deployment
 mounts its private packs and params from its own configuration repository.
 
-The public repository ships only generic packs whose defaults come from the upstream product's
-own defaults. For example, Harava's default restricted caller is `agents`, so the pack defaults
-to it.
+The public repository ships only generic packs with neutral defaults, which a deployment
+overrides in its params file. For example, the egress-guard pack's restricted callers default to
+a placeholder caller name that a deployment replaces with its own.
 
 Every loaded pack and params file is recorded with its SHA-256, so a finding names exactly which
 content produced it.
@@ -242,7 +244,7 @@ fire. A rule without fixtures fails CI.
 - Detection content can be reviewed as data, tested offline, and shared without code.
 - The rule language is deliberately small. Anything it cannot express becomes new engine code
   with its own tests, not an escape hatch.
-- One SQL query per evaluation is fine at the first target's volume. Higher volume needs
+- One SQL query per evaluation is fine at the volume Tuisku is first built for. Higher volume needs
   incremental aggregates, which is a later decision.
 - Sigma *detection* rules (SigmaHQ, DRL 1.1) are not bundled. A converter can be added later;
   converted rules must keep their original id, author attribution and licence.

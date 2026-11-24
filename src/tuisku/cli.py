@@ -289,9 +289,20 @@ def _run_admin(args: argparse.Namespace, settings: Settings) -> None:
         return
 
     command = args.source_command
-    if command in ("add", "ensure") and args.adapter not in adapters.names():
-        available = ", ".join(adapters.names()) or "none"
-        raise UsageError(f"unknown adapter {args.adapter!r} (available: {available})")
+    if command in ("add", "ensure"):
+        if args.adapter not in adapters.names():
+            available = ", ".join(adapters.names()) or "none"
+            raise UsageError(f"unknown adapter {args.adapter!r} (available: {available})")
+        try:
+            options = dict(args.option) | dict(args.option_json)
+            adapters.validate_options(adapters.get(args.adapter), options)
+        except adapters.AdapterError as exc:
+            raise UsageError(f"adapter {args.adapter} refuses these options: {exc}") from None
+        except Exception as exc:  # a bug in the adapter's hook: refuse, store nothing
+            raise UsageError(
+                f"adapter {args.adapter} could not check these options, so the source is not "
+                f"stored (a bug in the adapter: {type(exc).__name__}: {exc})"
+            ) from None
     if command == "ensure":
         _ensure_source(args, settings)
     elif command == "add":

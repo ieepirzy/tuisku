@@ -1,13 +1,14 @@
-# 0010. Deployment topology for the first target
+# 0010. Deployment topology
 
 Status: Accepted (2026-11-01)
 
+Edited 2026-11-23 and 2026-11-24: wording generalised.
+
 ## Context
 
-Tuisku is not deployed anywhere yet. Its first target is intrusion detection and cyber-defense
-on a small Kubernetes cluster that is managed with GitOps and gives each service its own Postgres
-database. Which sensors to run, and what Tuisku agents may do, are decisions for the deploying
-estate.
+Tuisku is not deployed anywhere yet. It is built for intrusion detection and cyber-defense on a
+container platform such as Kubernetes, deployed next to the workloads it watches. Which sensors
+to run, and what Tuisku agents may do, are decisions for the deploying estate.
 
 This ADR describes Tuisku's own topology in generic terms. The estate-specific manifests live
 in the estate's own configuration repository (principle 6 in [0001](0001-service-boundary-and-principles.md)).
@@ -37,12 +38,11 @@ Also:
   a disk buffer ([0005](0005-source-adapters-and-ingestion.md)). An OpenTelemetry Collector
   (`filelog` receiver) can ship the same raw lines as OTLP/HTTP JSON logs instead. Each sensor deployment is one
   Tuisku source with its own token.
-- **OTLP metrics → collector → Tuisku.** Sources that emit OTLP, Harava first, reach Tuisku
+- **OTLP metrics → collector → Tuisku.** Sources that emit OTLP, the egress gateway first, reach Tuisku
   through an OpenTelemetry Collector pipeline that fans out to Tuisku's OTLP endpoint (JSON),
   in addition to the metrics store.
-- **Harava.** Harava's refusal events are plain-text log lines; it exports metrics and traces
-  over OTLP, but not logs. Its refusal log lines are therefore shipped raw from the container
-  log, and its metrics arrive over OTLP when a collector forwards them. The adapter accepts the
+- **The egress gateway.** Its refusal log lines are shipped raw, as NDJSON envelopes or as OTLP
+  logs, and its metrics arrive over OTLP when a collector forwards them. The adapter accepts the
   bare line, the Docker json-file wrapper and the CRI format.
 
 ### Sensors (deployed by the estate, not by Tuisku)
@@ -51,13 +51,13 @@ These are recommendations for the estate's sensor decision, not assumptions Tuis
 
 - **Runtime (host):** an eBPF-based runtime sensor, such as Falco with the `modern_ebpf` driver
   or Tetragon. Either needs host-level access, which admission policy must explicitly allow.
-  Workloads in sandboxed container runtimes need the sandbox's own monitoring; the deploying
-  estate should check its coverage.
+  A host sensor may not see inside workloads that run in a sandboxed container runtime (a
+  user-space kernel or a micro-VM); such workloads need the sandbox's own monitoring.
 - **Network:** flow logs from the cluster network plugin, where available, give L3/L4 and DNS
   visibility without a new sensor. An adapter for them is a natural next step. Suricata or Zeek
   in AF_PACKET mode on a host-networked node adds L7 signatures and protocol logs where deep
   inspection is wanted, for example where traffic enters or leaves the cluster.
-- **Application signals:** Harava's agent-safety signals (issue #2) need no new sensor.
+- **Application signals:** the egress gateway's agent-safety signals (issue #2) need no new sensor.
 
 ### Exposure
 
@@ -67,7 +67,7 @@ public endpoint in the first milestone.
 
 ## Consequences
 
-- A deployment can start with application signals alone (such as Harava's), then add sensors,
+- A deployment can start with application signals alone (such as the egress gateway's), then add sensors,
   with no Tuisku change.
 - Shipping logs to the estate's own log store and also to Tuisku is a
   fan-out at the shipper, not a dependency between the two.

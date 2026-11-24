@@ -109,14 +109,16 @@ def test_queue_rows_cannot_be_dropped_or_parked(app_db: AppDatabase, statement: 
 def _agent_rules(tmp_path: Path, caller: str) -> RuleSet:
     tmp_path.mkdir(parents=True, exist_ok=True)
     params = tmp_path / "params.yaml"
-    params.write_text(json.dumps({"harava": {"restricted_callers": ["agents", caller]}}))
+    params.write_text(
+        json.dumps({"egress-guard": {"restricted_callers": ["example-agent", caller]}})
+    )
     return builtin_rules(params)
 
 
 def _refusal(at: datetime, caller: str) -> tuple[datetime, bytes, Transport]:
     stamp = at.strftime("%Y-%m-%d %H:%M:%S,000")
     line = (
-        f"{stamp} WARNING harava.api outbound data refused: caller={caller} "
+        f"{stamp} WARNING egress_guard.api outbound data refused: caller={caller} "
         "urls=1 findings=email/query/plain"
     )
     return at + timedelta(seconds=1), line.encode(), Transport.NDJSON
@@ -126,7 +128,7 @@ def _agent_finding(db: AppDatabase, tmp_path: Path) -> tuple[str, str, RuleSet, 
     caller = f"a{uuid.uuid4().hex[:8]}"
     source = f"h{uuid.uuid4().hex[:10]}"
     rules = _agent_rules(tmp_path, caller)
-    ingest(db.app_url, source, "harava", [_refusal(AT, caller)])
+    ingest(db.app_url, source, "egress-guard", [_refusal(AT, caller)])
     run_worker(db.worker_url, rules, Clock(AT + timedelta(minutes=1)))
     [(uid,)] = query(
         db.owner_url,
@@ -219,7 +221,7 @@ def test_findings_cannot_be_silenced_or_rewritten(
     exc = _refused(app_db.app_url, statement, {"uid": uid})
     assert message in str(exc)
     # The next refusal still pages (notify: each).
-    ingest(app_db.app_url, source, "harava", [_refusal(AT + timedelta(minutes=5), caller)])
+    ingest(app_db.app_url, source, "egress-guard", [_refusal(AT + timedelta(minutes=5), caller)])
     notifier = RecordingNotifier()
     run_worker(app_db.worker_url, rules, Clock(AT + timedelta(minutes=6)), notifier)
     assert [n["kind"] for n in notifier.sent if n.get("finding_uid") == uid] == [
@@ -280,7 +282,7 @@ def test_the_api_role_writes_no_notifications(app_db: AppDatabase, tmp_path: Pat
     ingest(
         app_db.app_url,
         source,
-        "harava",
+        "egress-guard",
         [_refusal(AT + timedelta(minutes=2 + i), caller) for i in range(9)],
     )
     notifier = RecordingNotifier()
@@ -375,7 +377,7 @@ def test_leaving_a_suppression_pages_the_thresholds_crossed(
     ingest(
         app_db.app_url,
         source,
-        "harava",
+        "egress-guard",
         [_refusal(AT + timedelta(minutes=2 + i), caller) for i in range(10)],
     )
     quiet = RecordingNotifier()
@@ -549,7 +551,7 @@ def test_closing_the_incident_of_a_suppressed_finding_pages_its_thresholds(
     ingest(
         app_db.app_url,
         source,
-        "harava",
+        "egress-guard",
         [_refusal(AT + timedelta(minutes=2 + i), caller) for i in range(10)],
     )
     run_worker(app_db.worker_url, rules, Clock(AT + timedelta(minutes=20)))
@@ -786,7 +788,7 @@ def test_the_worker_progresses_while_the_api_role_holds_rows(
     )
     assert "permission denied" in str(exc)
     victim, victim_uid = _falco_victim(app_db)
-    ingest(app_db.app_url, source, "harava", [_refusal(AT + timedelta(minutes=2), caller)])
+    ingest(app_db.app_url, source, "egress-guard", [_refusal(AT + timedelta(minutes=2), caller)])
     hold = psycopg.connect(app_db.app_url)  # an open transaction
     try:
         _run_all(hold, _request(status="acknowledged"), {"uid": uid})
@@ -811,7 +813,7 @@ def test_the_worker_progresses_while_the_api_role_holds_rows(
         assert [n for n in notifier.sent if n.get("finding_uid") == uid] == []
         delayed = [n for n in notifier.sent if n["kind"] == "evaluation_delayed"]
         assert [n["rule_name"] for n in delayed] == [
-            "harava.agent_outbound_refused"
+            "egress-guard.agent_outbound_refused"
         ]  # paged once, not per retry
         assert "tuisku_backlog" in notifier.kinds()  # and the queue's lag pages
     finally:
@@ -1074,7 +1076,7 @@ def test_expiry_while_suppressed_pages_what_it_held_back(
     ingest(
         app_db.app_url,
         source,
-        "harava",
+        "egress-guard",
         [_refusal(AT + timedelta(minutes=2, seconds=i), caller) for i in range(15)],
     )
     quiet = RecordingNotifier()
@@ -1163,7 +1165,7 @@ def test_a_triage_bounce_cannot_take_the_evidence_reopen_slot(
         for status in ("contained", "investigating", "contained"):
             _run_all(conn, _request("incident", status), {"uid": uid})
             conn.commit()
-    ingest(app_db.app_url, source, "harava", [_refusal(AT + timedelta(minutes=3), caller)])
+    ingest(app_db.app_url, source, "egress-guard", [_refusal(AT + timedelta(minutes=3), caller)])
     notifier = RecordingNotifier()
     run_worker(app_db.worker_url, rules, Clock(AT + timedelta(minutes=4)), notifier)
     [(status,)] = query(

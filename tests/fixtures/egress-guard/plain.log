@@ -1,0 +1,18 @@
+2026-11-01 09:14:03,512 WARNING egress_guard.api outbound data refused: caller=example-agent urls=1 findings=email/query/percent
+2026-11-01 09:14:07,031 WARNING egress_guard.api outbound data refused: caller=example-agent urls=2 findings=personal_id/path/base64,phone/host/plain,userinfo/userinfo/plain
+2026-11-01 09:20:11,880 WARNING egress_guard.api outbound data refused: caller=example-service urls=0 findings=sensitive_value/crawl_scope/plain
+2026-11-01 09:21:00,100 WARNING egress_guard.api outbound data refused: caller=example-agent urls=1 findings=email/query/rot13,ssn/path/plain,email/query/plain,broken
+2026-11-01 09:15:40,207 WARNING egress_guard.api destination refused: caller=example-agent classes=capture_sink
+2026-11-01 09:16:02,644 WARNING egress_guard.api destination refused: caller=example-agent classes=ip_literal,overlay,tunnel
+2026-11-01 09:16:30,000 WARNING egress_guard.api destination refused: caller=example-search classes=overlay,wormhole
+2026-11-01 09:30:00,001 ERROR egress_guard.mcp MCP refuses to serve: example reason one (synthetic)
+2026-11-01 09:30:05,410 WARNING egress_guard.mcp example warning from the mcp logger (synthetic)
+2026-11-01 08:00:00,002 INFO egress_guard.example example notice from another logger (synthetic)
+2026-11-01 09:14:03,512 WARNING egress_guard.api outbound data refused: caller=example-agent urls=one findings=email/query/percent
+INFO:     example server line
+Traceback (most recent call last):
+2026-13-01 09:14:03,512 WARNING egress_guard.api destination refused: caller=example-agent classes=tunnel
+2026-11-01 09:14:03,512 NOTICE egress_guard.api destination refused: caller=example-agent classes=tunnel
+2026-11-01 09:40:00,250 WARNING egress_guard.api destination refused: caller=edge user classes=tunnel
+  File "/srv/example/handler.py", line 10, in handle
+example.TimeoutError: timed out

@@ -9,8 +9,9 @@ import pytest
 
 from tests.conftest import ALEMBIC_INI, AppDatabase
 from tests.support import client, ndjson, post_records, query
+from tuisku import adapters
 from tuisku.cli import main
-from tuisku.store.tokens import is_operator_token, is_source_token
+from tuisku.store.tokens import is_operator_token, is_source_token, new_source_token
 
 
 @pytest.fixture
@@ -103,6 +104,47 @@ def test_source_add_rejects_unknown_adapter(
 ) -> None:
     assert main(["source", "add", "x", "--adapter", "nope"]) == 2
     assert "unknown adapter" in capsys.readouterr().err
+
+
+def test_source_add_refuses_options_the_adapter_would_refuse(
+    env: AppDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    name = f"s{uuid.uuid4().hex[:10]}"
+    argv = ["source", "add", name, "--adapter", "egress-guard", "--option", "metric_prefx=acme"]
+    assert main(argv) == 2
+    out, err = capsys.readouterr()
+    assert out == "" and "refuses these options" in err and "metric_prefx" in err
+    assert query(env.owner_url, "SELECT count(*) FROM sources WHERE name = %s", (name,)) == [(0,)]
+    argv[-1] = "metric_prefix=acme.gateway"
+    assert main(argv) == 0
+    assert query(env.owner_url, "SELECT adapter_options FROM sources WHERE name = %s", (name,)) == [
+        ({"metric_prefix": "acme.gateway"},)
+    ]
+
+
+@pytest.mark.parametrize("hook", ["raises", "not callable"])
+def test_source_add_refuses_when_the_adapter_hook_is_broken(
+    env: AppDatabase,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    hook: str,
+) -> None:
+    from tuisku.adapters import builtin  # noqa: F401  (registers adapters)
+
+    def boom(options: object) -> None:
+        raise RuntimeError("hook crashed")
+
+    adapter = adapters.get("egress-guard")
+    monkeypatch.setattr(adapter, "validate_options", boom if hook == "raises" else 42)
+    name = f"s{uuid.uuid4().hex[:10]}"
+    monkeypatch.setenv("TEST_SOURCE_TOKEN", new_source_token())
+    for extra in ([], ["--token-env", "TEST_SOURCE_TOKEN"]):
+        command = "ensure" if extra else "add"
+        assert main(["source", command, name, "--adapter", "egress-guard", *extra]) == 2
+        out, err = capsys.readouterr()
+        assert out == "" and "could not check these options" in err and "Traceback" not in err
+        assert ("RuntimeError" if hook == "raises" else "validate_options is not callable") in err
+    assert query(env.owner_url, "SELECT count(*) FROM sources WHERE name = %s", (name,)) == [(0,)]
 
 
 def test_operator_token_add(env: AppDatabase, capsys: pytest.CaptureFixture[str]) -> None:

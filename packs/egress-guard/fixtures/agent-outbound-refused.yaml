@@ -1,0 +1,34 @@
+# Synthetic egress gateway log lines through the real egress-guard adapter, on an injected clock.
+rule: egress-guard.agent_outbound_refused
+cases:
+  - name: an agent outbound refusal fires once per line
+    source: {adapter: egress-guard}
+    records:
+      - at: "2026-11-01T09:14:04Z"
+        raw: "2026-11-01 09:14:03,512 WARNING egress_guard.api outbound data refused: caller=example-agent urls=1 findings=email/query/percent"
+      - at: "2026-11-01T09:20:00Z"
+        raw: "2026-11-01T09:19:59.000000000Z stderr F 2026-11-01 09:19:59,000 WARNING egress_guard.api outbound data refused: caller=example-agent urls=2 findings=phone/host/plain"
+    fires: [egress-guard.agent_outbound_refused, egress-guard.agent_outbound_refused]
+  - name: a caller listed in params fires
+    params: {restricted_callers: [example-agent, example-agent-2]}
+    source: {adapter: egress-guard}
+    records:
+      - at: "2026-11-01T09:14:04Z"
+        raw: "2026-11-01 09:14:03,512 WARNING egress_guard.api outbound data refused: caller=example-agent-2 urls=1 findings=email/query/percent"
+    fires: [egress-guard.agent_outbound_refused]
+  - name: a destination refusal is not an outbound refusal
+    source: {adapter: egress-guard}
+    records:
+      - at: "2026-11-01T09:16:00Z"
+        raw: "2026-11-01 09:15:40,207 WARNING egress_guard.api destination refused: caller=example-agent classes=capture_sink"
+    fires: [egress-guard.agent_destination_refused]
+  - name: a deployment's own logger names, set in the adapter options
+    source: {adapter: egress-guard, options: {logger_prefix: acme_gw}}
+    records:
+      - at: "2026-11-01T09:14:04Z"
+        raw: "2026-11-01 09:14:03,512 WARNING acme_gw.api outbound data refused: caller=example-agent urls=1 findings=email/query/percent"
+      - at: "2026-11-01T09:14:05Z"
+        raw: "2026-11-01 09:14:04,512 WARNING egress_guard.api outbound data refused: caller=example-agent urls=1 findings=email/query/percent"
+      - at: "2026-11-01T09:14:06Z"
+        raw: "2026-11-01 09:14:05,512 WARNING acme_gw.api outbound data refused: caller=example-agent urls=1 findings=email/query/plain"
+    fires: [egress-guard.agent_outbound_refused, egress-guard.agent_outbound_refused]

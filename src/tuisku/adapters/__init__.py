@@ -15,6 +15,7 @@ from tuisku.adapters.base import (
     ParseResult,
     RawRecord,
     Severity,
+    validate_options,
 )
 from tuisku.adapters.registry import get, names, register
 
@@ -33,4 +34,5 @@ __all__ = [
     "get",
     "names",
     "register",
+    "validate_options",
 ]

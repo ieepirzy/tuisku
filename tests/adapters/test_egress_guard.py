@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from tuisku.adapters import (
     AdapterError,
@@ -16,27 +17,31 @@ from tuisku.adapters import (
     RawRecord,
     Severity,
     registry,
+    validate_options,
 )
-from tuisku.adapters.harava import (
+from tuisku.adapters.egress_guard import (
     ADAPTER,
+    DEFAULT_PREFIX,
     MAX_DATAPOINTS,
     MAX_MESSAGE,
+    MAX_OTLP_BYTES,
     MAX_REASON,
     MAX_REFUSAL_MESSAGE,
     _finite_float,
 )
 from tuisku.adapters.testing import FIXED_RECEIVED_AT, assert_golden, run_fixture_file
 
-FIXTURES = Path(__file__).parent.parent / "fixtures" / "harava"
+FIXTURES = Path(__file__).parent.parent / "fixtures" / "egress-guard"
+PACK = Path(__file__).parent.parent.parent / "packs" / "egress-guard"
 FIXTURE_FILES = sorted(p for p in FIXTURES.iterdir() if p.suffix in (".log", ".ndjson"))
 
 
-def parse(line: str | bytes) -> ParseResult:
+def parse(line: str | bytes, options: dict[str, Any] | None = None) -> ParseResult:
     body = line.encode("utf-8", "surrogatepass") if isinstance(line, str) else line
-    return ADAPTER.parse(RawRecord("fixture", body, FIXED_RECEIVED_AT), {})
+    return ADAPTER.parse(RawRecord("fixture", body, FIXED_RECEIVED_AT), options or {})
 
 
-def line(message: str, logger: str = "harava.api", level: str = "WARNING") -> str:
+def line(message: str, logger: str = "egress_guard.api", level: str = "WARNING") -> str:
     return f"2026-11-01 09:14:03,512 {level} {logger} {message}"
 
 
@@ -44,8 +49,8 @@ def docker(log: str, **extra: Any) -> str:
     return json.dumps({"log": log, "stream": "stderr", "time": "2026-11-01T09:14:04Z"} | extra)
 
 
-OUTBOUND = line("outbound data refused: caller=agents urls=2 findings=email/query/percent")
-DESTINATION = line("destination refused: caller=agents classes=ip_literal,tunnel")
+OUTBOUND = line("outbound data refused: caller=example-agent urls=2 findings=email/query/percent")
+DESTINATION = line("destination refused: caller=example-agent classes=ip_literal,tunnel")
 
 
 def all_strings(value: Any) -> list[str]:
@@ -64,8 +69,8 @@ def test_golden(path: Path) -> None:
 
 
 def test_registered() -> None:
-    assert registry.get("harava") is ADAPTER
-    assert ADAPTER.version == "1.1.0"
+    assert registry.get("egress-guard") is ADAPTER
+    assert ADAPTER.version == "2.0.0"
 
 
 class TestRefusals:
@@ -73,39 +78,41 @@ class TestRefusals:
         r = parse(OUTBOUND)
         assert len(r.observations) == 1 and len(r.detections) == 1
         obs, det = r.observations[0], r.detections[0]
-        assert obs.kind == "harava.refusal"
+        assert obs.kind == "egress-guard.refusal"
         assert obs.attributes["type"] == "outbound"
-        assert obs.attributes["caller"] == "agents"
+        assert obs.attributes["caller"] == "example-agent"
         assert obs.attributes["urls"] == 2
         assert obs.attributes["findings"] == [
             {"detector": "email", "location": "query", "encoding": "percent"}
         ]
-        assert det.kind == "harava.outbound_refused"
+        assert det.kind == "egress-guard.outbound_refused"
         assert det.authorship is Authorship.BUILTIN
-        assert det.identity == "harava:outbound_refused"
+        assert det.identity == "egress-guard:outbound_refused"
         assert det.severity is Severity.HIGH
         assert det.observation_refs == (0,)
-        assert det.entity_keys == obs.entity_keys == ("caller:harava/agents",)
+        assert det.entity_keys == obs.entity_keys == ("caller:egress-guard/example-agent",)
 
     def test_destination_layer_split(self) -> None:
         r = parse(DESTINATION)
         obs, det = r.observations[0], r.detections[0]
         assert obs.attributes["classes"] == ["ip_literal", "tunnel"]
         assert obs.attributes["stage"] == "admission"
-        assert det.kind == "harava.destination_refused"
-        assert det.identity == "harava:destination_refused"
+        assert det.kind == "egress-guard.destination_refused"
+        assert det.identity == "egress-guard:destination_refused"
         assert det.authorship is Authorship.BUILTIN
-        assert det.entity_keys == ("caller:harava/agents",)
+        assert det.entity_keys == ("caller:egress-guard/example-agent",)
 
     @pytest.mark.parametrize("record", [OUTBOUND, DESTINATION])
     def test_detection_carries_only_the_verdict(self, record: str) -> None:
-        other = record.replace("caller=agents", "caller=sidos").replace("urls=2", "urls=7")
+        other = record.replace("caller=example-agent", "caller=example-svc").replace(
+            "urls=2", "urls=7"
+        )
         a, b = parse(record).detections[0], parse(other).detections[0]
         assert a.attributes == {}
         # Nothing taken from the line except the caller's entity key.
         assert (a.title, a.explanation, a.rule_ref) == (b.title, b.explanation, b.rule_ref)
         text = json.dumps([a.title, a.explanation, a.rule_ref])
-        for fact in ("agents", "sidos", "email", "query", "percent", "ip_literal"):
+        for fact in ("example-agent", "example-svc", "email", "query", "percent", "ip_literal"):
             assert fact not in text
 
     @pytest.mark.parametrize(
@@ -113,9 +120,9 @@ class TestRefusals:
         [
             OUTBOUND,
             DESTINATION,
-            docker(OUTBOUND + "\n", attrs={"tag": "harava-api"}),
+            docker(OUTBOUND + "\n", attrs={"tag": "egress-guard-api"}),
             line(
-                "outbound data refused: caller=agents urls=1 findings=email/body/plain",
+                "outbound data refused: caller=example-agent urls=1 findings=email/body/plain",
             ),
         ],
     )
@@ -143,17 +150,17 @@ class TestRefusals:
         ],
     )
     def test_unknown_finding_values(self, findings: str, flag: str) -> None:
-        r = parse(line(f"outbound data refused: caller=agents urls=1 findings={findings}"))
+        r = parse(line(f"outbound data refused: caller=example-agent urls=1 findings={findings}"))
         obs = r.observations[0]
         assert flag in obs.flags
         assert obs.attributes["findings"] == []
         assert obs.unmapped["findings_unrecognised"] == [findings]
-        assert len(r.detections) == 1  # Harava still refused
+        assert len(r.detections) == 1  # the gateway still refused
 
     def test_findings_dedup(self) -> None:
         r = parse(
             line(
-                "outbound data refused: caller=agents urls=1 "
+                "outbound data refused: caller=example-agent urls=1 "
                 "findings=email/query/plain,email/query/plain,phone/host/plain"
             )
         )
@@ -163,7 +170,7 @@ class TestRefusals:
         ]
 
     def test_unknown_class(self) -> None:
-        r = parse(line("destination refused: caller=agents classes=overlay,wormhole"))
+        r = parse(line("destination refused: caller=example-agent classes=overlay,wormhole"))
         obs = r.observations[0]
         assert obs.attributes["classes"] == ["overlay"]
         assert obs.unmapped["classes_unrecognised"] == ["wormhole"]
@@ -174,13 +181,13 @@ class TestRefusals:
         [
             "../../x$",
             "a b",
-            "agents urls=9",
-            "agents classes=x",
+            "example-agent urls=9",
+            "example-agent classes=x",
             "",
             "x" * 129,
             "y" * 300,
             "z " * 2000,
-            "agénts",
+            "exämple-agent",
             "-lead",
             "a\x00b",
             "a\tb",
@@ -204,12 +211,12 @@ class TestRefusals:
     @pytest.mark.parametrize(
         "message",
         [
-            "outbound data refused: caller=agents urls=x findings=email/query/plain",
-            "outbound data refused: caller=agents urls=\u0661 findings=email/query/plain",
-            "outbound data refused: caller=agents findings=email/query/plain",
-            "outbound data refused: caller=agents urls=1 findings=email/query/plain ",
-            "destination refused: caller=agents",
-            "destination refused: caller=agents classes=tunnel\x0b",
+            "outbound data refused: caller=example-agent urls=x findings=email/query/plain",
+            "outbound data refused: caller=example-agent urls=\u0661 findings=email/query/plain",
+            "outbound data refused: caller=example-agent findings=email/query/plain",
+            "outbound data refused: caller=example-agent urls=1 findings=email/query/plain ",
+            "destination refused: caller=example-agent",
+            "destination refused: caller=example-agent classes=tunnel\x0b",
         ],
     )
     def test_malformed_refusal_is_loud(self, message: str) -> None:
@@ -219,27 +226,27 @@ class TestRefusals:
     def test_refusal_length_guard(self) -> None:
         # Valid up to the cut, so only the length guard can refuse it.
         findings = ",".join(["email/query/plain"] * (MAX_REFUSAL_MESSAGE // 18 + 10))
-        msg = f"outbound data refused: caller=agents urls=1 findings={findings}"
+        msg = f"outbound data refused: caller=example-agent urls=1 findings={findings}"
         assert len(msg) > MAX_REFUSAL_MESSAGE
         with pytest.raises(AdapterError, match="longer than"):
             parse(line(msg))
 
     def test_refusal_text_from_other_logger_is_generic(self) -> None:
-        r = parse(line("destination refused: caller=agents classes=tunnel", logger="x.y"))
-        assert r.observations[0].kind == "harava.log"
+        r = parse(line("destination refused: caller=example-agent classes=tunnel", logger="x.y"))
+        assert r.observations[0].kind == "egress-guard.log"
         assert r.detections == ()
 
     def test_mcp_refused_to_serve(self) -> None:
-        r = parse(line("MCP refuses to serve: " + "z" * 5000, "harava.mcp", "ERROR"))
+        r = parse(line("MCP refuses to serve: " + "z" * 5000, "egress_guard.mcp", "ERROR"))
         obs = r.observations[0]
-        assert obs.kind == "harava.mcp_refused_to_serve"
+        assert obs.kind == "egress-guard.mcp_refused_to_serve"
         assert r.detections == ()
         assert len(obs.attributes["reason"]) == MAX_REASON
         assert "reason_truncated" in obs.flags
 
     def test_generic_log(self) -> None:
-        r = parse(line("applied migration 0001", "harava.api", "INFO"))
-        assert r.observations[0].kind == "harava.log"
+        r = parse(line("applied migration 0001", "egress_guard.api", "INFO"))
+        assert r.observations[0].kind == "egress-guard.log"
         assert r.observations[0].attributes["message"] == "applied migration 0001"
 
     def test_generic_message_bounded(self) -> None:
@@ -256,13 +263,17 @@ class TestControlCharacters:
         assert {"control_chars", "invalid_unicode_replaced"} <= set(obs.flags)
 
     def test_bare_line_nul_replaced(self) -> None:
-        obs = parse(line("MCP refuses to serve: x\x00\x07", "harava.mcp", "ERROR")).observations[0]
+        obs = parse(
+            line("MCP refuses to serve: x\x00\x07", "egress_guard.mcp", "ERROR")
+        ).observations[0]
         assert obs.attributes["reason"] == "x\ufffd\\x07"
         assert {"control_chars", "invalid_unicode_replaced"} <= set(obs.flags)
 
     def test_unmapped_escaped(self) -> None:
         obs = parse(
-            line("outbound data refused: caller=agents urls=1 findings=em\x01ail/query/plain")
+            line(
+                "outbound data refused: caller=example-agent urls=1 findings=em\x01ail/query/plain"
+            )
         ).observations[0]
         assert obs.unmapped["findings_unrecognised"] == ["em\\x01ail/query/plain"]
         assert "control_chars" in obs.flags
@@ -297,7 +308,9 @@ class TestControlCharacters:
         assert "invalid_unicode_replaced" in obs.flags
 
     def test_no_nul_survives_anywhere(self) -> None:
-        nul_metric = otlp([dp(detector="a\x00")]).replace("harava.outbound", "harava.\\u0000")
+        nul_metric = otlp([dp(detector="a\x00")]).replace(
+            "egress_guard.outbound", "egress_guard.\\u0000"
+        )
         for record in (docker(line("\x00", level="INFO") + "\n"), nul_metric):
             r = parse(record)
             for o in r.observations:
@@ -311,13 +324,13 @@ class TestOtherLines:
     @pytest.mark.parametrize(
         ("text", "line_type"),
         [
-            ("INFO:     Started server process [1]", "uvicorn"),
+            ("INFO:     example server line", "uvicorn"),
             ('INFO:     192.0.2.1:5000 - "GET /v1/fetch?e=a@example.com HTTP/1.1" 422', "uvicorn"),
             ("ERROR:    Exception in ASGI application", "uvicorn"),
             ("Traceback (most recent call last):", "traceback"),
-            ('  File "/app/harava/api/app.py", line 355, in _refuse', "traceback"),
+            ('  File "/app/egress_guard/api/app.py", line 355, in _refuse', "traceback"),
             ("ValueError: bad https://example.com/?x=1", "traceback"),
-            ("httpx2.ConnectError:", "traceback"),
+            ("example.ConnectError:", "traceback"),
             ("KeyError", "traceback"),
             ("asyncio.exceptions.CancelledError", "traceback"),
         ],
@@ -327,14 +340,14 @@ class TestOtherLines:
             r = parse(record)
             (obs,) = r.observations
             assert r.detections == ()
-            assert obs.kind == "harava.unknown"
+            assert obs.kind == "egress-guard.unknown"
             assert obs.attributes["line_type"] == line_type
             assert "message_withheld" in obs.flags
             assert not any("example.com" in s for s in all_strings([obs.attributes, obs.unmapped]))
 
     def test_wrapped_fragment_flagged(self) -> None:
         obs = parse(docker("ail/query/plain urls=1\n")).observations[0]
-        assert obs.kind == "harava.unknown"
+        assert obs.kind == "egress-guard.unknown"
         assert "possible_continuation" in obs.flags
         obs = parse("2026-11-01T09:14:04Z stderr F tail of a long line").observations[0]
         assert "possible_continuation" in obs.flags
@@ -400,8 +413,8 @@ class TestTimestampsAndWrappers:
             "not a log line",
             "",
             line("x", level="TRACE"),
-            "2026-02-30 09:14:03,512 INFO harava.api x",
-            "\u0662026-11-01 09:14:03,512 INFO harava.api x",
+            "2026-02-30 09:14:03,512 INFO egress_guard.api x",
+            "\u0662026-11-01 09:14:03,512 INFO egress_guard.api x",
         ],
     )
     def test_malformed_lines(self, record: str) -> None:
@@ -423,19 +436,22 @@ def _attr(k: str, v: Any, kind: str = "stringValue") -> dict[str, Any]:
     return {"key": k, "value": {kind: v}}
 
 
-def otlp(datapoints: list[Any], **sum_kw: Any) -> str:
+def otlp(datapoints: list[Any], name: str = "egress_guard.outbound.refused", **sum_kw: Any) -> str:
     data = {"aggregationTemporality": 2, "isMonotonic": True, "dataPoints": datapoints} | sum_kw
     return json.dumps(
         {
             "resourceMetrics": [
                 {
                     "resource": {
-                        "attributes": [_attr("service.name", "harava"), _attr("harava.role", "api")]
+                        "attributes": [
+                            _attr("service.name", "egress-guard"),
+                            _attr("egress_guard.role", "api"),
+                        ]
                     },
                     "scopeMetrics": [
                         {
-                            "scope": {"name": "harava"},
-                            "metrics": [{"name": "harava.outbound.refused", "sum": data}],
+                            "scope": {"name": "egress-guard"},
+                            "metrics": [{"name": name, "sum": data}],
                         }
                     ],
                 }
@@ -462,14 +478,17 @@ class TestOtlp:
         (obs,) = r.observations
         assert r.detections == ()
         assert obs.kind == "metric.sample"
-        assert obs.attributes["metric"] == "harava.outbound.refused"
+        assert obs.attributes["metric"] == "egress_guard.outbound.refused"
         assert obs.attributes["value"] == 3
         assert obs.attributes["labels"] == {
             "detector": "email",
             "location": "query",
             "encoding": "percent",
         }
-        assert obs.attributes["resource"] == {"service.name": "harava", "harava.role": "api"}
+        assert obs.attributes["resource"] == {
+            "service.name": "egress-guard",
+            "egress_guard.role": "api",
+        }
         assert obs.attributes["temporality"] == "cumulative"
         assert obs.attributes["is_monotonic"] is True
         assert obs.event_time == datetime(2026, 11, 1, 9, 14, 3, 512000, tzinfo=UTC)
@@ -480,13 +499,13 @@ class TestOtlp:
         good = dp("2", detector="email", location="query", encoding="percent")
         bad = dp(value, detector="phone", location="host", encoding="plain")
         r = parse(otlp([good, bad]))
-        assert [o.kind for o in r.observations] == ["metric.sample", "harava.unknown"]
+        assert [o.kind for o in r.observations] == ["metric.sample", "egress-guard.unknown"]
         assert "negative_counter" in r.observations[1].flags
 
     def test_negative_double_is_not_a_sample(self) -> None:
         point = {k: v for k, v in GOOD.items() if k != "asInt"} | {"asDouble": -0.5}
         (obs,) = parse(otlp([point])).observations
-        assert obs.kind == "harava.unknown" and "negative_counter" in obs.flags
+        assert obs.kind == "egress-guard.unknown" and "negative_counter" in obs.flags
 
     @pytest.mark.parametrize("monotonic", [{"isMonotonic": False}, {"isMonotonic": None}])
     def test_non_monotonic_sum_is_not_a_sample(self, monotonic: dict[str, Any]) -> None:
@@ -494,14 +513,14 @@ class TestOtlp:
         if monotonic["isMonotonic"] is None:  # absent: OTLP's default is false
             del body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0]["sum"]["isMonotonic"]
         (obs,) = parse(json.dumps(body)).observations
-        assert obs.kind == "harava.unknown"
+        assert obs.kind == "egress-guard.unknown"
         assert "non_monotonic_sum" in obs.flags and "non_cumulative_sum" not in obs.flags
 
     def test_temporality_enum_name(self) -> None:
         r = parse(otlp([GOOD], aggregationTemporality="AGGREGATION_TEMPORALITY_CUMULATIVE"))
         assert r.observations[0].kind == "metric.sample"
         r = parse(otlp([GOOD], aggregationTemporality="AGGREGATION_TEMPORALITY_DELTA"))
-        assert r.observations[0].kind == "harava.unknown"
+        assert r.observations[0].kind == "egress-guard.unknown"
 
     def test_asint_json_number(self) -> None:
         assert parse(otlp([dp(42)])).observations[0].attributes["value"] == 42
@@ -536,7 +555,7 @@ class TestOtlp:
 
     def test_delta_sum_is_unknown(self) -> None:
         obs = parse(otlp([dp()], aggregationTemporality=1)).observations[0]
-        assert obs.kind == "harava.unknown"
+        assert obs.kind == "egress-guard.unknown"
         assert "non_cumulative_sum" in obs.flags
 
     def test_datapoint_cap(self) -> None:
@@ -575,9 +594,9 @@ class TestOtlp:
     def test_bad_datapoint_is_kept_and_rest_survives(self, bad: Any, flag: str) -> None:
         r = parse(otlp([GOOD, bad, GOOD]))
         kinds = [o.kind for o in r.observations]
-        assert kinds == ["metric.sample", "harava.unknown", "metric.sample"]
+        assert kinds == ["metric.sample", "egress-guard.unknown", "metric.sample"]
         assert flag in r.observations[1].flags
-        assert r.observations[1].attributes["metric"] == "harava.outbound.refused"
+        assert r.observations[1].attributes["metric"] == "egress_guard.outbound.refused"
 
     def test_dp_with_flags_zero_is_a_sample(self) -> None:
         assert parse(otlp([GOOD | {"flags": 0}])).observations[0].kind == "metric.sample"
@@ -595,7 +614,7 @@ class TestOtlp:
     )
     def test_bad_metric_is_kept(self, body: str) -> None:
         (obs,) = parse(body).observations
-        assert obs.kind == "harava.unknown"
+        assert obs.kind == "egress-guard.unknown"
         assert "invalid_metric" in obs.flags
 
     @pytest.mark.parametrize(
@@ -613,7 +632,88 @@ class TestOtlp:
 
     def test_unhashable_temporality_does_not_crash(self) -> None:
         obs = parse(otlp([dp()], aggregationTemporality=[2])).observations[0]
-        assert obs.kind == "harava.unknown"
+        assert obs.kind == "egress-guard.unknown"
+
+
+class TestOptions:
+    """A deployment points the adapter at its own gateway's logger and metric names."""
+
+    CUSTOM = {"logger_prefix": "acme_gw", "metric_prefix": "acme.gateway"}
+
+    def test_custom_logger_prefix_recognises_refusals(self) -> None:
+        msg = "outbound data refused: caller=example-agent urls=1 findings=email/query/plain"
+        r = parse(line(msg, logger="acme_gw.api"), self.CUSTOM)
+        assert r.observations[0].kind == "egress-guard.refusal"
+        assert r.detections[0].kind == "egress-guard.outbound_refused"
+        assert r.observations[0].attributes["logger"] == "acme_gw.api"
+        mcp = parse(line("MCP refuses to serve: x", "acme_gw.mcp", "ERROR"), self.CUSTOM)
+        assert mcp.observations[0].kind == "egress-guard.mcp_refused_to_serve"
+
+    def test_other_prefix_is_not_a_refusal(self) -> None:
+        # The default names are not recognised once a deployment names its own, and vice versa.
+        r = parse(OUTBOUND, self.CUSTOM)
+        assert r.observations[0].kind == "egress-guard.log" and r.detections == ()
+        msg = "destination refused: caller=example-agent classes=tunnel"
+        r = parse(line(msg, logger="acme_gw.api"))
+        assert r.observations[0].kind == "egress-guard.log" and r.detections == ()
+        r = parse(line("MCP refuses to serve: x", "acme_gw.mcp", "ERROR"))
+        assert r.observations[0].kind == "egress-guard.log"
+
+    def test_custom_metric_prefix_checks_labels(self) -> None:
+        forged = dp(detector="ssn", location="query", encoding="plain")
+        custom = parse(otlp([forged], name="acme.gateway.outbound.refused"), self.CUSTOM)
+        obs = custom.observations[0]
+        assert obs.attributes["metric"] == "acme.gateway.outbound.refused"  # kept verbatim
+        assert "unknown_label_value" in obs.flags
+        # Under the default prefix the same name is just another metric: no label check.
+        default = parse(otlp([forged], name="acme.gateway.outbound.refused"))
+        assert "unknown_label_value" not in default.observations[0].flags
+        assert "unknown_label_value" in parse(otlp([forged])).observations[0].flags
+
+    @pytest.mark.parametrize(
+        "options",
+        [
+            {"logger-prefix": "acme_gw"},
+            {"logger_prefix": "acme_gw", "metric_prefx": "acme"},
+            {"logger_prefix": ""},
+            {"logger_prefix": 5},
+            {"logger_prefix": ["acme"]},
+            {"logger_prefix": "acme gw"},
+            {"logger_prefix": "acme..gw"},
+            {"logger_prefix": ".acme"},
+            {"metric_prefix": "acme."},
+            {"metric_prefix": "a" * 101},
+            {"metric_prefix": "acmé"},
+        ],
+    )
+    def test_bad_options_are_loud(self, options: dict[str, Any]) -> None:
+        for record in (OUTBOUND, otlp([GOOD])):
+            with pytest.raises(AdapterError, match="adapter option"):
+                parse(record, options)
+        # ... and are refused at registration, through the contract's optional hook.
+        with pytest.raises(AdapterError, match="adapter option"):
+            validate_options(ADAPTER, options)
+
+    def test_good_options_are_accepted_at_registration(self) -> None:
+        validate_options(ADAPTER, {})
+        validate_options(ADAPTER, self.CUSTOM)
+
+    def test_body_size_is_checked_before_options(self) -> None:
+        body = b"x" * (MAX_OTLP_BYTES + 1)
+        with pytest.raises(LimitExceeded) as exc:
+            ADAPTER.parse(RawRecord("fixture", body, FIXED_RECEIVED_AT), {"bad": 1})
+        assert exc.value.limit == "body_bytes"
+
+    def test_pack_metric_params_default_to_the_adapter_prefix(self) -> None:
+        manifest = yaml.safe_load((PACK / "pack.yaml").read_text(encoding="utf-8"))
+        assert manifest["pack"] == ADAPTER.name
+        params = manifest["params"]
+        assert params["destination_refused_metric"] == f"{DEFAULT_PREFIX}.destination.refused"
+        assert params["content_signals_metric"] == f"{DEFAULT_PREFIX}.content.signals"
+
+    def test_defaults_are_neutral(self) -> None:
+        r = parse(OUTBOUND, {"logger_prefix": "egress_guard", "metric_prefix": "egress_guard"})
+        assert r == parse(OUTBOUND)
 
 
 def _mutations(rng: random.Random, text: str) -> str:
@@ -662,7 +762,7 @@ class TestOtlpRoundTwo:
         r = parse(otlp([GOOD, bad, GOOD]))
         assert [o.kind for o in r.observations] == [
             "metric.sample",
-            "harava.unknown",
+            "egress-guard.unknown",
             "metric.sample",
         ]
         assert "invalid_value" in r.observations[1].flags
@@ -678,7 +778,7 @@ class TestOtlpRoundTwo:
     @pytest.mark.parametrize("flags", [2**32, -1])
     def test_datapoint_flags_bounded_to_uint32(self, flags: int) -> None:
         obs = parse(otlp([GOOD | {"flags": flags}])).observations[0]
-        assert obs.kind == "harava.unknown"
+        assert obs.kind == "egress-guard.unknown"
         assert "invalid_datapoint" in obs.flags
 
     def test_uint32_flags_without_no_value_bit_is_sample(self) -> None:
@@ -692,7 +792,7 @@ class TestOtlpRoundTwo:
         sm = rm["scopeMetrics"][0]
         sm["schemaUrl"] = "https://opentelemetry.io/schemas/1.25.0"
         sm["scope"] |= {
-            "version": "0.9.2",
+            "version": "1.0.0",
             "attributes": [_attr("a", "b")],
             "droppedAttributesCount": 1,
         }
@@ -717,12 +817,12 @@ class TestOtlpRoundTwo:
         assert u["scope"] == {"attributes": [_attr("a", "b")], "droppedAttributesCount": 1}
         assert u["metric"] == {"description": "metric-level"}
         assert u["datapoint"] == {"exemplars": [], "description": "dp-level"}
-        assert obs.attributes["scope"] == {"name": "harava", "version": "0.9.2"}
+        assert obs.attributes["scope"] == {"name": "egress-guard", "version": "1.0.0"}
 
     def test_docker_extras_cannot_overwrite_adapter_fields(self) -> None:
         obs = parse(
             docker(
-                line("outbound data refused: caller=agents urls=1 findings=x/y/z") + "\n",
+                line("outbound data refused: caller=example-agent urls=1 findings=x/y/z") + "\n",
                 findings_unrecognised=["forged"],
             )
         ).observations[0]

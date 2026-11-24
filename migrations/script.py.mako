@@ -14,7 +14,7 @@ down_revision: str | Sequence[str] | None = ${repr(down_revision)}
 branch_labels: str | Sequence[str] | None = ${repr(branch_labels)}
 depends_on: str | Sequence[str] | None = ${repr(depends_on)}
 
-# Tyyni migration-safety declaration (required; see AGENTS.md). Set to True only
+# Expand/contract migration-safety declaration (required; see AGENTS.md). Set to True only
 # when this revision is expand-only: it only adds tables, nullable or defaulted
 # columns, or plain indexes. Keep exactly one plain line: `= True` or `= False`.
 expand_only = False

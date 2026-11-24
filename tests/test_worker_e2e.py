@@ -1,6 +1,6 @@
-"""End to end: Harava log lines and OTLP JSON -> ingest API -> worker -> finding, incident and
-logged notifications (issue #2: "page on any occurrence"), then triage through the API and
-re-arm after the incident closes."""
+"""End to end: egress gateway log lines and OTLP JSON -> ingest API -> worker -> finding,
+incident and logged notifications (issue #2: "page on any occurrence"), then triage through the
+API and re-arm after the incident closes."""
 
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ from tests.worker_support import Clock, builtin_rules, run_worker
 from tuisku.store.tokens import Role
 from tuisku.worker.notify import LogNotifier
 
-FIXTURES = REPO_ROOT / "tests" / "fixtures" / "harava"
-AGENT_OUTBOUND = "harava.agent_outbound_refused"
+FIXTURES = REPO_ROOT / "tests" / "fixtures" / "egress-guard"
+AGENT_OUTBOUND = "egress-guard.agent_outbound_refused"
 
 
 def _notifications(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
@@ -33,16 +33,16 @@ def test_three_refusals_within_the_hour_page_three_times(
     fresh_database_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     url = fresh_database_url
-    token = new_source(url, "harava-edge", adapter="harava")
+    token = new_source(url, "egress-edge", adapter="egress-guard")
     clock = Clock(datetime(2026, 11, 1, 9, 30, tzinfo=UTC))
     lines = (FIXTURES / "plain.log").read_text().splitlines()
     otlp = [ln for ln in (FIXTURES / "otlp.ndjson").read_text().splitlines() if ln.strip()]
     with client(url, clock=clock) as c:
-        r = post_records(c, "harava-edge", token, ndjson(*lines))
+        r = post_records(c, "egress-edge", token, ndjson(*lines))
         assert r.status_code == 200, r.text
         for body in otlp:
             r = c.post(
-                "/v1/sources/harava-edge/otlp/v1/metrics",
+                "/v1/sources/egress-edge/otlp/v1/metrics",
                 content=body.encode(),
                 headers={"Content-Type": "application/json"} | auth(token),
             )
@@ -65,10 +65,13 @@ def test_three_refusals_within_the_hour_page_three_times(
         "finding_occurrence",
         "finding_occurrence",
     ]
-    assert all(n["severity_id"] == 4 and "caller:harava/agents" in n["entity_keys"] for n in paged)
+    assert all(
+        n["severity_id"] == 4 and "caller:egress-guard/example-agent" in n["entity_keys"]
+        for n in paged
+    )
     # Notifications carry ids and titles, never L0 bodies.
     assert not any("findings=" in json.dumps(n) for n in sent)
-    # The destination rule paged twice; the service caller (sidos) once, on opening.
+    # The destination rule paged twice; the service caller (example-service) once, on opening.
     kinds = sorted(n["kind"] for n in sent)
     assert kinds.count("incident_opened") == 2
     # Detections: evaluator tuisku, authorship of the pack, identity = rule id.
@@ -79,7 +82,9 @@ def test_three_refusals_within_the_hour_page_three_times(
         (AGENT_OUTBOUND,),
     )
     assert len(rows) == 3
-    assert {r[1:] for r in rows} == {("tuisku", "f542db3a-6926-4df9-9183-449491345d3c", "harava")}
+    assert {r[1:] for r in rows} == {
+        ("tuisku", "f542db3a-6926-4df9-9183-449491345d3c", "egress-guard")
+    }
     assert query(url, "SELECT count(*) FROM pack_loads")[0][0] == 3
     assert query(url, "SELECT count(*) FROM evaluation_queue")[0][0] == 0
 
@@ -93,13 +98,13 @@ def test_three_refusals_within_the_hour_page_three_times(
         incident = incidents["Agent caller had outbound data refused"]
         detail = c.get(f"/v1/incidents/{incident['uid']}", headers=auth(reader)).json()
         assert [e["kind"] for e in detail["timeline"]] == ["opened", "finding_attached"]
-        assert detail["timeline"][0]["actor"] == "rule:f542db3a-6926-4df9-9183-449491345d3c@1"
+        assert detail["timeline"][0]["actor"] == "rule:f542db3a-6926-4df9-9183-449491345d3c@2"
         assert detail["evidence"] == {
             "findings": 1,
             "detections": 3,
             "observations": 3,
             "raw_records": 3,
-            "observation_kinds": ["harava.refusal:3"],
+            "observation_kinds": ["egress-guard.refusal:3"],
         }
         assert detail["findings"][0]["ocsf_status"] == "New"
         r = c.get("/v1/findings", params={"status": "open"}, headers=auth(reader))
@@ -136,11 +141,11 @@ def test_three_refusals_within_the_hour_page_three_times(
     with client(url, clock=clock) as c:
         post_records(
             c,
-            "harava-edge",
+            "egress-edge",
             token,
             ndjson(
-                "2026-11-01 09:39:00,000 WARNING harava.api outbound data refused: caller=agents "
-                "urls=1 findings=email/query/plain"
+                "2026-11-01 09:39:00,000 WARNING egress_guard.api outbound data refused: "
+                "caller=example-agent urls=1 findings=email/query/plain"
             ),
         )
     caplog.clear()

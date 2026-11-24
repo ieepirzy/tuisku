@@ -38,11 +38,11 @@ from tuisku.worker.metrics import Sample, series_deltas
         ("neq", "a", "b", True),
         ("neq", "a", "a", False),
         ("neq", 1, "1", True),  # mistyped: negative is true
-        ("in", "agents", ("agents", "x"), True),
-        ("in", ["agents"], ("agents",), False),  # a list is not a member
-        ("not_in", "svc", ("agents",), True),
-        ("not_in", "agents", ("agents",), False),
-        ("not_in", 7, ("agents",), True),
+        ("in", "example-agent", ("example-agent", "x"), True),
+        ("in", ["example-agent"], ("example-agent",), False),  # a list is not a member
+        ("not_in", "svc", ("example-agent",), True),
+        ("not_in", "example-agent", ("example-agent",), False),
+        ("not_in", 7, ("example-agent",), True),
         ("gt", 5, 4, True),
         ("gte", 4, 4, True),
         ("lt", "3", 4, False),
@@ -50,7 +50,7 @@ from tuisku.worker.metrics import Sample, series_deltas
         ("contains", "abcdef", "cd", True),
         ("contains", ["ip:1.2.3.4", "x"], "x", True),
         ("contains", {"x": 1}, "x", False),
-        ("startswith", "harava.api", "harava.", True),
+        ("startswith", "egress_guard.api", "egress_guard.", True),
         ("startswith", 12, "1", False),
         ("exists", 0, None, True),
         ("exists", "", None, True),
@@ -97,14 +97,14 @@ def test_hostile_value_never_raises() -> None:
 def test_field_paths() -> None:
     env = {
         "kind": "k",
-        "entity_keys": ["ip:1.2.3.4", "caller:harava/agents"],
+        "entity_keys": ["ip:1.2.3.4", "caller:egress-guard/example-agent"],
         "attributes": {
             "labels": {"stage": "hop"},
             "findings": [{"detector": "email"}],
             "nothing": None,
         },
     }
-    assert FieldPath.parse("entity_keys.1").resolve(env) == "caller:harava/agents"
+    assert FieldPath.parse("entity_keys.1").resolve(env) == "caller:egress-guard/example-agent"
     assert FieldPath.parse("attributes.labels.stage").resolve(env) == "hop"
     assert FieldPath.parse("attributes.findings.0.detector").resolve(env) == "email"
     assert FieldPath.parse("attributes.findings.5.detector").resolve(env) is MISSING
@@ -120,7 +120,7 @@ def test_field_paths() -> None:
 @pytest.mark.parametrize(
     ("op", "value"),
     [
-        ("in", "agents"),
+        ("in", "example-agent"),
         ("in", []),
         ("gt", "5"),
         ("cidr", "10.0.0.0/33"),
@@ -149,7 +149,7 @@ def _rule(**over: Any) -> dict[str, Any]:
         "severity": "low",
         "select": {
             "layer": "observation",
-            "kind": "harava.refusal",
+            "kind": "egress-guard.refusal",
             "where": [{"field": "attributes.caller", "op": "in", "value": {"param": "callers"}}],
         },
         "finding": {"group_by": ["attributes.caller"], "window": "1h", "max_lifetime": "1d"},
@@ -167,7 +167,7 @@ def _pack(tmp_path: Path, *rules: dict[str, Any], params: Any = None, name: str 
         "version": "1.0.0",
         "authorship": "local",
         "license": "MIT",
-        "params": params or {"callers": ["agents"]},
+        "params": params or {"callers": ["example-agent"]},
     }
     (pack / "pack.yaml").write_text(json.dumps(manifest))
     for i, r in enumerate(rules):
@@ -178,23 +178,27 @@ def _pack(tmp_path: Path, *rules: dict[str, Any], params: Any = None, name: str 
 def test_builtin_packs_load_with_hashes_and_lookback() -> None:
     rs = load_rule_set([], builtin=[PACKS])
     by_id = {p.info.id: p for p in rs.packs}
-    assert set(by_id) == {"harava", "sensors-default", "tuisku-meta"}
-    assert len(by_id["harava"].info.sha256) == 64
-    assert by_id["harava"].max_lookback == timedelta(hours=25)  # (24 + 1) baseline windows
+    assert set(by_id) == {"egress-guard", "sensors-default", "tuisku-meta"}
+    assert len(by_id["egress-guard"].info.sha256) == 64
+    assert by_id["egress-guard"].max_lookback == timedelta(hours=25)  # (24 + 1) baseline windows
     assert by_id["sensors-default"].max_lookback == timedelta(0)
 
 
 def test_params_resolve_and_override(tmp_path: Path) -> None:
     root = _pack(tmp_path, _rule())
     [rule] = load_rule_set([root]).rules
-    env = {"layer": "observation", "kind": "harava.refusal", "attributes": {"caller": "agents"}}
+    env = {
+        "layer": "observation",
+        "kind": "egress-guard.refusal",
+        "attributes": {"caller": "example-agent"},
+    }
     assert match(rule, env) is not None
     params = tmp_path / "params.yaml"
-    params.write_text("p:\n  callers: [crawler]\n")
+    params.write_text("p:\n  callers: [example-agent-2]\n")
     rs = load_rule_set([root], params)
     [rule] = rs.rules
     assert match(rule, env) is None
-    assert rule.params_used == {"callers": ["crawler"]}
+    assert rule.params_used == {"callers": ["example-agent-2"]}
     assert rs.params_sha256 is not None and len(rs.params_sha256) == 64
 
 
@@ -258,7 +262,7 @@ def test_params_resolve_and_override(tmp_path: Path) -> None:
             {
                 "select": {
                     "layer": "observation",
-                    "kind": "harava.refusal",
+                    "kind": "egress-guard.refusal",
                     "where": [{"field": "attributes.x", "op": "eq", "value": {"param": "nope"}}],
                 }
             },
@@ -304,7 +308,7 @@ def test_loader_rejects_reused_ids_and_bad_overrides(tmp_path: Path) -> None:
     params = tmp_path / "params.yaml"
     for i, (text, message) in enumerate(
         [
-            ("p:\n  callers: agents\n", "must be a list"),
+            ("p:\n  callers: example-agent\n", "must be a list"),
             ("p:\n  other: [x]\n", "unknown param"),
             ("zz:\n  callers: [x]\n", "unknown pack"),
         ]
@@ -340,13 +344,13 @@ def test_fingerprint_boundaries_cannot_move() -> None:
     assert finding_fingerprint(rid, 1, [missing]) != finding_fingerprint(rid, 1, [null])
     assert finding_fingerprint(rid, 1, ["x"]) != finding_fingerprint(rid, 2, ["x"])
     assert finding_fingerprint(rid, 1, []) != overflow_fingerprint(rid, 1)
-    # Stable across processes: the SHA-256 of JCS ["finding","<id>",1,["agents"]].
+    # Stable across processes: the SHA-256 of JCS ["finding","<id>",1,["example-agent"]].
     import hashlib
 
     expected = hashlib.sha256(
-        b'["finding","33333333-3333-4333-8333-333333333333",1,["agents"]]'
+        b'["finding","33333333-3333-4333-8333-333333333333",1,["example-agent"]]'
     ).digest()
-    assert finding_fingerprint(rid, 1, ["agents"]) == expected
+    assert finding_fingerprint(rid, 1, ["example-agent"]) == expected
 
 
 def test_group_values_are_normalised_without_collisions() -> None:
@@ -484,16 +488,16 @@ def test_window_filters_push_static_predicates_and_group_values() -> None:
     from tuisku.worker.engine import window_filters
 
     rs = load_rule_set([], builtin=[PACKS])
-    [trend] = [r for r in rs.rules if r.name == "harava.destination_refused_trend"]
+    [trend] = [r for r in rs.rules if r.name == "egress-guard.destination_refused_trend"]
     env = {
         "layer": "observation",
         "kind": "metric.sample",
         "source": "edge",
-        "attributes": {"metric": "harava.destination.refused", "labels": {"stage": "hop"}},
+        "attributes": {"metric": "egress_guard.destination.refused", "labels": {"stage": "hop"}},
     }
     rendered = [f.as_string(None) for f in window_filters(trend, env)]  # type: ignore[arg-type]
     assert rendered == [
-        "(t.attributes ->> 'metric') = 'harava.destination.refused'",
+        "(t.attributes ->> 'metric') = 'egress_guard.destination.refused'",
         "coalesce(r.source_name, s.name) = 'edge'",
         "(t.attributes #>> '{labels,stage}') = 'hop'",
     ]
@@ -510,11 +514,11 @@ def test_null_counts_as_missing_for_predicates_but_not_for_grouping(tmp_path: Pa
     ]:
         assert evaluate(op, NULL, value) is expected
     rule_doc = _rule(
-        select={"layer": "observation", "kind": "harava.refusal"},
+        select={"layer": "observation", "kind": "egress-guard.refusal"},
         finding={"group_by": ["attributes.caller"], "window": "1h", "max_lifetime": "1d"},
     )
     [rule] = load_rule_set([_pack(tmp_path, rule_doc)]).rules
-    base = {"layer": "observation", "kind": "harava.refusal"}
+    base = {"layer": "observation", "kind": "egress-guard.refusal"}
     explicit = match(rule, base | {"attributes": {"caller": None}})
     absent = match(rule, base | {"attributes": {}})
     assert explicit is not None and absent is not None

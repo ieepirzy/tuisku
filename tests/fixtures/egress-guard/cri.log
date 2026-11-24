@@ -1,0 +1,5 @@
+2026-11-01T09:14:07.031552870Z stderr F 2026-11-01 09:14:07,031 WARNING egress_guard.api outbound data refused: caller=example-agent urls=2 findings=personal_id/path/base64,phone/host/plain,userinfo/userinfo/plain
+2026-11-01T09:16:02.644918223Z stderr F 2026-11-01 09:16:02,644 WARNING egress_guard.api destination refused: caller=example-agent classes=ip_literal,overlay,tunnel
+2026-11-01T09:20:11.880120004+00:00 stderr F 2026-11-01 09:20:11,880 WARNING egress_guard.api outbound data refused: caller=example-service urls=0 findings=sensitive_value/crawl_scope/plain
+2026-11-01T09:30:00.001000000Z stderr P 2026-11-01 09:30:00,001 INFO egress_guard.example a partial line
+2026-11-01T09:30:00.001000000Z stderr F not a python logging line

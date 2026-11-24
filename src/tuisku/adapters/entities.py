@@ -190,7 +190,7 @@ def sha256_key(value: object) -> str | None:
 
 
 def caller_key(source: object, name: object) -> str | None:
-    """``caller:<source>/<name>``, e.g. ``caller:harava/agents``."""
+    """``caller:<source>/<name>``, e.g. ``caller:egress-guard/example-agent``."""
     if not (isinstance(source, str) and isinstance(name, str)):
         return None
     if not (_PLAIN.fullmatch(source) and _PLAIN.fullmatch(name)) or "/" in source:

@@ -2,6 +2,8 @@
 
 Status: Accepted (2026-11-01)
 
+Edited 2026-11-23: wording generalised.
+
 ## Context
 
 Detections are many and noisy. People and investigators need fewer, durable objects to work
@@ -178,5 +180,5 @@ configuration.
   knob.
 - The incident timeline is the audit log. It is also exactly what an investigator, human or
   agent, reads first.
-- OCSF Incident Finding and the Loimi export ([0008](0008-identifiers-and-interchange.md)) are
+- OCSF Incident Finding and the artifact store export ([0008](0008-identifiers-and-interchange.md)) are
   projections of the incident and its timeline.
