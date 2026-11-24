@@ -126,6 +126,45 @@ Operator tokens with the `read` role (or `triage`/`admin`) can read evidence:
 each raw record's newest successful parse attempt unless `all_attempts=true`) and
 `GET /v1/raw/{uid}` (metadata and the body as base64).
 
+### Shirudo keepalives
+
+The `shirudo` adapter reads [Shirudo](https://github.com/shirudo-dev/shirudo)'s status
+keepalive (ADR 0013). A Shirudo target sends it over OTLP/HTTP JSON to
+`map_export.otel_endpoint` plus `/v1/logs`, so the endpoint for a source named `shirudo` is
+`https://<tuisku>/v1/sources/shirudo/otlp`, with the token in the target's
+`/etc/shirudo/map-export.env` as `OTEL_EXPORTER_OTLP_HEADERS=authorization=Bearer%20tsk_src_...`.
+The target speaks TLS 1.3 with hybrid ML-KEM key exchange only, so whatever terminates TLS for
+Tuisku must offer `X25519MLKEM768` (or the host goes in Shirudo's `tls.classical_hosts`).
+
+The same endpoint setting also sends map snapshots once `upatch map --all` exports, and their
+structured bodies are refused here (`body_not_string`). A target that exports snapshots
+should send to an OpenTelemetry Collector instead, which forwards only the keepalives to
+Tuisku, body untouched, from one queue consumer (rows are ordered by arrival):
+
+```yaml
+processors:
+  filter/shirudo_keepalive:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'instrumentation_scope.name != "shirudo.keepalive"'
+exporters:
+  otlphttp/tuisku_shirudo:
+    logs_endpoint: https://<tuisku>/v1/sources/shirudo/otlp/v1/logs
+    encoding: json
+    headers: {Authorization: "Bearer ${env:TUISKU_SHIRUDO_TOKEN}"}
+    sending_queue: {num_consumers: 1}
+```
+
+A keepalive becomes a `shirudo.keepalive` observation, two `metric.sample` counters
+(`shirudo.tamper`, `shirudo.integrity`, one series per `boot_id`) and, for a verdict other than
+`ok`, a `shirudo.status` sensor detection. The built-in `shirudo` pack fires on a critical
+verdict, a degraded one, and a rise of either counter within one boot. Keepalives carry no
+time and no host name: rows take their receipt time, the node's identity stays in the raw
+record's `collector` (`host.name` and the `shirudo.quote` attribute, unchecked), and identical
+keepalives are stored once and counted as duplicates. Tuisku cannot see a target that stops
+sending. Map snapshots and decoder metrics are kept unparsed as `shirudo.unknown`.
+
 ## Rules, findings and incidents
 
 `tuisku worker` evaluates every new observation and detection against the rule packs (ADR 0006)
@@ -139,7 +178,7 @@ uv run tuisku worker                        # poll the evaluation queue
 ```
 
 Packs are directories with a `pack.yaml` and `rules/*.yaml` (see `packs/` and ADR 0006). The
-built-in packs (`harava`, `sensors-default`, `tuisku-meta`) ship generic defaults only, and only
+built-in packs (`harava`, `sensors-default`, `shirudo`, `tuisku-meta`) ship generic defaults only, and only
 they may declare `authorship: tuisku`. A deployment mounts
 its own packs and params from its configuration repository:
 `TUISKU_RULE_PACK_PATHS=/etc/tuisku/packs` (separated by `:`) and

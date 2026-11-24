@@ -1,0 +1,23 @@
+id: fc790f5b-fb6e-4c62-b891-cf4e062f5f8c
+rev: 1
+name: shirudo.integrity_rise
+title: Shirudo refused a change to the running kernel
+description: >-
+  The sum of the keepalive's integrity counters rose within one boot: something on the target
+  tried to change or read the running kernel and Shirudo refused it.
+severity: high
+select:
+  layer: observation
+  kind: metric.sample
+  where:
+    - {field: attributes.metric, op: eq, value: shirudo.integrity}
+correlation:
+  type: value_sum
+  field: delta
+  timespan: 10m
+  condition: {gte: {param: integrity_rise_threshold}}
+finding:
+  group_by: [source, attributes.labels.boot_id]
+  window: 1h
+  max_lifetime: 24h
+incident: open

@@ -1,0 +1,18 @@
+id: 6a94f93c-cef6-4353-86c9-a235f97d6b6a
+rev: 1
+name: shirudo.invalid_keepalive
+title: A Shirudo keepalive breaks its own format
+description: >-
+  A body that claims schema shirudo.keepalive/1 but breaks it. Shirudo never sends one, so it
+  comes from something else posting to the source, or a target that is not what it claims.
+severity: medium
+select:
+  layer: observation
+  kind: shirudo.unknown
+  where:
+    - {field: attributes.reason, op: eq, value: invalid_keepalive}
+finding:
+  group_by: [source]
+  window: 1h
+  max_lifetime: 24h
+incident: none
