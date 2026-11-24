@@ -1,0 +1,14 @@
+pack: shirudo
+version: 1.0.0
+authorship: tuisku
+license: MIT
+description: >-
+  Shirudo keepalives (ADR 0013). Follows the alerts Shirudo's own telemetry guide recommends:
+  a verdict other than ok, and a rise of the tamper or integrity counters within one boot. A
+  target that stops sending keepalives is not detected here: Tuisku has no rule for missing
+  records yet, so watch for silence where the keepalives are also stored.
+params:
+  # Refusals by Shirudo's guards within one boot, summed over 10 minutes. Shirudo's own example
+  # alerts on any rise.
+  tamper_rise_threshold: 1
+  integrity_rise_threshold: 1

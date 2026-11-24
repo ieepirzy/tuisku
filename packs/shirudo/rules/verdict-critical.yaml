@@ -1,0 +1,18 @@
+id: 57e096c8-a274-4b9a-b10d-bc39ae00af9a
+rev: 1
+name: shirudo.verdict_critical
+title: Shirudo target is tampered or lost enforcement
+description: >-
+  The keepalive's verdict is tampered, lsm-off, or a verdict this Tuisku does not know (Shirudo
+  sends every verdict other than ok, degraded and the two pending states at ERROR).
+severity: critical
+select:
+  layer: detection
+  kind: shirudo.status
+  where:
+    - {field: severity_id, op: gte, value: 4}
+finding:
+  group_by: [identity, attributes.boot_id]
+  window: 1h
+  max_lifetime: 24h
+incident: open

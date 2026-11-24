@@ -1,0 +1,24 @@
+id: b44d19cb-38dc-4ff4-b494-07ab0a39d4dd
+rev: 1
+name: shirudo.tamper_rise
+title: Shirudo's guards refused an operation on the target
+description: >-
+  The sum of the keepalive's tamper counters rose within one boot: something on the target
+  tried an operation Shirudo's guards refused. The counters start at zero at every boot, so the
+  first keepalive of a boot is the baseline. The finding's samples name the counters.
+severity: high
+select:
+  layer: observation
+  kind: metric.sample
+  where:
+    - {field: attributes.metric, op: eq, value: shirudo.tamper}
+correlation:
+  type: value_sum
+  field: delta
+  timespan: 10m
+  condition: {gte: {param: tamper_rise_threshold}}
+finding:
+  group_by: [source, attributes.labels.boot_id]
+  window: 1h
+  max_lifetime: 24h
+incident: open

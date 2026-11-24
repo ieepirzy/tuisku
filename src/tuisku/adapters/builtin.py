@@ -6,7 +6,13 @@ startup, never be skipped silently. Each module registers its ``ADAPTER`` on imp
 
 from __future__ import annotations
 
-from tuisku.adapters import falco, harava, suricata, zeek
+from tuisku.adapters import falco, harava, shirudo, suricata, zeek
 from tuisku.adapters.base import Adapter
 
-BUILTIN: tuple[Adapter, ...] = (falco.ADAPTER, harava.ADAPTER, suricata.ADAPTER, zeek.ADAPTER)
+BUILTIN: tuple[Adapter, ...] = (
+    falco.ADAPTER,
+    harava.ADAPTER,
+    shirudo.ADAPTER,
+    suricata.ADAPTER,
+    zeek.ADAPTER,
+)

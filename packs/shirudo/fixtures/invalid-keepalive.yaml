@@ -1,0 +1,17 @@
+# Synthetic Shirudo keepalive bodies through the real shirudo adapter.
+rule: shirudo.invalid_keepalive
+cases:
+  - name: a body that breaks the keepalive format fires
+    source: {adapter: shirudo}
+    records:
+      - at: "2026-11-24T10:00:00Z"
+        raw: "{\"schema\":\"shirudo.keepalive/1\",\"boot_id\":\"0b6f1d2e-4c3a-4e5f-9a8b-7c6d5e4f3a2b\",\"version_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"config_root\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"kernel_release\":\"7.3.0-bpf-next+\",\"image_id\":\"example-os\",\"image_version\":\"2026.11.1\",\"image_root\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"verdict\":\"ok\",\"cond\":5461,\"flags\":0,\"tamper\":[15,0,0,0,0,1,0,0,0,0,0,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],\"integrity\":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],\"tree_id\":null,\"generation\":null,\"base_seq\":null,\"last_seq\":null,\"base_root\":null,\"projection_root\":null,\"mask\":null,\"set_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"not_ok\":0}"
+    fires: [shirudo.invalid_keepalive]
+    incidents: 0
+  - name: another JSON object posted to the source does not
+    source: {adapter: shirudo}
+    records:
+      - at: "2026-11-24T10:00:00Z"
+        raw: "{\"pid\":1,\"comm\":\"bash\"}"
+    fires: []
+    incidents: 0

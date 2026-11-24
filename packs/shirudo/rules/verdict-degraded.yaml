@@ -1,0 +1,19 @@
+id: b826d2c4-58b2-42b0-bb3e-1e9ca1efd27b
+rev: 1
+name: shirudo.verdict_degraded
+title: Shirudo target reports a degraded state
+description: >-
+  The keepalive's verdict is degraded: a condition is at WARN, such as a device an XDP upatch
+  selects running without it. init-pending and reboot-pending are operational states and are
+  left to a deployment's own rules.
+severity: medium
+select:
+  layer: detection
+  kind: shirudo.status
+  where:
+    - {field: attributes.verdict, op: eq, value: degraded}
+finding:
+  group_by: [attributes.boot_id]
+  window: 6h
+  max_lifetime: 7d
+incident: none

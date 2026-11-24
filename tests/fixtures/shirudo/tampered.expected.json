@@ -1,0 +1,478 @@
+[
+  {
+    "adapter": "shirudo@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {
+          "boot_id": "0b6f1d2e-4c3a-4e5f-9a8b-7c6d5e4f3a2b",
+          "conditions_alert": [
+            "ChainIntact"
+          ],
+          "conditions_warn": [],
+          "verdict": "tampered"
+        },
+        "authorship": "builtin",
+        "entity_keys": [],
+        "event_time": "2026-11-01T12:00:00+00:00",
+        "explanation": {
+          "conditions": {
+            "ChainIntact": "alert",
+            "ConfigActive": "ok",
+            "KeyringSealed": "ok",
+            "LsmAttached": "ok",
+            "TpmMeasured": "ok",
+            "UpatchesMeasured": "ok",
+            "XdpCovered": "ok"
+          },
+          "flag_names": [
+            "register_rebound"
+          ],
+          "known_verdict": true,
+          "verdict": "tampered"
+        },
+        "identity": "shirudo:verdict:tampered",
+        "kind": "shirudo.status",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "check": "status",
+          "engine": "shirudo",
+          "verdict": "tampered"
+        },
+        "severity": 5,
+        "title": "Shirudo target reports verdict tampered"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "boot_id": "0b6f1d2e-4c3a-4e5f-9a8b-7c6d5e4f3a2b",
+          "cond": 5493,
+          "conditions": {
+            "ChainIntact": "alert",
+            "ConfigActive": "ok",
+            "KeyringSealed": "ok",
+            "LsmAttached": "ok",
+            "TpmMeasured": "ok",
+            "UpatchesMeasured": "ok",
+            "XdpCovered": "ok"
+          },
+          "config_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "flag_names": [
+            "register_rebound"
+          ],
+          "flags": 1,
+          "image_id": "example-os",
+          "image_root": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "image_version": "2026.11.1",
+          "integrity": [
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "integrity_nonzero": {
+            "DevMem": 1
+          },
+          "integrity_total": 1,
+          "kernel_release": "7.3.0-bpf-next+",
+          "loaded": {
+            "count": 3,
+            "not_ok": 0,
+            "set_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          "schema": "shirudo.keepalive/1",
+          "tamper": [
+            15,
+            0,
+            2,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            8,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1
+          ],
+          "tamper_nonzero": {
+            "BpfCommand": 8,
+            "LoadNotLoader": 15,
+            "LoadUnverified": 2,
+            "MapCreate": 1,
+            "SealRlimit": 1
+          },
+          "tamper_total": 27,
+          "time_source": "received_at",
+          "tree": {
+            "base_root": "0000000000000000000000000000000000000000000000000000000000000000",
+            "base_seq": 0,
+            "generation": 7,
+            "last_seq": 3,
+            "mask": "VA==",
+            "projection_root": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "tree_id": "fleet-a"
+          },
+          "verdict": "tampered",
+          "version_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-11-01T12:00:00+00:00",
+        "flags": [],
+        "kind": "shirudo.keepalive",
+        "ocsf_class_uid": null,
+        "unmapped": {}
+      },
+      {
+        "attributes": {
+          "counters": {
+            "BpfCommand": 8,
+            "LoadNotLoader": 15,
+            "LoadUnverified": 2,
+            "MapCreate": 1,
+            "SealRlimit": 1
+          },
+          "is_monotonic": true,
+          "labels": {
+            "boot_id": "0b6f1d2e-4c3a-4e5f-9a8b-7c6d5e4f3a2b"
+          },
+          "metric": "shirudo.tamper",
+          "resource": {},
+          "scope": {
+            "name": "shirudo.keepalive"
+          },
+          "start_time": null,
+          "temporality": "cumulative",
+          "time": "2026-11-01T12:00:00+00:00",
+          "time_source": "received_at",
+          "unit": "{refusal}",
+          "value": 27
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-11-01T12:00:00+00:00",
+        "flags": [],
+        "kind": "metric.sample",
+        "ocsf_class_uid": null,
+        "unmapped": {}
+      },
+      {
+        "attributes": {
+          "counters": {
+            "DevMem": 1
+          },
+          "is_monotonic": true,
+          "labels": {
+            "boot_id": "0b6f1d2e-4c3a-4e5f-9a8b-7c6d5e4f3a2b"
+          },
+          "metric": "shirudo.integrity",
+          "resource": {},
+          "scope": {
+            "name": "shirudo.keepalive"
+          },
+          "start_time": null,
+          "temporality": "cumulative",
+          "time": "2026-11-01T12:00:00+00:00",
+          "time_source": "received_at",
+          "unit": "{refusal}",
+          "value": 1
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-11-01T12:00:00+00:00",
+        "flags": [],
+        "kind": "metric.sample",
+        "ocsf_class_uid": null,
+        "unmapped": {}
+      }
+    ]
+  },
+  {
+    "adapter": "shirudo@1.0.0",
+    "detections": [
+      {
+        "attack": [],
+        "attributes": {
+          "boot_id": "0b6f1d2e-4c3a-4e5f-9a8b-7c6d5e4f3a2b",
+          "conditions_alert": [
+            "LsmAttached"
+          ],
+          "conditions_warn": [],
+          "verdict": "lsm-off"
+        },
+        "authorship": "builtin",
+        "entity_keys": [],
+        "event_time": "2026-11-01T12:00:00+00:00",
+        "explanation": {
+          "conditions": {
+            "ChainIntact": "ok",
+            "ConfigActive": "ok",
+            "KeyringSealed": "ok",
+            "LsmAttached": "alert",
+            "TpmMeasured": "ok",
+            "UpatchesMeasured": "ok",
+            "XdpCovered": "ok"
+          },
+          "flag_names": [],
+          "known_verdict": true,
+          "verdict": "lsm-off"
+        },
+        "identity": "shirudo:verdict:lsm-off",
+        "kind": "shirudo.status",
+        "observation_refs": [
+          0
+        ],
+        "rule_ref": {
+          "check": "status",
+          "engine": "shirudo",
+          "verdict": "lsm-off"
+        },
+        "severity": 5,
+        "title": "Shirudo target reports verdict lsm-off"
+      }
+    ],
+    "observations": [
+      {
+        "attributes": {
+          "boot_id": "0b6f1d2e-4c3a-4e5f-9a8b-7c6d5e4f3a2b",
+          "cond": 5463,
+          "conditions": {
+            "ChainIntact": "ok",
+            "ConfigActive": "ok",
+            "KeyringSealed": "ok",
+            "LsmAttached": "alert",
+            "TpmMeasured": "ok",
+            "UpatchesMeasured": "ok",
+            "XdpCovered": "ok"
+          },
+          "config_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "flag_names": [],
+          "flags": 0,
+          "image_id": "example-os",
+          "image_root": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "image_version": "2026.11.1",
+          "integrity": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "integrity_nonzero": {},
+          "integrity_total": 0,
+          "kernel_release": "7.3.0-bpf-next+",
+          "loaded": {
+            "count": 1,
+            "not_ok": 0,
+            "set_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          "schema": "shirudo.keepalive/1",
+          "tamper": [
+            15,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            8,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "tamper_nonzero": {
+            "BpfCommand": 8,
+            "LoadNotLoader": 15,
+            "MapCreate": 1
+          },
+          "tamper_total": 24,
+          "time_source": "received_at",
+          "tree": {
+            "base_root": null,
+            "base_seq": null,
+            "generation": null,
+            "last_seq": null,
+            "mask": null,
+            "projection_root": null,
+            "tree_id": null
+          },
+          "verdict": "lsm-off",
+          "version_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-11-01T12:00:00+00:00",
+        "flags": [],
+        "kind": "shirudo.keepalive",
+        "ocsf_class_uid": null,
+        "unmapped": {}
+      },
+      {
+        "attributes": {
+          "counters": {
+            "BpfCommand": 8,
+            "LoadNotLoader": 15,
+            "MapCreate": 1
+          },
+          "is_monotonic": true,
+          "labels": {
+            "boot_id": "0b6f1d2e-4c3a-4e5f-9a8b-7c6d5e4f3a2b"
+          },
+          "metric": "shirudo.tamper",
+          "resource": {},
+          "scope": {
+            "name": "shirudo.keepalive"
+          },
+          "start_time": null,
+          "temporality": "cumulative",
+          "time": "2026-11-01T12:00:00+00:00",
+          "time_source": "received_at",
+          "unit": "{refusal}",
+          "value": 24
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-11-01T12:00:00+00:00",
+        "flags": [],
+        "kind": "metric.sample",
+        "ocsf_class_uid": null,
+        "unmapped": {}
+      },
+      {
+        "attributes": {
+          "counters": {},
+          "is_monotonic": true,
+          "labels": {
+            "boot_id": "0b6f1d2e-4c3a-4e5f-9a8b-7c6d5e4f3a2b"
+          },
+          "metric": "shirudo.integrity",
+          "resource": {},
+          "scope": {
+            "name": "shirudo.keepalive"
+          },
+          "start_time": null,
+          "temporality": "cumulative",
+          "time": "2026-11-01T12:00:00+00:00",
+          "time_source": "received_at",
+          "unit": "{refusal}",
+          "value": 0
+        },
+        "community_id": null,
+        "correlation": {},
+        "entity_keys": [],
+        "event_time": "2026-11-01T12:00:00+00:00",
+        "flags": [],
+        "kind": "metric.sample",
+        "ocsf_class_uid": null,
+        "unmapped": {}
+      }
+    ]
+  }
+]
